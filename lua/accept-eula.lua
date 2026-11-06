@@ -1,0 +1,1 @@
+OnAccept(); print("accepted")
