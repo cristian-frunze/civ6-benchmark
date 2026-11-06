@@ -305,13 +305,23 @@ class Run:
         return subprocess.Popen([sys.executable, str(REPO / "tools" / "archive.py"), "--run-dir", str(self.dir)],
                                 stdout=log, stderr=log)
 
+    def start_warroom(self) -> subprocess.Popen | None:
+        if not self.a.warroom:
+            return None
+        log = open(self.dir / "warroom.stderr", "a")
+        return subprocess.Popen([sys.executable, str(REPO / "tools" / "warroom" / "collect.py"), "--manifest",
+                                 str(self.dir / "game.json"), "--out", str(Path(self.a.warroom).expanduser()), "--publish"],
+                                stdout=log, stderr=log)
+
     def play(self) -> None:
         self.write_setup()
-        archiver = self.start_archive()
+        helpers = [self.start_archive(), self.start_warroom()]
         try:
             self.play_sessions()
         finally:
-            archiver.terminate()
+            for h in helpers:
+                if h:
+                    h.terminate()
             subprocess.run([sys.executable, str(REPO / "tools" / "archive.py"), "--run-dir", str(self.dir), "--once"])
 
     def play_sessions(self) -> None:
@@ -405,6 +415,7 @@ def main() -> None:
     ap.add_argument("--civ6mcp-dir", default="$env:USERPROFILE\\.civ6-mcp", help="where civ6-mcp writes its JSONL on the game PC (PowerShell path)")
     ap.add_argument("--claude-cmd", default="claude-acct {account}", help="command that runs Claude Code as {account}")
     ap.add_argument("--runtime-dir", default="~/.civ6-bench/runs")
+    ap.add_argument("--warroom", help="also run the war room collector, publishing the page to this folder")
     ap.add_argument("--max-sessions", type=int, default=400)
     ap.add_argument("--print-prompts", action="store_true", help="print the system and kickoff prompts and exit")
     a = ap.parse_args()
