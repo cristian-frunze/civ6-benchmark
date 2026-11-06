@@ -1,4 +1,7 @@
-# Civ 6 fastest settings for agent play (backs up originals first)
+# Civ 6 fastest settings for agent play (backs up originals first).
+# Window: borderless on the primary screen at its native size (pass that screen's physical pixels), so clicking
+# another screen doesn't minimize the game. UIUpscale 1.0 is 200%, to match Windows' 200% scaling on a 3K panel.
+param([int]$Width = 2880, [int]$Height = 1800, [int]$WindowMode = 2, [double]$UIUpscale = 1.0)
 $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
 $d = "$env:LOCALAPPDATA\Firaxis Games\Sid Meier's Civilization VI"
 $stamp = '20261106'
@@ -16,7 +19,7 @@ function Set-Opts($file, $map) {
   "updated $file"
 }
 Set-Opts 'AppOptions.txt' ([ordered]@{
-  RenderWidth = 1280; RenderHeight = 800; FullScreen = 0; PlayIntroVideo = 0; EnableTuner = 1; EnableAudio = 0
+  RenderWidth = $Width; RenderHeight = $Height; FullScreen = $WindowMode; UIUpscale = ('{0:F6}' -f $UIUpscale); PlayIntroVideo = 0; EnableTuner = 1; EnableAudio = 0
 })
 Set-Opts 'GraphicsOptions.txt' ([ordered]@{
   PerformanceImpact = 0; MemoryImpact = 0; MSAA = 0; ShadowMapResolution = 1024; ReducedAssetTextures = 1
@@ -33,6 +36,6 @@ Set-Opts 'UserOptions.txt' ([ordered]@{
 })
 "== verify"
 foreach ($f in 'AppOptions.txt','GraphicsOptions.txt','UserOptions.txt') {
-  Select-String -Path (Join-Path $d $f) -Pattern '^(RenderWidth|RenderHeight|FullScreen|PlayIntroVideo|EnableTuner|EnableAudio|PerformanceImpact|TerrainQuality|EnableShadows|EnableBloom|QuickMovement|QuickCombat|AutoEndTurn|StartInStrategicView|HasChosenTutorialLevel) ' | ForEach-Object { "  $f  $($_.Line)" }
+  Select-String -Path (Join-Path $d $f) -Pattern '^(RenderWidth|RenderHeight|FullScreen|UIUpscale|PlayIntroVideo|EnableTuner|EnableAudio|PerformanceImpact|TerrainQuality|EnableShadows|EnableBloom|QuickMovement|QuickCombat|AutoEndTurn|StartInStrategicView|HasChosenTutorialLevel) ' | ForEach-Object { "  $f  $($_.Line)" }
 }
 Get-ChildItem $d -Filter '*.bak-*' -Name | ForEach-Object { "  backup: $_" }

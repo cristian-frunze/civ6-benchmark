@@ -22,10 +22,11 @@ Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/pla
 ## Layout
 
 - `vendor/civ6-mcp` - the MCP server (git submodule, pinned)
-- `windows/` - PowerShell for the Windows game PC: fastest graphics settings, scheduled tasks that launch the game, click and take screenshots inside the desktop session
-- `remote/` - run PowerShell on the game PC over SSH, and copy files to and from it (`CIV_HOST`, default `zenbook`)
-- `tools/tuner_exec.py` - run Lua in any named Civ 6 Lua state over FireTuner
-- `lua/` - front-end Lua: accept the copyright screen, load a save from the main menu, list DLC ownership
+- `windows/` - PowerShell for the Windows game PC: fastest settings, scheduled tasks that launch the game, click, take screenshots and run jobs inside the desktop session, the long-lived civ6-mcp HTTP server, and the war room browser on the second screen
+- `remote/` - run PowerShell on the game PC over SSH, in session 0 (`zps.sh`) or in the desktop session (`zexec.sh`), copy files, and keep the SSH tunnel to the MCP server (`tunnel.sh`). `CIV_HOST` defaults to `zenbook`.
+- `tools/tuner_exec.py` - run Lua in any named Civ 6 Lua state over FireTuner (only while no MCP server holds the connection)
+- `tools/mcp_call.py` - call civ6-mcp tools directly, for smoke tests and timing
+- `lua/` - front-end Lua: accept the copyright screen, start a new game or load a save from the main menu, list DLC ownership
 - `docs/setup.md` - how the rig is put together and what we learned
 
 ## Credits

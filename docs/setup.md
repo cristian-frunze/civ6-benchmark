@@ -6,13 +6,19 @@ The game runs on a Windows laptop: an Asus Zenbook Duo with a Core Ultra 9 185H,
 
 1. Install Civ 6 from Steam. civ6-mcp expects the **Gathering Storm** ruleset, and the CivBench scenario saves also need the New Frontier Pass civs. Check ownership with `lua/list-mods.lua`: files on disk don't mean the account owns the DLC.
 2. Run `windows/apply-fast-settings.ps1`. It backs up the three options files, then sets:
-   - windowed 1280x800, no audio, no intro video
+   - borderless window at the primary screen's size (default 2880x1800) with the UI at 200%, no audio, no intro video
    - every graphics option at minimum, with shadows, bloom, lighting, clouds and AO off
    - quick movement and quick combat, no combat camera, no vignettes or historic-moment animations
    - start in strategic view, tutorial and expansion intro screens marked as seen
    - `EnableTuner 1`, `AutoEndTurn 0`
 3. Run `windows/setup-civ6-mcp.ps1` (clones civ6-mcp and runs `uv sync`).
-4. Run `windows/register-tasks.ps1`. It registers `Civ6Launch`, `Civ6Shot` and `Civ6Click` as interactive scheduled tasks.
+4. Run `windows/register-tasks.ps1`. It registers these interactive scheduled tasks:
+   - `Civ6Launch`: starts the DX11 build
+   - `Civ6Shot` and `Civ6Click`: screenshot and click
+   - `Civ6Exec`: runs any PowerShell file in the desktop session, via `remote/zexec.sh`
+   - `Civ6Mcp`: the long-lived civ6-mcp HTTP server
+5. On the agent machine, run `remote/tunnel.sh` (an SSH tunnel to the server). Agents then use `http://127.0.0.1:18771/mcp`.
+6. Optional, for watching: `windows/open-warroom.ps1` opens the war room page full screen on the second screen. It reads its URL from a local `warroom.json`.
 
 ## Things that were not obvious
 
@@ -24,4 +30,10 @@ The game runs on a Windows laptop: an Asus Zenbook Duo with a Core Ultra 9 185H,
 - **Front-end save names include the extension** (`0A_GROUND_CONTROL.Civ6Save`).
 - **OneDrive moves Documents.** Civ 6 writes saves to `OneDrive\Documents\My Games`, while civ6-mcp looks in `%USERPROFILE%\Documents\My Games`. A directory junction from the second path to the first fixes it.
 - **"One or more Mods has not been purchased"** means the save needs DLC the Steam account doesn't own, even when the files are installed. `Modding.GetInstalledMods()` reports `Allowance=false` for those.
+- **FireTuner takes one client at a time.** While a client is connected, the game stops listening on 4318. So civ6-mcp runs as one long-lived HTTP server (`windows/civ_mcp_http.py`) that holds the only connection. Agents connect to that server, and nothing else talks to the tuner during a game. Over SSH stdio, every agent restart killed the server abruptly, and civ6-mcp warns that an abrupt tuner disconnect can crash the game.
+- **The MCP SDK runs the server lifespan once per client session.** civ6-mcp opens its tuner connection in the lifespan, so the HTTP wrapper shares one lifespan across sessions. It also no-ops civ6-mcp's side web API on port 8000, whose shutdown took the main server down.
+- **Use the DX11 build on the Zenbook Duo.** DX12 crashed with "Device Reset" (DXGI 0x887a0005) when the second screen turned on. Steam asks which build to launch the first time; tick "Always use this option".
+- **Borderless, not fullscreen.** Exclusive fullscreen minimizes when you click the other screen. `FullScreen 2` is borderless at the desktop size, and `UIUpscale 1.0` is 200%.
+- **Tailscale DNS may be off on the game PC.** If it is, the war room browser maps the share hostname to the server's tailnet IP with `--host-resolver-rules`, in its own profile, so the laptop's DNS settings stay as they are.
+- **civ6-mcp is built for Gathering Storm.** On the base game, `get_game_overview` fails on `GetFavor()`, and about 60 Lua call sites use Rise and Fall or Gathering Storm functions.
 - **FireTuner is disabled in every multiplayer mode, hotseat included.** Multi-agent games need the file-based MCP Bridge UI mod from Johnor12/civ6-mcp, or single-player puppeteering (civ6-mcp `docs/agent-vs-agent.md`).
