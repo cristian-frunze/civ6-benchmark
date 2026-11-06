@@ -303,6 +303,14 @@ def parse_remote(out: str) -> Fetch:
 # ── civ6-mcp telemetry ──────────────────────────────────────────────────
 
 
+def nice_city(raw: str | None) -> str:
+    """civ6-mcp records city names as localization keys (LOC_CITY_NAME_SAN_FRANCISCO): show "San Francisco"."""
+    s = (raw or "").strip()
+    if s.upper().startswith("LOC_CITY_NAME_"):
+        s = " ".join(w.capitalize() for w in s[len("LOC_CITY_NAME_"):].split("_"))
+    return s
+
+
 def nice_civ(raw: str | None) -> str:
     s = (raw or "").strip()
     for p in ("CIVILIZATION_", "LEADER_"):
@@ -547,7 +555,7 @@ class Telemetry:
         except (TypeError, ValueError):
             return None
         city_list = [
-            {"x": c.get("x"), "y": c.get("y"), "pid": c.get("pid"), "pop": c.get("pop"), "name": c.get("name") or ""}
+            {"x": c.get("x"), "y": c.get("y"), "pid": c.get("pid"), "pop": c.get("pop"), "name": nice_city(c.get("name"))}
             for c in cities if isinstance(c, dict)
         ]
         rev = hashlib.sha1(own + json.dumps(city_list).encode()).hexdigest()[:10]
