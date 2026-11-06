@@ -346,6 +346,48 @@ async def issue_orders(ctx: Context, orders: str) -> str:
 
 if os.environ.get("CIV_MCP_DISABLE_LUA"):
     mcp._tool_manager.remove_tool("run_lua")
+
+# civ6-mcp binds its call log, diary and heartbeat to the game only inside get_game_overview. An agent resumed
+# after a server restart can play for turns from end_turn results alone, and until it asks for the overview every
+# record waits in memory, untagged by turn (game 1, turns 101-105). Bind on the first call of any tool instead.
+_log = logging.getLogger("civ_mcp_http")
+
+
+async def _bind_game(ctx) -> None:
+    lc = ctx.request_context.lifespan_context
+    if lc.logger.bound:
+        return
+    civ, seed = await lc.game.get_game_identity()
+    if civ == "unknown":
+        return
+    lines = await lc.game.conn.execute_read("print('TURN|' .. Game.GetCurrentGameTurn()) print('---END---')")
+    turn = next((int(ln.split("|")[1]) for ln in lines if ln.startswith("TURN|")), None)
+    if turn is not None:
+        lc.logger.set_turn(turn)
+        lc.spatial.set_turn(turn)
+    lc.logger.bind_game(civ, seed)
+    lc.spatial.bind_game(civ, seed)
+    srv.heartbeat.bind_game(civ, seed)
+    lc.game.spatial = lc.spatial
+    _log.info("Bound the call log to %s_%s at turn %s", civ, seed, turn)
+
+
+def _bound_first(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        if ctx is not None:
+            try:
+                await _bind_game(ctx)
+            except Exception:  # never block the call itself
+                _log.warning("binding the call log failed", exc_info=True)
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
+
+for _tool in mcp._tool_manager.list_tools():
+    _tool.fn = _bound_first(_tool.fn)
 mcp.settings.host = "127.0.0.1"
 mcp.settings.port = int(os.environ.get("CIV_MCP_PORT", "8771"))
 mcp.run(transport="streamable-http")

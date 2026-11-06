@@ -131,7 +131,12 @@ class Turns:
     """Maps a time on this machine to the game turn, from civ6-mcp's log of finished calls."""
 
     def __init__(self, log: list[dict], events: list[dict]):
-        rows = sorted((r["ts"], int(r.get("turn") or 0), r.get("tool")) for r in log if isinstance(r.get("ts"), (int, float)))
+        rows, turn = [], 0
+        for r in sorted((r for r in log if isinstance(r.get("ts"), (int, float))), key=lambda r: r["ts"]):
+            # A call made after a server restart and before civ6-mcp re-reads the turn has none: it is still the
+            # turn of the call before it.
+            turn = int(r["turn"]) if r.get("turn") is not None else turn
+            rows.append((r["ts"], turn, r.get("tool")))
         ends_log = [ts for ts, _, tool in rows if tool == "end_turn"]
         ends_tx = [e["ts"] for e in events if e["kind"] == "tool_result" and e["tool"] == "end_turn"]
         # Pair each end_turn result with the nearest logged end_turn, so a call that only one side has (a harness
