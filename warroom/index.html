@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Civ 6 war room</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app" id="app" data-layout="side" data-n="0">
+    <header class="hdr">
+      <div class="hdr-id">
+        <div class="kicker"><span class="hexmark" aria-hidden="true"></span>Civ VI war room</div>
+        <h1 id="title">Waiting for data</h1>
+      </div>
+      <div class="hdr-stats">
+        <div class="stat stat-turn"><span class="lbl">Turn</span><span class="val" id="turn">-</span></div>
+        <div class="stat"><span class="lbl">Elapsed</span><span class="val" id="elapsed">-</span></div>
+        <div class="stat"><span class="lbl">API cost</span><span class="val" id="cost">-</span><span class="sub" id="tokens"></span></div>
+      </div>
+      <div class="hdr-live">
+        <div class="demo" id="demo" hidden>Demo data</div>
+        <div class="live" id="live"><span class="dot"></span><span id="live-text">connecting</span></div>
+        <div class="warn" id="warn" hidden></div>
+        <div class="phase" id="phase" hidden></div>
+      </div>
+      <div class="gameover" id="gameover" hidden></div>
+    </header>
+    <main class="grid">
+      <section class="panel map-panel" id="map-panel">
+        <span class="plabel">Theater</span>
+        <canvas id="map" aria-label="World map"></canvas>
+        <div class="empty" id="map-empty">No map yet. It appears after the first turn ends.</div>
+        <div class="tip" id="tip" hidden></div>
+      </section>
+      <section class="panel board-panel">
+        <span class="plabel">Standings</span>
+        <div class="board-wrap"><table class="board" id="board"></table></div>
+        <div class="empty" id="board-empty">No diary rows yet.</div>
+      </section>
+      <section class="agents" id="agents"></section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -17,16 +17,40 @@ All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), s
 
 Every game reports API-equivalent cost: input, output, cache-read and cache-write tokens, priced at list API rates, even though runs use Claude subscriptions.
 
+## Harness
+
+Each agent is Claude Code in headless mode (`claude -p`) with the civ6-mcp tools and nothing else: no shell, files, web, CLAUDE.md, memory, hooks or skills (`tools/run_game.py` has the flags). Its system prompt is the CivBench playbook (or CivBench's minimal baseline for the rules-only game), plus three notes in [`prompts/`](prompts/): what the base game lacks, the batch tools below, and that nobody is watching. One line of the subscription's organization instructions still reaches the model; it is about connecting apps and has nothing to do with Civ.
+
+Three changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
+
+- **Base game.** civ6-mcp targets Gathering Storm. Its Lua is rewritten on the fly to call `CB_` stand-ins for expansion APIs (`lua/base-game-compat.lua`), which return neutral values when the base game lacks them. Tools for systems the base game doesn't have (governors, dedications, World Congress) are removed.
+- **Batch tools.** A model step takes much longer than a tool call (0.3-1.5 s), so agents get `get_turn_briefing` (overview, units, cities and notifications in one call) and `issue_orders` (a list of unit, city and research orders in one call). Every inner call is still logged as its own tool call.
+- **One shared tuner connection** over HTTP, see [setup](docs/setup.md).
+
+## What each game records
+
+`tools/run_game.py` starts `tools/archive.py` next to the agent, which keeps a complete record of the game in the run directory:
+
+- **Every tool call** with its full parameters and result, timing and turn (civ6-mcp's log).
+- **Every turn**: a row per civilization (score, yields, cities, techs, military, religion, ...) and the agent's five reflections (tactical, strategic, tooling, planning, hypothesis).
+- **The agent's reasoning**: each Claude Code session's transcript and stream, with thinking summaries (`--thinking-display summarized`), messages, tool calls and results, and token usage for API-equivalent cost.
+- **A screenshot** of the screens at the start of each turn, and **every autosave**, so any turn can be reloaded.
+- Per-turn map ownership deltas and city snapshots, for replays.
+
 Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/plan.md).
 
 ## Layout
 
 - `vendor/civ6-mcp` - the MCP server (git submodule, pinned)
-- `windows/` - PowerShell for the Windows game PC: fastest settings, scheduled tasks that launch the game, click, take screenshots and run jobs inside the desktop session, the long-lived civ6-mcp HTTP server, and the war room browser on the second screen
+- `windows/` - PowerShell for the Windows game PC: fastest settings, scheduled tasks that launch the game, click, take screenshots and run jobs inside the desktop session, the long-lived civ6-mcp HTTP server (`civ_mcp_http.py`), the archive's sync and per-turn capture, and the war room browser on the second screen
+- `tools/run_game.py` - run one game with a Claude Code agent across sessions and accounts until it ends
+- `tools/archive.py` - keep the full record of a running game (see above)
+- `tools/warroom/` and `warroom/` - the live war room page: map, standings, each agent's latest moves, thoughts and API cost
 - `remote/` - run PowerShell on the game PC over SSH, in session 0 (`zps.sh`) or in the desktop session (`zexec.sh`), copy files, and keep the SSH tunnel to the MCP server (`tunnel.sh`). `CIV_HOST` defaults to `zenbook`.
 - `tools/tuner_exec.py` - run Lua in any named Civ 6 Lua state over FireTuner (only while no MCP server holds the connection)
 - `tools/mcp_call.py` - call civ6-mcp tools directly, for smoke tests and timing
-- `lua/` - front-end Lua: accept the copyright screen, start a new game or load a save from the main menu, list DLC ownership
+- `lua/` - front-end Lua (accept the copyright screen, start a new game or load a save from the main menu, list DLC ownership) and the base-game compatibility prelude
+- `prompts/` - the notes added to every agent's system prompt
 - `docs/setup.md` - how the rig is put together and what we learned
 
 ## Credits

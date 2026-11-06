@@ -1,0 +1,186 @@
+"""Archive everything about one game run while it plays, so the run can be replayed and analyzed later.
+
+tools/run_game.py starts this next to the agent and runs a final pass when the game stops. It reads the run
+directory's game.json (game key, run id) and sessions.json (transcripts) and keeps <run dir>/archive/ in sync:
+
+  civ6mcp/       civ6-mcp's own records for this game and run, mirrored from the game PC:
+                   log_*.jsonl       every tool call: params, the full result, duration, turn
+                   diary_*.jsonl     per turn, a row per civ (score, yields, techs, military, religion, ...)
+                                     and the agent's five reflections (tactical, strategic, tooling, planning,
+                                     hypothesis)
+                   diary_*_cities.jsonl, mapturns_*.jsonl, mapstatic_*.json, spatial_*.jsonl, heartbeat.json
+  transcripts/   each Claude Code session transcript: the agent's thinking, messages, tool calls and results
+  shots/         a screenshot of both screens at the start of each turn (T0042.jpg)
+  saves/         every civ6-mcp autosave (0_MCP_0042.Civ6Save), so any turn can be reloaded
+  archive.log
+
+The game PC side is windows/archive-sync.ps1 (incremental file sync, one SSH call per cycle) and
+windows/archive-turn.ps1 (the Civ6Archive task: screenshot and saves, started on each new turn).
+
+    python3 tools/archive.py --run-dir ~/.civ6-bench/runs/g1-standard [--interval 20] [--once]
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOST = os.environ.get("CIV_HOST", "zenbook")
+# The spec goes on stdin: with hundreds of archived files it outgrows a Windows command line.
+_RUN_SYNC = "& (Join-Path $env:USERPROFILE 'civ6-bench\\archive-sync.ps1')"
+SYNC_CMD = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + base64.b64encode(
+    _RUN_SYNC.encode("utf-16-le")).decode()
+BENCH = "%USERPROFILE%\\civ6-bench"
+BUDGET = 6_000_000  # bytes per SSH call; the rest comes in the next call
+
+
+def stamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def tail_hash(path: Path, size: int) -> str:
+    with open(path, "rb") as f:
+        start = max(0, size - 4096)
+        f.seek(start)
+        return hashlib.sha1(f.read(size - start)).hexdigest()
+
+
+class Archiver:
+    def __init__(self, run_dir: Path):
+        self.run = run_dir
+        self.out = run_dir / "archive"
+        for sub in ("civ6mcp", "transcripts", "shots", "saves"):
+            (self.out / sub).mkdir(parents=True, exist_ok=True)
+        self.state_file = self.out / "state.json"
+        self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {}
+        self.state.setdefault("since", int(time.time()) - 60)
+        self.state.setdefault("archived_turns", [])
+
+    def log(self, msg: str) -> None:
+        with open(self.out / "archive.log", "a") as f:
+            f.write(f"{stamp()} {msg}\n")
+
+    def save_state(self) -> None:
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.state, indent=2))
+        tmp.replace(self.state_file)
+
+    def manifest(self) -> dict:
+        return json.loads((self.run / "game.json").read_text())
+
+    def have(self) -> dict:
+        have = {}
+        for key in ("civ6mcp", "shots", "saves"):
+            for p in (self.out / key).iterdir():
+                if p.is_file():
+                    size = p.stat().st_size
+                    have[f"{key}/{p.name}"] = {"size": size, "tail": tail_hash(p, size) if size else ""}
+        return have
+
+    def spec(self, trigger: dict | None) -> dict:
+        m = self.manifest()
+        game_dir = f"{BENCH}\\archive\\{m['game_id']}"
+        spec = {
+            "roots": [
+                {"key": "civ6mcp", "dir": "%USERPROFILE%\\.civ6-mcp",
+                 "match": [f"*_{m['game_key']}*", "heartbeat.json"]},
+                {"key": "shots", "dir": f"{game_dir}\\shots", "match": ["*.jpg"]},
+                {"key": "saves", "dir": f"{game_dir}\\saves", "match": ["*.Civ6Save"]},
+            ],
+            "have": self.have(),
+            "budget": BUDGET,
+        }
+        if trigger:
+            spec["trigger"] = trigger
+        return spec
+
+    def remote(self, spec: dict) -> tuple[int, bool]:
+        """One sync call. Returns (files updated, whether more is waiting)."""
+        b64 = base64.b64encode(json.dumps(spec).encode()).decode()
+        out = subprocess.run(["ssh", "-o", "BatchMode=yes", HOST, SYNC_CMD], input=b64, capture_output=True,
+                             text=True, timeout=300).stdout
+        n, more = 0, False
+        for line in out.splitlines():
+            if line.strip() == "MORE":
+                more = True
+            if not line.startswith("F\t"):
+                continue
+            _, name, size, offset, data = (line.split("\t") + [""])[:5]
+            key, fname = name.split("/", 1)
+            path = self.out / key / fname
+            offset = int(offset)
+            mode = "r+b" if path.exists() else "wb"
+            with open(path, mode) as f:
+                f.seek(offset)
+                f.write(base64.b64decode(data))
+                f.truncate()
+            n += 1
+        return n, more
+
+    def heartbeat_turn(self) -> int:
+        try:
+            return int(json.loads((self.out / "civ6mcp" / "heartbeat.json").read_text()).get("turn") or 0)
+        except Exception:
+            return 0
+
+    def copy_transcripts(self) -> int:
+        sessions_file = self.run / "sessions.json"
+        if not sessions_file.exists():
+            return 0
+        n = 0
+        for s in json.loads(sessions_file.read_text()):
+            src = Path(s["transcript"]) if s.get("transcript") else None
+            if not src or not src.exists():
+                continue
+            dest = self.out / "transcripts" / f"{s['n']:03d}-{s['session_id']}.jsonl"
+            if not dest.exists() or dest.stat().st_size != src.stat().st_size:
+                shutil.copyfile(src, dest)
+                n += 1
+        return n
+
+    def cycle(self) -> None:
+        turn = self.heartbeat_turn()
+        trigger = None
+        if turn and turn not in self.state["archived_turns"]:
+            trigger = {"game": self.manifest()["game_id"], "turn": turn, "since": self.state["since"]}
+            self.state["archived_turns"].append(turn)
+            self.save_state()
+        total, more, calls = 0, True, 0
+        while more and calls < 20:
+            n, more = self.remote(self.spec(trigger if calls == 0 else None))
+            total += n
+            calls += 1
+        t = self.copy_transcripts()
+        if total or t or trigger:
+            self.log(f"turn {turn}: {total} file updates, {t} transcripts" + (f", archived turn {turn}" if trigger else ""))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--run-dir", required=True, type=lambda s: Path(s).expanduser())
+    ap.add_argument("--interval", type=float, default=20)
+    ap.add_argument("--once", action="store_true", help="one pass, then exit (run_game.py runs this at the end)")
+    a = ap.parse_args()
+    arch = Archiver(a.run_dir)
+    while True:
+        try:
+            arch.cycle()
+        except Exception as e:  # keep archiving through SSH drops and laptop sleeps
+            arch.log(f"cycle failed: {e!r}")
+            print(f"archive: cycle failed: {e!r}", file=sys.stderr)
+        if a.once:
+            return
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    main()
