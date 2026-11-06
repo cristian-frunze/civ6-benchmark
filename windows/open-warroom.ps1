@@ -1,4 +1,4 @@
-# Open the war room page full screen on the second (non-primary) screen, in its own Chrome app window and profile.
+# Open the war room page full screen on the screen the game is not on, in its own Chrome app window and profile.
 # Reads %USERPROFILE%\civ6-bench\warroom.json: {"url": "https://<host>/share/civ6-warroom/", "ip": "<host's tailnet IP>"}
 # The IP is mapped in this browser only (--host-resolver-rules), for PCs whose Tailscale DNS is off. Kept out of the repo.
 # --test-type hides the "unsupported command-line flag" bar, which would otherwise print the IP on screen.
@@ -7,9 +7,20 @@ $dir = Join-Path $env:USERPROFILE 'civ6-bench'
 $cfg = Get-Content (Join-Path $dir 'warroom.json') -Raw | ConvertFrom-Json
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 $prof = Join-Path $dir 'chrome-warroom'
-Add-Type -AssemblyName System.Windows.Forms
-$scr = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
-if (-not $scr) { $scr = [System.Windows.Forms.Screen]::PrimaryScreen }
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type 'using System; using System.Runtime.InteropServices; public class WinR { [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; } [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); }'
+# The game's screen is the one holding the centre of its window; which screen is primary can change.
+$game = Get-Process CivilizationVI* -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+$scr = $null
+if ($game) {
+  $r = New-Object WinR+RECT
+  [WinR]::GetWindowRect($game.MainWindowHandle, [ref]$r) | Out-Null
+  $c = New-Object System.Drawing.Point ([int](($r.L + $r.R) / 2)), ([int](($r.T + $r.B) / 2))
+  $scr = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Bounds.Contains($c) } | Select-Object -First 1
+} else {
+  $scr = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+}
+if (-not $scr) { "only one screen is free of the game: not opening the war room over it"; exit 0 }
 $b = $scr.Bounds   # logical (DPI-scaled) coordinates, which is what Chrome's window flags take
 Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like "*chrome-warroom*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 500

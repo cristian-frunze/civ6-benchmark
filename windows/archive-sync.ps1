@@ -3,7 +3,8 @@
 # and "MORE" when the byte budget ran out (the next call continues). A file whose bytes before the archive's copy
 # end changed (civ6-mcp rewrites its diary when it merges reflections) is sent again from offset 0.
 # The spec comes on stdin (or -Spec) as base64 JSON:
-#   {"roots": [{"key": "civ6mcp", "dir": "%USERPROFILE%\\.civ6-mcp", "match": ["*_<game>_<run>*", "heartbeat.json"]}],
+#   {"roots": [{"key": "civ6mcp", "dir": "%USERPROFILE%\\.civ6-mcp", "match": ["*_<game>_<run>*", "heartbeat.json"]},
+#              {"key": "shots", "dir": "...", "match": ["*.jpg"], "after": "T0041.jpg"}],   after: skip names sorting before it
 #    "have": {"civ6mcp/<name>": {"size": N, "tail": "<sha1 of the 4096 bytes before N>"}},
 #    "budget": 6000000,
 #    "trigger": {"game": "<id>", "turn": N}}   optional: archive this turn (screenshot and saves, windows/archive-turn.ps1)
@@ -39,6 +40,7 @@ foreach ($root in $s.roots) {
     if (-not (Test-Path $dir)) { continue }
     $files = foreach ($m in $root.match) { Get-ChildItem -Path $dir -Filter $m -File -ErrorAction SilentlyContinue }
     foreach ($f in ($files | Sort-Object FullName -Unique)) {
+        if ($root.after -and [string]::CompareOrdinal($f.Name, [string]$root.after) -lt 0) { continue }
         $name = "$($root.key)/$($f.Name)"
         $size = $f.Length
         $have = $s.have.PSObject.Properties[$name]

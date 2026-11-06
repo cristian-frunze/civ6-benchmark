@@ -230,7 +230,9 @@ class RemoteSource:
 
     def script(self, reads: dict[str, tuple[int, int]]) -> str:
         if self.win_dir:
-            d = "'" + self.win_dir.replace("'", "''") + "'"
+            # %USERPROFILE%-style paths expand on the game PC; $env:USERPROFILE is accepted for older manifests.
+            w = self.win_dir.replace("$env:USERPROFILE", "%USERPROFILE%").replace("'", "''")
+            d = f"[Environment]::ExpandEnvironmentVariables('{w}')"
         else:
             d = "(Join-Path $env:USERPROFILE '.civ6-mcp')"
         req = "\n".join(

@@ -17,7 +17,7 @@ directory's game.json (game key, run id) and sessions.json (transcripts) and kee
 The game PC side is windows/archive-sync.ps1 (incremental file sync, one SSH call per cycle) and
 windows/archive-turn.ps1 (the Civ6Archive task: screenshot and saves, started on each new turn).
 
-    python3 tools/archive.py --run-dir ~/.civ6-bench/runs/g1-standard [--interval 20] [--once]
+    python3 tools/archive.py --run-dir ~/.civ6-bench/runs/g1-standard [--interval 10] [--once]
 """
 
 from __future__ import annotations
@@ -77,26 +77,36 @@ class Archiver:
     def manifest(self) -> dict:
         return json.loads((self.run / "game.json").read_text())
 
-    def have(self) -> dict:
-        have = {}
+    def have(self) -> tuple[dict, dict]:
+        """What the archive holds: size and tail hash per file, and for shots and saves a name watermark.
+
+        Shots (T0042.jpg) and saves (0_MCP_0042) come one per turn, so only the newest of each is listed by size
+        (it may still have been copying) and the game PC skips names that sort before it. That keeps the spec,
+        which goes on stdin, a few KB for the whole game: Windows OpenSSH stalls on stdin past about 8 KB.
+        """
+        have, after = {}, {}
         for key in ("civ6mcp", "shots", "saves"):
-            for p in (self.out / key).iterdir():
-                if p.is_file():
-                    size = p.stat().st_size
-                    have[f"{key}/{p.name}"] = {"size": size, "tail": tail_hash(p, size) if size else ""}
-        return have
+            files = sorted(p for p in (self.out / key).iterdir() if p.is_file())
+            if key in ("shots", "saves") and files:
+                after[key] = files[-1].name
+                files = files[-1:]
+            for p in files:
+                size = p.stat().st_size
+                have[f"{key}/{p.name}"] = {"size": size, "tail": tail_hash(p, size) if size else ""}
+        return have, after
 
     def spec(self, trigger: dict | None) -> dict:
         m = self.manifest()
         game_dir = f"{BENCH}\\archive\\{m['game_id']}"
+        have, after = self.have()
         spec = {
             "roots": [
                 {"key": "civ6mcp", "dir": "%USERPROFILE%\\.civ6-mcp",
                  "match": [f"*_{m['game_key']}*", "heartbeat.json"]},
-                {"key": "shots", "dir": f"{game_dir}\\shots", "match": ["*.jpg"]},
-                {"key": "saves", "dir": f"{game_dir}\\saves", "match": ["*.Civ6Save"]},
+                {"key": "shots", "dir": f"{game_dir}\\shots", "match": ["*.jpg"], "after": after.get("shots")},
+                {"key": "saves", "dir": f"{game_dir}\\saves", "match": ["*.Civ6Save"], "after": after.get("saves")},
             ],
-            "have": self.have(),
+            "have": have,
             "budget": BUDGET,
         }
         if trigger:
@@ -167,7 +177,7 @@ class Archiver:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True, type=lambda s: Path(s).expanduser())
-    ap.add_argument("--interval", type=float, default=20)
+    ap.add_argument("--interval", type=float, default=10)
     ap.add_argument("--once", action="store_true", help="one pass, then exit (run_game.py runs this at the end)")
     a = ap.parse_args()
     arch = Archiver(a.run_dir)

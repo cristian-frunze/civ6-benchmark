@@ -295,10 +295,39 @@ class Run:
                              capture_output=True, text=True).stdout
         print(f"run_game: {out.strip()}", file=sys.stderr)
         if a.load_save:
-            out = subprocess.run(["uv", "run", "-q", "--with", "mcp==1.26.0", "python", str(REPO / "tools" / "mcp_call.py"),
-                                  "--url", a.mcp_url, "--chars", "2000", "restart_and_load", json.dumps({"save_name": a.load_save})],
-                                 capture_output=True, text=True, timeout=600, cwd=REPO).stdout
+            self.load_clean(a.load_save)
+
+    def mcp(self, tool: str, args: dict | None = None, timeout: int = 120) -> str:
+        """One civ6-mcp tool call through tools/mcp_call.py; returns its printed result."""
+        return subprocess.run(["uv", "run", "-q", "--with", "mcp==1.26.0", "python", str(REPO / "tools" / "mcp_call.py"),
+                               "--url", self.a.mcp_url, "--chars", "4000", tool, json.dumps(args or {})],
+                              capture_output=True, text=True, timeout=timeout, cwd=REPO).stdout
+
+    def load_clean(self, save: str, tries: int = 3) -> None:
+        """Load a turn-start save and check that every unit still has all its moves before the agent starts.
+
+        civ6-mcp dismisses the leader screen by clicking CONTINUE GAME low on the screen. When the screen closes
+        between mouse down and up, the click lands on the map and walks the selected unit (game 1's settler lost
+        turn 1 this way). A turn-start save has every unit at full moves, so anything less means a stray click:
+        load again.
+        """
+        for attempt in range(1, tries + 1):
+            out = self.mcp("restart_and_load", {"save_name": save}, timeout=600)
             print(f"run_game: {out.strip()}", file=sys.stderr)
+            units = ""
+            for _ in range(12):  # the FireTuner port can take a few seconds to open after the load
+                time.sleep(5)
+                units = self.mcp("get_units")
+                if re.search(r"\d+ units:", units):
+                    break
+            moves = re.findall(r"^\s*(.+?) at \((\d+,\d+)\).*?moves ([\d.]+)/([\d.]+)", units, re.M)
+            spent = [f"{u} at ({xy}) {m}/{mx}" for u, xy, m, mx in moves if float(m) < float(mx)]
+            if moves and not spent:
+                print(f"run_game: start check passed: {len(moves)} units at full moves", file=sys.stderr)
+                return
+            why = f"units already moved: {'; '.join(spent)}" if spent else f"no unit list: {units.strip()[-300:]}"
+            print(f"run_game: start check failed (load {attempt}/{tries}): {why}", file=sys.stderr)
+        raise SystemExit(f"run_game: {save} did not load cleanly after {tries} tries; not starting the agent")
 
     def start_archive(self) -> subprocess.Popen:
         log = open(self.dir / "archive.stderr", "a")
@@ -412,7 +441,7 @@ def main() -> None:
     ap.add_argument("--model", default="claude-opus-5-5")
     ap.add_argument("--effort", default="high")
     ap.add_argument("--mcp-url", default="http://127.0.0.1:18771/mcp")
-    ap.add_argument("--civ6mcp-dir", default="$env:USERPROFILE\\.civ6-mcp", help="where civ6-mcp writes its JSONL on the game PC (PowerShell path)")
+    ap.add_argument("--civ6mcp-dir", default="%USERPROFILE%\\.civ6-mcp", help="where civ6-mcp writes its JSONL on the game PC")
     ap.add_argument("--claude-cmd", default="claude-acct {account}", help="command that runs Claude Code as {account}")
     ap.add_argument("--runtime-dir", default="~/.civ6-bench/runs")
     ap.add_argument("--warroom", help="also run the war room collector, publishing the page to this folder")
