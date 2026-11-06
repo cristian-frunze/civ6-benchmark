@@ -1,4 +1,5 @@
-# Civ 6 fastest settings for agent play (backs up originals first).
+# Civ 6 fastest settings for agent play (backs up originals first). TutorialLevel -1 turns the tutorial off: its
+# Advisor popups block end_turn, and civ6-mcp does not dismiss them.
 # Window: borderless on the primary screen at its native size (pass that screen's physical pixels), so clicking
 # another screen doesn't minimize the game. UIUpscale 1.0 is 200%, to match Windows' 200% scaling on a 3K panel.
 param([int]$Width = 2880, [int]$Height = 1800, [int]$WindowMode = 2, [double]$UIUpscale = 1.0)
@@ -31,11 +32,11 @@ Set-Opts 'GraphicsOptions.txt' ([ordered]@{
 Set-Opts 'UserOptions.txt' ([ordered]@{
   QuickMovement = 1; QuickCombat = 1; AutoEndTurn = 0; AI_MasterLogging = 0; NetMessageLogs = 0
   PlayVignettes = 0; PlayHistoricMomentAnimation = 0; LookAtPlayerTurnCombat = 0; LookAtPlayerOffTurnCombat = 0
-  HasChosenTutorialLevel = 1; HasSeenXP1FeaturesScreen = 1; HasSeenXP2FeaturesScreen = 1
+  TutorialLevel = -1; HasChosenTutorialLevel = 1; HasSeenXP1FeaturesScreen = 1; HasSeenXP2FeaturesScreen = 1
   HideXP1FeaturesScreen = 1; HideXP2FeaturesScreen = 1; StartInStrategicView = 1
 })
 "== verify"
 foreach ($f in 'AppOptions.txt','GraphicsOptions.txt','UserOptions.txt') {
-  Select-String -Path (Join-Path $d $f) -Pattern '^(RenderWidth|RenderHeight|FullScreen|UIUpscale|PlayIntroVideo|EnableTuner|EnableAudio|PerformanceImpact|TerrainQuality|EnableShadows|EnableBloom|QuickMovement|QuickCombat|AutoEndTurn|StartInStrategicView|HasChosenTutorialLevel) ' | ForEach-Object { "  $f  $($_.Line)" }
+  Select-String -Path (Join-Path $d $f) -Pattern '^(RenderWidth|RenderHeight|FullScreen|UIUpscale|PlayIntroVideo|EnableTuner|EnableAudio|PerformanceImpact|TerrainQuality|EnableShadows|EnableBloom|QuickMovement|QuickCombat|AutoEndTurn|StartInStrategicView|TutorialLevel|HasChosenTutorialLevel) ' | ForEach-Object { "  $f  $($_.Line)" }
 }
 Get-ChildItem $d -Filter '*.bak-*' -Name | ForEach-Object { "  backup: $_" }
