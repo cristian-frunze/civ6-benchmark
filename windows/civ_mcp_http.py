@@ -75,82 +75,21 @@ mcp._mcp_server.lifespan = _shared_lifespan
 
 # --- Base game -------------------------------------------------------------------------------------------
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_CB_METHODS = (
-    "GetFavor|GetGovernors|GetAllianceType|GetAllianceLevel|GetGrievancesAgainst|GetResourceStockpileCap|"
-    "GetResourceAccumulationPerTurn|GetResourceImportPerTurn|GetUnitResourceDemandPerTurn|GetCulturalIdentity|"
-    "GetDiplomaticVictoryPoints|GetScienceVictoryPoints|GetScienceVictoryPointsTotalNeeded|GetNextRebelledCity"
-)
-_XP_TABLES = (
-    "Governors|GovernorPromotions|GovernorPromotionSets|GovernorPromotionPrereqs|CommemorationTypes|"
-    "Resolutions|Alliances|GovernmentBonuses"
-)
-_RULES = [
-    (re.compile(r":(%s)\(" % _CB_METHODS), r":CB_\1("),
-    (re.compile(r"\bGame\.GetEras\(\)"), "CB_ERAS()"),
-    (re.compile(r"\bGame\.GetWorldCongress\(\)"), "CB_WC()"),
-    (re.compile(r"\bGameInfo\.(%s)\b" % _XP_TABLES), r"(GameInfo.\1 or CB_EMPTY)"),
-    # Base-game alliances (one type) unlock with Civil Service; Rise and Fall moved them to Diplomatic Service.
-    # Only the alliance checks: the delegation check rightly stays on Diplomatic Service.
-    (re.compile(r'local civic = GameInfo\.Civics\["CIVIC_DIPLOMATIC_SERVICE"\]'),
-     'local civic = GameInfo.Civics["CIVIC_CIVIL_SERVICE"]'),
-    (re.compile(r"Diplomatic Service civic required for alliances"), "Civil Service civic required for alliances"),
-    # end_turn sends the end-turn request when UI.CanEndTurn() is true despite blockers, but the base game refuses it
-    # while a unit needs orders, and end_turn then polls ~9 minutes (Claude Code gives up after 5) instead of naming
-    # the unit. Ask what the game's own end-turn button asks (ActionPanel.lua) so the blocker is reported.
-    (re.compile(r"local can = UI\.CanEndTurn\(\);"),
-     "local can = UI.CanEndTurn() and NotificationManager.GetFirstEndTurnBlocking(Game.GetLocalPlayer()) "
-     "== EndTurnBlockingTypes.NO_ENDTURN_BLOCKING;"),
-]
-# Lines in tool output that only make sense with the expansions (they would show favor 0 and a golden age
-# at era score 0/0).
-_OUTPUT_RULES = {
-    "get_game_overview": [
-        (re.compile(r" \| Favor: [^|\n]*"), ""),
-        (re.compile(r"^(Era: [^|\n]+?) \| Score: .*$", re.M), r"\1"),
-    ],
-    "get_diplomacy": [
-        (re.compile(r"Diplomatic Service civic\)"), "Civil Service civic)"),
-    ],
-    "get_victory_progress": [
-        (re.compile(r"launch 4 space projects = 50 VP"), "5 space projects: Earth Satellite, Moon Landing, 3 Mars"),
-    ],
-}
-_XP_TOOLS = [
-    "get_governors", "appoint_governor", "assign_governor", "promote_governor",
-    "get_dedications", "choose_dedication", "get_world_congress", "queue_wc_votes",
-]
+import sys  # noqa: E402
 
-
-def _one_line(lua: str) -> str:
-    """The prelude as one line, so line numbers in Lua errors still match civ6-mcp's own code."""
-    parts = []
-    for line in lua.splitlines():
-        line = line.split("--", 1)[0].strip()  # the prelude has no "--" inside strings
-        if line:
-            parts.append(line)
-    return " ".join(parts)
-
-
-def base_game_rewrite(code: str, prelude: str) -> str:
-    new = code
-    for rx, rep in _RULES:
-        new = rx.sub(rep, new)
-    if new == code:
-        return code
-    return prelude + " " + new
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bench_compat as bc  # noqa: E402  (shared with civ_mcp_hotseat.py)
 
 
 if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
-    with open(os.path.join(_HERE, "base-game-compat.lua"), encoding="utf-8") as f:
-        _PRELUDE = _one_line(f.read())
+    _PRELUDE = bc.load_prelude()
     _original_execute = GameConnection._execute_and_collect
 
     async def _base_game_execute(self, state_index, lua_code, timeout):
-        return await _original_execute(self, state_index, base_game_rewrite(lua_code, _PRELUDE), timeout)
+        return await _original_execute(self, state_index, bc.base_game_rewrite(lua_code, _PRELUDE), timeout)
 
     GameConnection._execute_and_collect = _base_game_execute
-    for _name in _XP_TOOLS:
+    for _name in bc.XP_TOOLS:
         mcp._tool_manager.remove_tool(_name)
 
     def _filtered(fn, rules):
@@ -164,13 +103,11 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
-    for _name, _rules in _OUTPUT_RULES.items():
+    for _name, _rules in bc.OUTPUT_RULES.items():
         _tool = mcp._tool_manager.get_tool(_name)
-        _tool.fn = _filtered(_tool.fn, _rules)
-    mcp._tool_manager.get_tool("form_alliance").description += (
-        "\n\nBase game: there is one alliance type (alliance_type is ignored), and it needs the Civil Service "
-        "civic, not Diplomatic Service."
-    )
+        if _tool is not None:
+            _tool.fn = _filtered(_tool.fn, _rules)
+    mcp._tool_manager.get_tool("form_alliance").description += bc.ALLIANCE_NOTE
 
     # end_turn reads blockers from the notification list, which in the base game can miss a unit that still needs
     # orders (the end-turn button says "Unit needs orders", no notification is listed). It then sends the end turn,
@@ -192,31 +129,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         "print('---END---')"
     )
 
-    # When civ6-mcp closes an AI-opened diplomacy session itself (DiplomacyManager.CloseSession, as in its
-    # "goodbye phase" auto-close), the leader screen can stay up in its overview mode. While it is up, the AI turns
-    # never finish: game 1 waited 10 minutes on turn 92, reloaded the turn, and stalled again until the screen was
-    # closed by hand. A leader screen with no open session is closed the way it closes itself for a blocking popup
-    # (OnBlockingPopupShown in the base game's DiplomacyActionView.lua), as civ6-mcp does after a war declaration:
-    # after each diplomacy or trade reply, and before end_turn.
-    _LEADER_SCREEN_LUA = (
-        "local v = ContextPtr:LookUpControl('/InGame/DiplomacyActionView') "
-        "if v and not v:IsHidden() then "
-        "  local me = Game.GetLocalPlayer() local open = false "
-        "  for _, p in ipairs(PlayerManager.GetAliveMajors()) do "
-        "    local sid = p:GetID() ~= me and DiplomacyManager.FindOpenSessionID(me, p:GetID()) "
-        "    if sid and sid >= 0 then open = true end "
-        "  end "
-        "  if open then print('LEADER_SCREEN|SESSION') else "
-        "    LuaEvents.NaturalWonderPopup_Shown() LuaEvents.NaturalWonderPopup_Closed() print('LEADER_SCREEN|CLOSED') end "
-        "else print('LEADER_SCREEN|HIDDEN') end "
-        "print('---END---')"
-    )
-
+    # A leader screen left open with no diplomacy session stalls the AI turns (bench_compat.LEADER_SCREEN_LUA).
     async def _close_idle_leader_screen(ctx, wait=0.0):
         if wait:
             await asyncio.sleep(wait)  # the engine closes the session a frame later
         try:
-            lines = await srv._get_game(ctx).conn.execute_write(_LEADER_SCREEN_LUA, timeout=10.0)
+            lines = await srv._get_game(ctx).conn.execute_write(bc.LEADER_SCREEN_LUA, timeout=10.0)
         except Exception:
             logging.getLogger("civ_mcp_http").warning("leader screen check failed", exc_info=True)
             return
