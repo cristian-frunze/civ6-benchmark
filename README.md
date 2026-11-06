@@ -8,8 +8,8 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 
 | # | Setup | Status |
 |---|---|---|
-| 1 | Opus 5.5 (high effort) vs the built-in AI on Pangaea, standard size, Quick, Prince, **with** the civ6-mcp playbook | setting up |
-| 2 | Same map, **rules only**, no strategy playbook | planned |
+| 1 | Opus 5.5 (high effort) vs the built-in AI on Pangaea, standard size, Quick, Prince, **with** the civ6-mcp playbook | **Science victory, turn 262**, $67.83 API-equivalent ([results](results/g1-standard/)) |
+| 2 | Same map, **rules only**, no strategy playbook | running |
 | 3 | Assigned victory goal (Science, then Domination), Online speed. Every victory type stays on, and any win counts; we also record whether it matched the goal | planned |
 | 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs | planned |
 
