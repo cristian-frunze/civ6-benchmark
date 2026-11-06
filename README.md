@@ -36,6 +36,8 @@ Three changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 - **The agent's reasoning**: each Claude Code session's transcript and stream, with thinking summaries (`--thinking-display summarized`), messages, tool calls and results, and token usage for API-equivalent cost.
 - **A screenshot** of the screens at the start of each turn, and **every autosave**, so any turn can be reloaded.
 - Per-turn map ownership deltas and city snapshots, for replays.
+- **A turn-by-turn timeline** joining all of the above (`tools/timeline.py`, rebuilt after every sync): `timeline.jsonl` has every thought, message, tool call and result tagged with its turn; `turns.jsonl` has one row per turn with seconds, API requests, tokens, API-equivalent dollars, tool calls and errors, the reflections and the diary stats; `timeline.md` is the readable version.
+- Before the agent starts, `--prepare` loads the start save and checks that every unit has full moves, so a stray click during the load can't cost the agent a turn (see [docs/setup.md](docs/setup.md)).
 
 Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/plan.md).
 
@@ -45,6 +47,7 @@ Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/pla
 - `windows/` - PowerShell for the Windows game PC: fastest settings, scheduled tasks that launch the game, click, take screenshots and run jobs inside the desktop session, the long-lived civ6-mcp HTTP server (`civ_mcp_http.py`), the archive's sync and per-turn capture, and the war room browser on the second screen
 - `tools/run_game.py` - run one game with a Claude Code agent across sessions and accounts until it ends
 - `tools/archive.py` - keep the full record of a running game (see above)
+- `tools/timeline.py` - join a run's transcripts and civ6-mcp records into a per-turn timeline
 - `tools/warroom/` and `warroom/` - the live war room page: map, standings, each agent's latest moves, thoughts and API cost
 - `remote/` - run PowerShell on the game PC over SSH, in session 0 (`zps.sh`) or in the desktop session (`zexec.sh`), copy files, and keep the SSH tunnel to the MCP server (`tunnel.sh`). `CIV_HOST` defaults to `zenbook`.
 - `tools/tuner_exec.py` - run Lua in any named Civ 6 Lua state over FireTuner (only while no MCP server holds the connection)

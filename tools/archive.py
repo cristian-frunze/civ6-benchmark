@@ -12,6 +12,8 @@ directory's game.json (game key, run id) and sessions.json (transcripts) and kee
   transcripts/   each Claude Code session transcript: the agent's thinking, messages, tool calls and results
   shots/         a screenshot of both screens at the start of each turn (T0042.jpg)
   saves/         every civ6-mcp autosave (0_MCP_0042.Civ6Save), so any turn can be reloaded
+  timeline.jsonl, turns.jsonl, timeline.md
+                 the transcripts and civ6-mcp's log joined per turn (tools/timeline.py), rebuilt after each sync
   archive.log
 
 The game PC side is windows/archive-sync.ps1 (incremental file sync, one SSH call per cycle) and
@@ -33,6 +35,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import timeline  # noqa: E402
 
 HOST = os.environ.get("CIV_HOST", "zenbook")
 # The spec goes on stdin: with hundreds of archived files it outgrows a Windows command line.
@@ -172,6 +177,8 @@ class Archiver:
         t = self.copy_transcripts()
         if total or t or trigger:
             self.log(f"turn {turn}: {total} file updates, {t} transcripts" + (f", archived turn {turn}" if trigger else ""))
+        if total or t or not (self.out / "turns.jsonl").exists():
+            timeline.build(self.run)  # timeline.jsonl, turns.jsonl, timeline.md
 
 
 def main() -> None:

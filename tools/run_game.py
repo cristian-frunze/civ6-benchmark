@@ -18,10 +18,10 @@ Writes, in --runtime-dir/<game-id>/ (private: it holds account names and transcr
 
 --prepare first points civ6-mcp at this game: it writes the server's env file on the game PC (run id pinned
 to the game id, so the diary survives server restarts; run_lua off), deletes old civ6-mcp autosaves,
-restarts the server and, with --load-save, loads that save.
+restarts the server and, with --start-save (a kept start) or --load-save, loads that save and checks it loaded clean.
 
     python3 tools/run_game.py --game-id g1-standard --track standard \\
-        --game-key sumeria_20261106 --civ "Sumeria (Gilgamesh)" --turn-limit 330 --prepare --load-save AutoSave_0001
+        --game-key sumeria_20261106 --civ "Sumeria (Gilgamesh)" --turn-limit 330 --prepare --start-save BENCH_PANGAEA_T1
 """
 
 from __future__ import annotations
@@ -272,7 +272,11 @@ class Run:
         hb = heartbeat(self.a)
         if hb.get("phase") == "finished":
             return f"game over (heartbeat: {hb})"
-        if int(hb.get("turn") or 0) >= self.a.turn_limit:
+        try:
+            turn = int(hb.get("turn") or 0)
+        except (TypeError, ValueError):
+            turn = 0  # civ6-mcp writes "?" until it has read the turn after a (re)load
+        if turn >= self.a.turn_limit:
             return f"turn limit {self.a.turn_limit} reached"
         if len(self.sessions) >= self.a.max_sessions:
             return f"max sessions {self.a.max_sessions}"
@@ -294,7 +298,17 @@ class Run:
         out = subprocess.run([str(REPO / "remote" / "zexec.sh"), str(REPO / "windows" / "restart-mcp-http.ps1"), "120"],
                              capture_output=True, text=True).stdout
         print(f"run_game: {out.strip()}", file=sys.stderr)
-        if a.load_save:
+        if a.start_save:
+            # civ6-mcp finds saves on the menu by OCR, which reads the Autosaves list reliably but missed a custom
+            # name in the regular list, so the kept start goes in as AutoSave_0001 (the game rewrites that on load).
+            put = ("$single = Join-Path ([Environment]::GetFolderPath('MyDocuments')) \"My Games\\Sid Meier's Civilization VI\\Saves\\Single\"; "
+                   f"$src = Join-Path $env:USERPROFILE 'civ6-bench\\starts\\{a.start_save}.Civ6Save'; "
+                   "Get-ChildItem (Join-Path $single 'auto') -Filter 'AutoSave_*.Civ6Save' | Remove-Item -Force; "  # no older game's turns to recover into
+                   "Copy-Item $src (Join-Path $single 'auto\\AutoSave_0001.Civ6Save') -Force; "
+                   "'start save in place: ' + (Get-Item $src).Length + ' bytes'")
+            print(subprocess.run([str(REPO / "remote" / "zps.sh"), "-c", put], capture_output=True, text=True).stdout.strip(), file=sys.stderr)
+            self.load_clean("AutoSave_0001")
+        elif a.load_save:
             self.load_clean(a.load_save)
 
     def mcp(self, tool: str, args: dict | None = None, timeout: int = 120) -> str:
@@ -323,7 +337,8 @@ class Run:
             moves = re.findall(r"^\s*(.+?) at \((\d+,\d+)\).*?moves ([\d.]+)/([\d.]+)", units, re.M)
             spent = [f"{u} at ({xy}) {m}/{mx}" for u, xy, m, mx in moves if float(m) < float(mx)]
             if moves and not spent:
-                print(f"run_game: start check passed: {len(moves)} units at full moves", file=sys.stderr)
+                where = "; ".join(f"{u} at ({xy}) {m}/{mx}" for u, xy, m, mx in moves)
+                print(f"run_game: start check passed: {len(moves)} units at full moves: {where}", file=sys.stderr)
                 return
             why = f"units already moved: {'; '.join(spent)}" if spent else f"no unit list: {units.strip()[-300:]}"
             print(f"run_game: start check failed (load {attempt}/{tries}): {why}", file=sys.stderr)
@@ -430,7 +445,9 @@ def main() -> None:
     ap.add_argument("--game-key", required=True, help="civ6-mcp file key, {civ}_{seed}, e.g. sumeria_20261106")
     ap.add_argument("--run-id", help="civ6-mcp run id for this game's files (default: the game id; no underscores)")
     ap.add_argument("--prepare", action="store_true", help="set up civ6-mcp for this game first (see above)")
-    ap.add_argument("--load-save", help="with --prepare: load this save, e.g. AutoSave_0001")
+    ap.add_argument("--load-save", help="with --prepare: load this save from the menu, e.g. AutoSave_0001")
+    ap.add_argument("--start-save", help="with --prepare: load this kept start, %%USERPROFILE%%\\civ6-bench\\starts\\<name>.Civ6Save "
+                                         "on the game PC (copied in as AutoSave_0001), e.g. BENCH_PANGAEA_T1")
     ap.add_argument("--title", default="Opus 5.5 vs the built-in AI")
     ap.add_argument("--agent-name", default="Opus 5.5")
     ap.add_argument("--civ", default="Sumeria (Gilgamesh)")
