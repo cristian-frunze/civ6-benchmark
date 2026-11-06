@@ -8,10 +8,12 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 
 | # | Setup | Status |
 |---|---|---|
-| 1 | Opus 5.5 (high effort) vs the built-in AI, CivBench "Ground Control" (Pangaea, Quick, Prince), **with** the civ6-mcp playbook | blocked: needs Gathering Storm |
-| 2 | Same, **rules only**, no strategy playbook | blocked: needs Gathering Storm |
-| 3 | Assigned victory: the agent is told to win by one victory type (science, culture, domination, religious, diplomatic). Only a win of that type counts | planned |
-| 4 | Opus vs Opus: one Opus agent per civ in the same game, compared with one Opus civ against the built-in AI on the same map | planned |
+| 1 | Opus 5.5 (high effort) vs the built-in AI on Pangaea, standard size, Quick, Prince, **with** the civ6-mcp playbook | setting up |
+| 2 | Same map, **rules only**, no strategy playbook | planned |
+| 3 | Assigned victory goal (Science, then Domination), Online speed. Every victory type stays on, and any win counts; we also record whether it matched the goal | planned |
+| 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs | planned |
+
+All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
 
 Every game reports API-equivalent cost: input, output, cache-read and cache-write tokens, priced at list API rates, even though runs use Claude subscriptions.
 
