@@ -156,10 +156,41 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         _tool = mcp._tool_manager.get_tool(_name)
         _tool.fn = _then_close_leader_screen(_tool.fn)
 
+    # civ6-mcp warns that InGame queries while the AI civs move can stall their turns, and polls only GameCore then.
+    # Two cases reach end_turn while they move: civ6-mcp re-entering a turn end still in flight (after mid-turn
+    # diplomacy), and a turn number that advanced before the player's turn started (game 2, turn 145: the agent's
+    # moves failed with NO_MOVES, then its end_turn hung until civ6-mcp reloaded the turn).
+    _TURN_ACTIVE_LUA = (
+        "local p = Players[Game.GetLocalPlayer()] "
+        "local ok, a = pcall(function() return p:IsTurnActive() end) "
+        "print('ACTIVE|' .. (ok and tostring(a) or 'unknown')) print('---END---')"
+    )
+
+    async def _turn_active(game) -> bool | None:
+        try:
+            lines = await game.conn.execute_read(_TURN_ACTIVE_LUA, timeout=10.0)
+        except Exception:
+            return None
+        flag = next((ln.split("|", 1)[1] for ln in lines if ln.startswith("ACTIVE|")), "unknown")
+        return {"true": True, "false": False}.get(flag)
+
     def _units_first(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
             ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            game = srv._get_game(ctx)
+            if getattr(game, "_pending_end_turn", False):
+                return await fn(*args, **kwargs)  # a turn end in flight: civ6-mcp only polls GameCore
+            if await _turn_active(game) is False:
+                for _ in range(60):  # GameCore polls only, up to 5 minutes
+                    await asyncio.sleep(5)
+                    if await _turn_active(game) is not False:
+                        logging.getLogger("civ_mcp_http").info("end_turn called before the player's turn started")
+                        return ("Your turn had not started yet when you called end_turn: the AI civs were still "
+                                "moving, so orders you gave since the last end_turn may have failed (NO_MOVES). It "
+                                "has started now. Play this turn (get_turn_briefing), then call end_turn.")
+                return ("The AI civs are still moving and your turn has not started after 5 minutes. Call end_turn "
+                        "again; give no other orders until it reports the new turn.")
             await _close_idle_leader_screen(ctx)
             try:
                 lines = await srv._get_game(ctx).conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
