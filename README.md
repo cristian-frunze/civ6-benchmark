@@ -37,6 +37,7 @@ Three changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 - **A screenshot** of the screens at the start of each turn, and **every autosave**, so any turn can be reloaded.
 - Per-turn map ownership deltas and city snapshots, for replays.
 - **A turn-by-turn timeline** joining all of the above (`tools/timeline.py`, rebuilt after every sync): `timeline.jsonl` has every thought, message, tool call and result tagged with its turn; `turns.jsonl` has one row per turn with seconds, API requests, tokens, API-equivalent dollars, tool calls and errors, the reflections and the diary stats; `timeline.md` is the readable version.
+- **Interventions**: anything done to a running game from outside the agent (a harness tool call while debugging, a screen closed by hand, a restart to deploy a fix) goes in `interventions.jsonl` with its turn and effect.
 - Before the agent starts, `--prepare` loads the start save and checks that every unit has full moves, so a stray click during the load can't cost the agent a turn (see [docs/setup.md](docs/setup.md)).
 
 Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/plan.md).

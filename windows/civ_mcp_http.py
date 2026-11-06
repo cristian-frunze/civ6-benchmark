@@ -192,10 +192,57 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         "print('---END---')"
     )
 
+    # When civ6-mcp closes an AI-opened diplomacy session itself (DiplomacyManager.CloseSession, as in its
+    # "goodbye phase" auto-close), the leader screen can stay up in its overview mode. While it is up, the AI turns
+    # never finish: game 1 waited 10 minutes on turn 92, reloaded the turn, and stalled again until the screen was
+    # closed by hand. A leader screen with no open session is closed the way it closes itself for a blocking popup
+    # (OnBlockingPopupShown in the base game's DiplomacyActionView.lua), as civ6-mcp does after a war declaration:
+    # after each diplomacy or trade reply, and before end_turn.
+    _LEADER_SCREEN_LUA = (
+        "local v = ContextPtr:LookUpControl('/InGame/DiplomacyActionView') "
+        "if v and not v:IsHidden() then "
+        "  local me = Game.GetLocalPlayer() local open = false "
+        "  for _, p in ipairs(PlayerManager.GetAliveMajors()) do "
+        "    local sid = p:GetID() ~= me and DiplomacyManager.FindOpenSessionID(me, p:GetID()) "
+        "    if sid and sid >= 0 then open = true end "
+        "  end "
+        "  if open then print('LEADER_SCREEN|SESSION') else "
+        "    LuaEvents.NaturalWonderPopup_Shown() LuaEvents.NaturalWonderPopup_Closed() print('LEADER_SCREEN|CLOSED') end "
+        "else print('LEADER_SCREEN|HIDDEN') end "
+        "print('---END---')"
+    )
+
+    async def _close_idle_leader_screen(ctx, wait=0.0):
+        if wait:
+            await asyncio.sleep(wait)  # the engine closes the session a frame later
+        try:
+            lines = await srv._get_game(ctx).conn.execute_write(_LEADER_SCREEN_LUA, timeout=10.0)
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("leader screen check failed", exc_info=True)
+            return
+        if "LEADER_SCREEN|CLOSED" in lines:
+            logging.getLogger("civ_mcp_http").info("Closed a leader screen left open with no diplomacy session")
+            await asyncio.sleep(1.0)
+
+    def _then_close_leader_screen(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            await _close_idle_leader_screen(ctx, wait=1.0)
+            return out
+
+        return wrapper
+
+    for _name in ("respond_to_diplomacy", "respond_to_trade"):
+        _tool = mcp._tool_manager.get_tool(_name)
+        _tool.fn = _then_close_leader_screen(_tool.fn)
+
     def _units_first(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
             ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            await _close_idle_leader_screen(ctx)
             try:
                 lines = await srv._get_game(ctx).conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
             except Exception:
