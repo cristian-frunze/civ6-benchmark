@@ -95,6 +95,12 @@ _RULES = [
     (re.compile(r'local civic = GameInfo\.Civics\["CIVIC_DIPLOMATIC_SERVICE"\]'),
      'local civic = GameInfo.Civics["CIVIC_CIVIL_SERVICE"]'),
     (re.compile(r"Diplomatic Service civic required for alliances"), "Civil Service civic required for alliances"),
+    # end_turn sends the end-turn request when UI.CanEndTurn() is true despite blockers, but the base game refuses it
+    # while a unit needs orders, and end_turn then polls ~9 minutes (Claude Code gives up after 5) instead of naming
+    # the unit. Ask what the game's own end-turn button asks (ActionPanel.lua) so the blocker is reported.
+    (re.compile(r"local can = UI\.CanEndTurn\(\);"),
+     "local can = UI.CanEndTurn() and NotificationManager.GetFirstEndTurnBlocking(Game.GetLocalPlayer()) "
+     "== EndTurnBlockingTypes.NO_ENDTURN_BLOCKING;"),
 ]
 # Lines in tool output that only make sense with the expansions (they would show favor 0 and a golden age
 # at era score 0/0).
@@ -165,6 +171,49 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         "\n\nBase game: there is one alliance type (alliance_type is ignored), and it needs the Civil Service "
         "civic, not Diplomatic Service."
     )
+
+    # end_turn reads blockers from the notification list, which in the base game can miss a unit that still needs
+    # orders (the end-turn button says "Unit needs orders", no notification is listed). It then sends the end turn,
+    # the game ignores it, and end_turn waits ~10 minutes before naming the blocker. Ask first what the game's own
+    # end-turn button asks (NotificationManager.GetFirstEndTurnBlocking, ActionPanel.lua) and answer at once when
+    # units hold the turn. Other blockers go to civ6-mcp, which resolves or reports them.
+    _UNITS_BLOCKING_LUA = (
+        "local me = Game.GetLocalPlayer() "
+        "if NotificationManager.GetFirstEndTurnBlocking(me) == EndTurnBlockingTypes.ENDTURN_BLOCKING_UNITS then "
+        "  print('UNITS_BLOCK') "
+        "  for _, u in Players[me]:GetUnits():Members() do "
+        "    if u:GetX() ~= -9999 and u:GetMovesRemaining() > 0 then "
+        "      local e = GameInfo.Units[u:GetType()] "
+        "      print('UNIT|' .. u:GetID() .. '|' .. (e and e.UnitType or '?') .. '|' .. u:GetX() .. ',' .. u:GetY() "
+        "        .. '|' .. u:GetMovesRemaining() .. '/' .. u:GetMaxMoves()) "
+        "    end "
+        "  end "
+        "end "
+        "print('---END---')"
+    )
+
+    def _units_first(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            try:
+                lines = await srv._get_game(ctx).conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
+            except Exception:
+                lines = []
+            if "UNITS_BLOCK" in lines:
+                units = [ln.split("|") for ln in lines if ln.startswith("UNIT|")]
+                if units:
+                    listed = "\n".join(f"  {t} [id:{i}] at ({xy}), moves {m}" for _, i, t, xy, m in units)
+                    return ("Cannot end turn: a unit still needs orders (the game's end-turn button reads "
+                            "\"Unit needs orders\"). Units with moves left:\n" + listed +
+                            "\nGive each an order (move, attack, fortify, skip) with unit_action, or call "
+                            "skip_remaining_units, then end_turn again. The turn has not ended.")
+            return await fn(*args, **kwargs)
+
+        return wrapper
+
+    _tool = mcp._tool_manager.get_tool("end_turn")
+    _tool.fn = _units_first(_tool.fn)
 
     _original_find_exe = launcher._find_game_exe_win32
 

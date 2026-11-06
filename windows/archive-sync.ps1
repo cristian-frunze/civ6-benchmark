@@ -7,7 +7,8 @@
 #              {"key": "shots", "dir": "...", "match": ["*.jpg"], "after": "T0041.jpg"}],   after: skip names sorting before it
 #    "have": {"civ6mcp/<name>": {"size": N, "tail": "<sha1 of the 4096 bytes before N>"}},
 #    "budget": 6000000,
-#    "trigger": {"game": "<id>", "turn": N}}   optional: archive this turn (screenshot and saves, windows/archive-turn.ps1)
+#    "trigger": {"game": "<id>", "since": <unix time>}}   optional: make sure the per-turn capture loop runs
+#                                                         (windows/archive-turn.ps1, the Civ6Archive task)
 param([string]$Spec)
 $ErrorActionPreference = 'Stop'
 if (-not $Spec) { $Spec = [Console]::In.ReadToEnd().Trim() }
@@ -47,11 +48,14 @@ foreach ($root in $s.roots) {
         $offset = 0
         if ($have) {
             $hs = [long]$have.Value.size
-            if ($hs -eq $size) { continue }
-            if ($hs -lt $size -and $hs -gt 0) {
+            if ($hs -gt 0 -and $hs -le $size) {
                 $start = [Math]::Max(0, $hs - 4096)
                 $tail = -join ($sha1.ComputeHash((Read-Range $f.FullName $start ($hs - $start))) | ForEach-Object { $_.ToString('x2') })
-                if ($tail -eq $have.Value.tail) { $offset = $hs }
+                if ($tail -eq $have.Value.tail) {
+                    if ($hs -eq $size) { continue }   # unchanged
+                    $offset = $hs                     # appended
+                }
+                # otherwise rewritten (heartbeat.json keeps about the same size): send it whole
             }
         }
         $count = $size - $offset

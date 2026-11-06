@@ -146,7 +146,9 @@ class Run:
     def write_setup(self) -> None:
         a = self.a
         (self.dir / "system.md").write_text(system_prompt(a.track, a.goal))
-        (self.dir / "mcp.json").write_text(json.dumps({"mcpServers": {"civ6": {"type": "http", "url": a.mcp_url}}}, indent=2))
+        (self.dir / "mcp.json").write_text(json.dumps({"mcpServers": {"civ6": {
+            # end_turn can wait minutes for the AI civs; Claude Code otherwise aborts a tool silent for 5 minutes.
+            "type": "http", "url": a.mcp_url, "timeout": 900_000}}}, indent=2))
         (self.dir / "settings.json").write_text(json.dumps({"disableAllHooks": True}, indent=2))
         self.write_manifest()
 

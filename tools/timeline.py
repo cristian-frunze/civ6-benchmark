@@ -84,12 +84,20 @@ def usd(model: str, u: dict, table: dict) -> float | None:
             + (cw5 or 0) * p.get("cache_write_5m", 0) + cw1 * p.get("cache_write_1h", 0)) / 1e6
 
 
-def transcript_events(path: Path, session: str, table: dict) -> list[dict]:
-    """Thinking, text, tool calls, tool results and per-request usage from one Claude Code transcript."""
+def transcript_events(path: Path, session: str, table: dict, rows_seen: set) -> list[dict]:
+    """Thinking, text, tool calls, tool results and per-request usage from one Claude Code transcript.
+
+    rows_seen holds transcript entry ids already read: a session moved to another account starts from a copy of
+    its transcript, so the same entries can appear in two files.
+    """
     out, names, seen = [], {}, set()
     for e in jsonl(path):
         if e.get("type") not in ("assistant", "user") or e.get("isSidechain"):
             continue
+        if e.get("uuid"):
+            if e["uuid"] in rows_seen:
+                continue
+            rows_seen.add(e["uuid"])
         t = ts_of(e.get("timestamp"))
         msg = e.get("message") or {}
         content = msg.get("content")
@@ -126,7 +134,9 @@ class Turns:
         rows = sorted((r["ts"], int(r.get("turn") or 0), r.get("tool")) for r in log if isinstance(r.get("ts"), (int, float)))
         ends_log = [ts for ts, _, tool in rows if tool == "end_turn"]
         ends_tx = [e["ts"] for e in events if e["kind"] == "tool_result" and e["tool"] == "end_turn"]
-        pairs = [a - b for a, b in zip(ends_tx, ends_log)]
+        # Pair each end_turn result with the nearest logged end_turn, so a call that only one side has (a harness
+        # test call, a session killed mid-call) doesn't shift the rest.
+        pairs = [d for a in ends_tx if ends_log for d in [min((a - b for b in ends_log), key=abs)] if abs(d) < 60]
         self.offset = statistics.median(pairs) if pairs else 0.0
         self.ts = [ts + self.offset for ts, _, _ in rows]
         self.turn = [turn for _, turn, _ in rows]
@@ -175,8 +185,9 @@ def build(run_dir: Path) -> dict:
     arch = run_dir / "archive"
     table = prices()
     events: list[dict] = []
+    rows_seen: set = set()
     for p in sorted((arch / "transcripts").glob("*.jsonl")):
-        events += transcript_events(p, p.stem.split("-", 1)[0], table)
+        events += transcript_events(p, p.stem.split("-", 1)[0], table, rows_seen)
     events.sort(key=lambda e: e["ts"])
     log = [r for p in (arch / "civ6mcp").glob("log_*.jsonl") for r in jsonl(p) if r.get("type") == "tool_call"]
     turns = Turns(log, events)
