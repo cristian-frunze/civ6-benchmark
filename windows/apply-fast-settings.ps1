@@ -35,6 +35,12 @@ Set-Opts 'UserOptions.txt' ([ordered]@{
   TutorialLevel = -1; HasChosenTutorialLevel = 1; HasSeenXP1FeaturesScreen = 1; HasSeenXP2FeaturesScreen = 1
   HideXP1FeaturesScreen = 1; HideXP2FeaturesScreen = 1; StartInStrategicView = 1
 })
+# The screensaver (on Asus laptops, "OLED Care") takes over the input desktop after idle minutes. Screenshots and
+# clicks then fail, and civ6-mcp cannot click through the menus to reload a save after a hang. Turn it off.
+Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name ScreenSaveActive -Value '0'
+Add-Type 'using System; using System.Runtime.InteropServices; public class NoSS { [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint a, uint b, IntPtr c, uint d); }'
+[NoSS]::SystemParametersInfo(0x0011, 0, [IntPtr]::Zero, 3) | Out-Null   # SPI_SETSCREENSAVEACTIVE off
+"screensaver off"
 "== verify"
 foreach ($f in 'AppOptions.txt','GraphicsOptions.txt','UserOptions.txt') {
   Select-String -Path (Join-Path $d $f) -Pattern '^(RenderWidth|RenderHeight|FullScreen|UIUpscale|PlayIntroVideo|EnableTuner|EnableAudio|PerformanceImpact|TerrainQuality|EnableShadows|EnableBloom|QuickMovement|QuickCombat|AutoEndTurn|StartInStrategicView|TutorialLevel|HasChosenTutorialLevel) ' | ForEach-Object { "  $f  $($_.Line)" }
