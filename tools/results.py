@@ -1,10 +1,11 @@
-"""Copy a finished single-player game's public files into results/<game-id>/ and print the numbers for its README.
+"""Copy a finished game's public files into results/<game-id>/ and print the numbers for its README.
 
     python3 tools/results.py --game-id g2-baseline [--shots 50,130,200,last]
 
 Copies, from ~/.civ6-bench/runs/<game-id>/: archive/turns.jsonl, interventions.jsonl, the civ6-mcp diaries (gzipped)
 and a few screenshots. Prints the totals, the cost split, cost and pace by 50-turn range, and the final standings.
 Nothing private goes in: no account names, transcript paths or saves.
+A hotseat game (tools/run_hotseat.py) gets its seat-turn rows, per-round stats and the seats' diary instead.
 """
 
 import argparse
@@ -18,6 +19,42 @@ REPO = Path(__file__).resolve().parent.parent
 PRICE = {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 8}  # Opus 5.5 $/MTok, 1-hour cache writes
 
 
+def gz(src: Path, dst: Path) -> None:
+    with open(src, "rb") as f, open(dst, "wb") as raw, \
+            gzip.GzipFile(filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0) as out:  # byte-stable
+        shutil.copyfileobj(f, out)
+
+
+def hotseat(run: Path, out: Path) -> None:
+    """A hotseat game (tools/run_hotseat.py): per seat-turn rows without account names, the per-round stats of every
+    civ, and the coordinator's diary (each seat's reflections), then totals per seat and the final standings."""
+    rows = [json.loads(ln) for ln in open(run / "turns.jsonl")]
+    with open(out / "turns.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps({k: v for k, v in r.items() if k != "account"}) + "\n")
+    shutil.copy2(run / "rounds.jsonl", out / "rounds.jsonl")
+    if (run / "interventions.jsonl").exists():
+        shutil.copy2(run / "interventions.jsonl", out / "interventions.jsonl")
+    for d in sorted((run / "telemetry").glob("diary_*.jsonl")):
+        gz(d, out / "diary.jsonl.gz")
+    total = sum(r.get("usd") or 0 for r in rows)
+    wall = (max(r["end"] for r in rows) - min(r["start"] for r in rows)) / 3600
+    print(f"seat turns {len(rows)}, last turn {rows[-1]['turn']}, wall {wall:.2f} h, usd {total:.2f}")
+    for seat in dict.fromkeys(r["seat"] for r in rows):
+        xs = [r for r in rows if r["seat"] == seat]
+        print(f"  {seat} ({xs[0]['leader']}): {len({r['turn'] for r in xs})} turns, ${sum(r.get('usd') or 0 for r in xs):.2f}, "
+              f"median {statistics.median(r['seconds'] for r in xs):.0f} s, {sum(r.get('requests') or 0 for r in xs)} requests, "
+              f"{sum(1 for r in xs if r.get('try', 1) > 1)} retries")
+    PRICE_KEYS = ("output", "cache_read", "cache_write", "input")
+    print("cost split: " + ", ".join(f"{k} ${sum(r.get(k) or 0 for r in rows) * PRICE[k] / 1e6:.2f}" for k in PRICE_KEYS))
+    last = [json.loads(ln) for ln in open(run / "rounds.jsonl")][-1]
+    print(f"standings at turn {last.get('turn')} (civ, score, cities, science, techs, civics, military, agent), "
+          f"winning team {last.get('winning_team')}:")
+    for p in sorted(last["players"], key=lambda p: -p["score"]):
+        print(f"  {p['civ']} {p['score']} {p['cities']} {round(p['science'])} {p['techs']} {p['civics']} {p['military']} {p['human']}")
+    print(f"copied to {out.relative_to(REPO)}: " + ", ".join(sorted(p.name for p in out.rglob('*') if p.is_file())))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--game-id", required=True)
@@ -28,6 +65,9 @@ def main() -> None:
     arch = run / "archive"
     out = REPO / "results" / a.game_id
     (out / "shots").mkdir(parents=True, exist_ok=True)
+    if (run / "game.json").exists() and json.loads((run / "game.json").read_text()).get("mode") == "hotseat":
+        (out / "shots").rmdir()
+        return hotseat(run, out)
 
     turns = [json.loads(ln) for ln in open(arch / "turns.jsonl")]
     shutil.copy2(arch / "turns.jsonl", out / "turns.jsonl")
@@ -35,10 +75,7 @@ def main() -> None:
         shutil.copy2(run / "interventions.jsonl", out / "interventions.jsonl")
     diaries = sorted((arch / "civ6mcp").glob(f"diary_*_{a.game_id}*.jsonl"))
     for d in diaries:
-        name = "diary_cities.jsonl.gz" if d.stem.endswith("_cities") else "diary.jsonl.gz"
-        with open(d, "rb") as src, open(out / name, "wb") as raw, \
-                gzip.GzipFile(filename="", fileobj=raw, mode="wb", compresslevel=9, mtime=0) as dst:  # byte-stable
-            shutil.copyfileobj(src, dst)
+        gz(d, out / ("diary_cities.jsonl.gz" if d.stem.endswith("_cities") else "diary.jsonl.gz"))
     shots = sorted((arch / "shots").glob("T*.jpg"))
     for want in a.shots.split(","):
         pick = shots[-1] if want == "last" else next((s for s in shots if int(s.stem[1:]) >= int(want)), None)
