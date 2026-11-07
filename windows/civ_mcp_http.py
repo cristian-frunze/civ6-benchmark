@@ -174,6 +174,22 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         flag = next((ln.split("|", 1)[1] for ln in lines if ln.startswith("ACTIVE|")), "unknown")
         return {"true": True, "false": False}.get(flag)
 
+    # The AI civs also wait on a diplomacy session they open with the player mid-turn (game 4, turn 58: civ6-mcp
+    # auto-dismissed Brazil's war declaration and reported that the turn had not advanced, but the AI turn was still
+    # running, and America then opened a session that waited 20 minutes for an answer nobody was asked for).
+    async def _session_waiting(game) -> str | None:
+        try:
+            sessions = await game.get_diplomacy_sessions()
+        except Exception:
+            return None
+        if not sessions:
+            return None
+        names = ", ".join(f"{s.other_civ_name} ({s.other_leader_name})" for s in sessions)
+        logging.getLogger("civ_mcp_http").info("AI turn waiting on a diplomacy session with %s", names)
+        return (f"The AI civs are waiting on you: a diplomacy session with {names} is open. Read it with "
+                "get_pending_diplomacy, answer it with respond_to_diplomacy (or respond_to_trade for a deal), then "
+                "call end_turn again.")
+
     def _units_first(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -182,7 +198,11 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             if getattr(game, "_pending_end_turn", False):
                 return await fn(*args, **kwargs)  # a turn end in flight: civ6-mcp only polls GameCore
             if await _turn_active(game) is False:
-                for _ in range(60):  # GameCore polls only, up to 5 minutes
+                for i in range(60):  # GameCore polls only, up to 5 minutes
+                    if i in (0, 9):  # plus one InGame probe on entry and one at 45 s, as civ6-mcp's own polling does
+                        msg = await _session_waiting(game)
+                        if msg:
+                            return msg
                     await asyncio.sleep(5)
                     if await _turn_active(game) is not False:
                         logging.getLogger("civ_mcp_http").info("end_turn called before the player's turn started")
