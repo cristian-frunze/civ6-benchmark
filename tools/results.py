@@ -41,6 +41,9 @@ def hotseat(run: Path, out: Path) -> None:
         for r in rows:
             f.write(json.dumps({k: v for k, v in r.items() if k != "account"}) + "\n")
     shutil.copy2(run / "rounds.jsonl", out / "rounds.jsonl")
+    meta = json.loads((run / "game.json").read_text())  # without transcript paths
+    meta["agents"] = [{k: v for k, v in ag.items() if k in ("name", "slot", "leader", "model")} for ag in meta.get("agents", [])]
+    (out / "game.json").write_text(json.dumps(meta, indent=2) + "\n")
     if (run / "interventions.jsonl").exists():
         shutil.copy2(run / "interventions.jsonl", out / "interventions.jsonl")
     for d in sorted((run / "telemetry").glob("diary_*.jsonl")):
