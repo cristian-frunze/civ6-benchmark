@@ -1,11 +1,11 @@
 # Game 3: Opus 5.5 vs the built-in AI, goal: Science victory, Online speed
 
-**Result: Science victory on turn 213.** Opus 5.5 (high effort) played Sumeria (Gilgamesh) against the same 7 built-in AI civs on Prince, on the same standard Pangaea map and start as games 1 and 2 (same seed), base game, with the playbook. Two things changed: the game speed is Online (250-turn limit instead of Quick's 330), and the system prompt names a goal, a Science victory, while every victory type stays on for every civ. It won by its goal, 37 turns before the limit.
+**Result: Science victory on turn 212.** Opus 5.5 (high effort) played Sumeria (Gilgamesh) against the same 7 built-in AI civs on Prince, on the same standard Pangaea map and start as games 1 and 2 (same seed), base game, with the playbook. Two things changed: the game speed is Online (250-turn limit instead of Quick's 330), and the system prompt names a goal, a Science victory, while every victory type stays on for every civ. It won by its goal, 38 turns before the limit.
 
 | | |
 |---|---|
 | Played | 2026-11-07, 4.6 hours wall clock |
-| Turns | 213 (median 53 s per turn) |
+| Turns | 212 (median 53 s per turn) |
 | API-equivalent cost | **$56.43** at list prices (Opus 5.5: $4 / $20 per MTok in / out, $0.20 cache read, $8 cache write with the 1-hour TTL) |
 | Tokens | 331K output, 200M cache read, 1.21M cache write, 2.2K uncached input |
 | API requests | 1,112 (about 5.2 per turn) |
@@ -25,7 +25,7 @@ Cache reads are most of the bill again ($40.09). Output was $6.61 and cache writ
 | Spain | 422 | 8 | 215 | 60 | 51 | 411 | 2 |
 | Brazil | 411 | 7 | 70 | 41 | 47 | 351 | 0 |
 | America | 405 | 8 | 103 | 47 | 36 | 793 | 0 |
-| **Sumeria (Opus 5.5)** | 400 | 6 | **303** | **67** | 36 | 505 | 4, then the 5th on turn 213 |
+| **Sumeria (Opus 5.5)** | 400 | 6 | **303** | **67** | 36 | 505 | 4, then the 5th at the end of turn 212 |
 
 This was the closest science race of the three games: Rome had 63 techs to Opus's 67 and nearly matched its science per turn, and three AI civs had started the space race. Opus finished last on score with 6 cities, its fewest so far, and won anyway. It ran three spaceports in parallel (Uruk, Eridu and Nippur) and bought Wernher von Braun, the Great Engineer who speeds up space projects, for the last one. Alliances with America and Rome kept it out of wars; Egypt parked artillery near Nippur but never declared war.
 
@@ -34,7 +34,7 @@ This was the closest science race of the three games: Rome had 63 techs to Opus'
 | | Game 1 (playbook) | Game 2 (rules only) | Game 3 (playbook, Science goal) |
 |---|---|---|---|
 | Speed (turn limit) | Quick (330) | Quick (330) | Online (250) |
-| Result | Science victory, turn 262 | Science victory, turn 266 | Science victory, turn 213 |
+| Result | Science victory, turn 262 | Science victory, turn 266 | Science victory, turn 212 |
 | Share of the turn limit used | 79% | 81% | 85% |
 | Cost | $67.83 | $72.32 | $56.43 |
 | Median seconds per turn | 47 | 53 | 53 |
@@ -52,7 +52,7 @@ Online speed makes everything cheaper in turns, so the turn numbers don't compar
 | 51-100 | 16.60 | 84 | 6.2 |
 | 101-150 | 14.80 | 52 | 5.3 |
 | 151-200 | 16.15 | 58 | 5.6 |
-| 201-213 | 2.17 | 42 | 3.1 |
+| 201-212 | 2.17 | 42 | 3.1 |
 
 ## Harness
 

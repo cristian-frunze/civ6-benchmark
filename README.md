@@ -10,7 +10,7 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 |---|---|---|
 | 1 | Opus 5.5 (high effort) vs the built-in AI on Pangaea, standard size, Quick, Prince, **with** the civ6-mcp playbook | **Science victory, turn 262**, $67.83 API-equivalent ([results](results/g1-standard/)) |
 | 2 | Same map, **rules only**, no strategy playbook | **Science victory, turn 266**, $72.32 API-equivalent, about $7 of it in two harness stalls ([results](results/g2-baseline/)) |
-| 3 | Assigned victory goal (Science, then Domination), Online speed (250-turn limit), same seed and civs. Every victory type stays on, and any win counts; we also record whether it matched the goal | **Science goal: Science victory, turn 213** of 250, $56.43 ([results](results/g3-science/)). Domination goal running |
+| 3 | Assigned victory goal (Science, then Domination), Online speed (250-turn limit), same seed and civs. Every victory type stays on, and any win counts; we also record whether it matched the goal | **Science goal: Science victory, turn 212** of 250, $56.43 ([results](results/g3-science/)). Domination goal running |
 | 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs, both as hotseat games so the map is the same | harness ready: a 4-turn smoke test with 4 Opus seats passed (about 40 s per seat turn); runs after game 3 |
 
 All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
