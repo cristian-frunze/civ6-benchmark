@@ -461,12 +461,18 @@ def main() -> None:
     ap.add_argument("--effort", default="high")
     ap.add_argument("--mcp-url", default="http://127.0.0.1:18771/mcp")
     ap.add_argument("--civ6mcp-dir", default="%USERPROFILE%\\.civ6-mcp", help="where civ6-mcp writes its JSONL on the game PC")
-    ap.add_argument("--claude-cmd", default="claude-acct {account}", help="command that runs Claude Code as {account}")
+    ap.add_argument("--claude-cmd", help="command that runs Claude Code as {account}; default: claude under "
+                    "~/.claude-{account} (this runner holds the machine slot), or claude-acct {account} with --accounts")
     ap.add_argument("--runtime-dir", default="~/.civ6-bench/runs")
     ap.add_argument("--warroom", help="also run the war room collector, publishing the page to this folder")
     ap.add_argument("--max-sessions", type=int, default=400)
     ap.add_argument("--print-prompts", action="store_true", help="print the system and kickoff prompts and exit")
     a = ap.parse_args()
+    if not a.claude_cmd:
+        # Without --accounts this runner holds one of the machine's headless slots for each session, as
+        # run_on_account.py does; claude-acct would hold a second one (claude-slot) and queue for it again.
+        a.claude_cmd = ("claude-acct {account}" if a.accounts
+                        else f"env CLAUDE_CONFIG_DIR={Path.home()}/.claude-{{account}} claude")
     a.run_id = (a.run_id or a.game_id).replace("_", "-")
     if a.print_prompts:
         print(system_prompt(a.track, a.goal))
