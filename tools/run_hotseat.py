@@ -62,6 +62,7 @@ class Seat(rg.Run):
         ns.accounts = [a.accounts[slot % len(a.accounts)]] if a.accounts else None
         super().__init__(ns)
         self.slot, self.leader, self.name = slot, leader, name
+        self.slot_held = False  # Game.play holds one machine slot for the whole game
         self.acct: str | None = None
 
     def write_setup(self) -> None:
@@ -102,7 +103,7 @@ class Seat(rg.Run):
         else:
             prompt, resume = rg.RESUME_PROMPT + "\n\n" + TURN_PROMPT.format(turn=turn, leader=self.leader), None
         slot = None
-        if not self.a.accounts:
+        if not self.a.accounts and not self.slot_held:
             slot = self.fleet.take_slot()
             self.fleet.stagger()
         try:
@@ -159,8 +160,9 @@ class Game:
 
     def stats(self) -> dict | None:
         out = self.helper.mcp("bench_stats", timeout=60)
+        line = next((ln for ln in out.splitlines() if ln.startswith("{")), "")  # not the "=== bench_stats {}" header
         try:
-            return json.loads(out[out.index("{"): out.rindex("}") + 1])
+            return json.loads(line)
         except ValueError:
             return None
 
@@ -221,6 +223,17 @@ class Game:
                                         str(self.dir / "game.json"), "--out", str(Path(self.a.warroom).expanduser()),
                                         "--local-dir", str(self.tele), "--publish"], stdout=log, stderr=log)
         last_round, last_key, tries = -1, None, 0
+        game_slot = None
+        if not self.a.accounts:
+            # Only one seat plays at a time, so the game holds one of the machine's headless slots from start to
+            # end instead of queueing for a slot on every seat turn (minutes each on a busy machine).
+            # The machine's launch stagger applies once, at the start, as for any run_on_account.py run: seats then
+            # start one after another, and queueing behind every other launch on the box cost about 3 minutes a turn.
+            fleet = next(iter(self.seats.values())).fleet
+            game_slot = fleet.take_slot()
+            fleet.stagger()
+            for s in self.seats.values():
+                s.slot_held = True
         try:
             while True:
                 if (self.dir / "STOP").exists():
@@ -271,6 +284,8 @@ class Game:
                 if row.get("is_error") and not row.get("limit") and rg.seconds(row) < 120:
                     time.sleep(60)  # a quick failure (API overload, network): don't spin
         finally:
+            if game_slot:
+                game_slot.close()
             for s in self.seats.values():
                 s.release(s.acct)
             if warroom:
@@ -293,13 +308,19 @@ def main() -> None:
     ap.add_argument("--model", default="claude-opus-5-5")
     ap.add_argument("--effort", default="high")
     ap.add_argument("--mcp-url", default="http://127.0.0.1:18771/mcp")
-    ap.add_argument("--claude-cmd", default="claude-acct {account}")
+    ap.add_argument("--claude-cmd", help="default: claude under ~/.claude-{account}; with --accounts, claude-acct {account}")
     ap.add_argument("--runtime-dir", default="~/.civ6-bench/runs")
     ap.add_argument("--max-tries", type=int, default=4, help="resumes per seat turn before the game stops")
     ap.add_argument("--seed", type=int, default=20261106, help="the map seed, for the war room's file key")
     ap.add_argument("--warroom", help="also run the war room collector, publishing the page to this folder")
     ap.add_argument("--print-prompts", action="store_true")
     a = ap.parse_args()
+    if not a.claude_cmd:
+        # Game.play holds one machine slot for the whole game, as run_on_account.py does for its run, so claude starts
+        # straight under the account's config dir. Through claude-acct it would wait for a second slot (claude-slot)
+        # on every seat turn: about 5 minutes each on a busy machine.
+        a.claude_cmd = ("claude-acct {account}" if a.accounts
+                        else f"env CLAUDE_CONFIG_DIR={Path.home()}/.claude-{{account}} claude")
     # Run (run_game.py) reads these; the hotseat game has no civ6-mcp files of its own.
     a.track, a.goal, a.game_key, a.run_id, a.civ6mcp_dir, a.civ = "standard", None, a.game_id, a.game_id, "", ""
     a.agent_name, a.max_sessions, a.prepare, a.load_save, a.start_save = "", 10**6, False, None, None
