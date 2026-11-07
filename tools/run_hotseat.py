@@ -41,7 +41,9 @@ import timeline as tl  # noqa: E402
 
 COORDINATOR_ONLY = ["bench_stats", "bench_launch_staged_game", "load_hotseat_save", "list_saves"]
 TURN_PROMPT = 'Turn {turn}: your turn, {leader}. Call begin_standin_turn("{leader}"), play the turn, then end_turn once.'
-NOT_ENDED = ('The game is still on your turn {turn}: it did not end. Finish the turn and call end_turn; when it reports '
+NOT_ENDED = ('The game is still on your turn {turn}: it did not end, or it was reloaded to the start of the turn because '
+             'the AI civs\' turn after it hung (tools/hotseat_doctor.py), which undoes your orders from that turn. Call '
+             'begin_standin_turn("{leader}"), check what is done, finish the turn and call end_turn; when it reports '
              'that the turn ended, stop.')
 STATUS_RE = re.compile(r"turn (\d+): local player is .*?\(slot (\d+), player name '(.*?)'\), turn active=(True|False)")
 
