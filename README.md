@@ -9,7 +9,7 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 | # | Setup | Status |
 |---|---|---|
 | 1 | Opus 5.5 (high effort) vs the built-in AI on Pangaea, standard size, Quick, Prince, **with** the civ6-mcp playbook | **Science victory, turn 262**, $67.83 API-equivalent ([results](results/g1-standard/)) |
-| 2 | Same map, **rules only**, no strategy playbook | running |
+| 2 | Same map, **rules only**, no strategy playbook | **Science victory, turn 266**, $72.32 API-equivalent, about $7 of it in two harness stalls ([results](results/g2-baseline/)) |
 | 3 | Assigned victory goal (Science, then Domination), Online speed. Every victory type stays on, and any win counts; we also record whether it matched the goal | planned |
 | 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs | planned |
 
@@ -40,7 +40,7 @@ Three changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 - **Interventions**: anything done to a running game from outside the agent (a harness tool call while debugging, a screen closed by hand, a restart to deploy a fix) goes in `interventions.jsonl` with its turn and effect.
 - Before the agent starts, `--prepare` loads the start save and checks that every unit has full moves, so a stray click during the load can't cost the agent a turn (see [docs/setup.md](docs/setup.md)).
 
-Results land in [`results/`](results/). Details are in [`docs/plan.md`](docs/plan.md).
+Results land in [`results/`](results/); `tools/report.py` builds one page comparing all games. Details are in [`docs/plan.md`](docs/plan.md).
 
 ## Layout
 
