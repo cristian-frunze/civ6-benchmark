@@ -62,7 +62,7 @@ def main() -> None:
                   f"{sum(t['requests'] for t in xs) / len(xs):.1f} requests/turn")
     main_diary = next((d for d in diaries if not d.stem.endswith("_cities")), None)
     if main_diary:
-        rows = [json.loads(ln) for ln in open(main_diary)]
+        rows = list({(r.get("turn"), r.get("civ")): r for r in map(json.loads, open(main_diary))}.values())  # last row per civ and turn
         top = max(r.get("turn", 0) for r in rows)
         print(f"standings at turn {top} (civ, score, cities, science, techs, civics, military, agent):")
         for r in sorted((r for r in rows if r.get("turn") == top), key=lambda r: -r.get("score", 0)):

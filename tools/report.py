@@ -109,7 +109,7 @@ font-size:12.5px;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;white-space:
 .agent{font-weight:600}
 </style></head><body><main>
 <h1>Civ 6 benchmark: Opus 5.5</h1>
-<p class="sub">Claude Opus 5.5 (high effort) against the game's built-in AI, base game, Prince, standard Pangaea, same seed. Costs are API-equivalent at list prices.</p>
+<p class="sub">Claude Opus 5.5 (high effort) against the game's built-in AI, base game, Prince, standard Pangaea, same seed and civs. Games 1-2 at Quick speed (330-turn limit), later games at Online speed (250). Costs are API-equivalent at list prices.</p>
 <div class="card"><table id="summary"></table></div>
 <h2>Cumulative API-equivalent cost</h2><p class="note">Dollars spent by the end of each turn.</p>
 <div class="card"><div class="legend" id="lg-cost"></div><div class="chart" id="c-cost"></div></div>
