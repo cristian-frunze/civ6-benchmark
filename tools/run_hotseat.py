@@ -46,10 +46,23 @@ NOT_ENDED = ('The game is still on your turn {turn}: it did not end. Finish the 
 STATUS_RE = re.compile(r"turn (\d+): local player is .*?\(slot (\d+), player name '(.*?)'\), turn active=(True|False)")
 
 
-def seat_system_prompt() -> str:
+WHO_MANY = ("Several Claude agents share this game, each playing its own civilization, alongside civilizations run by "
+            "the game's built-in AI. The game runs in hotseat mode: the agents take their turns one after another, then "
+            "the AI civilizations move. Every other civilization is a rival, whether an agent or the AI runs it. You "
+            "don't know which civilizations the other agents play.")
+WHO_ONE = ("You are the only agent in this game: every other civilization is run by the game's built-in AI, and every "
+           "one is a rival. The game runs in hotseat mode, so your turn arrives as a message, then the AI civilizations "
+           "move.")
+DEALS = ("- Deals and proposals you send to an agent's civilization are answered on that civilization's turn, not at "
+         "once. Proposals from them show up in your pending trades and diplomacy. An agent may keep or break a promise, "
+         "just as you may.\n")
+
+
+def seat_system_prompt(seats: int = 2) -> str:
     speed = "\n".join(ln for ln in (rg.PROMPTS / "speed.md").read_text().splitlines() if "get_turn_briefing" not in ln)
-    parts = [(rg.VENDOR / "AGENTS.md").read_text(), (rg.PROMPTS / "base-game.md").read_text(), speed,
-             (rg.PROMPTS / "hotseat.md").read_text()]
+    hotseat = (rg.PROMPTS / "hotseat.md").read_text().format(
+        who=WHO_MANY if seats > 1 else WHO_ONE, deals=DEALS if seats > 1 else "")
+    parts = [(rg.VENDOR / "AGENTS.md").read_text(), (rg.PROMPTS / "base-game.md").read_text(), speed, hotseat]
     return "\n\n".join(p.strip() for p in parts) + "\n"
 
 
@@ -66,7 +79,7 @@ class Seat(rg.Run):
         self.acct: str | None = None
 
     def write_setup(self) -> None:
-        (self.dir / "system.md").write_text(seat_system_prompt())
+        (self.dir / "system.md").write_text(seat_system_prompt(len(self.a.seat)))
         (self.dir / "mcp.json").write_text(json.dumps({"mcpServers": {"civ6": {
             "type": "http", "url": self.a.mcp_url, "timeout": 900_000}}}, indent=2))
         (self.dir / "settings.json").write_text(json.dumps({"disableAllHooks": True}, indent=2))
@@ -292,6 +305,41 @@ class Game:
                 warroom.terminate()
 
 
+HOTSEAT_LEADERS = ["LEADER_GILGAMESH", "LEADER_TRAJAN", "LEADER_GORGO", "LEADER_PEDRO",
+                   "LEADER_BARBAROSSA", "LEADER_T_ROOSEVELT", "LEADER_CLEOPATRA", "LEADER_PHILIP_II"]  # lua/new-hotseat.lua
+
+
+def prepare(a: argparse.Namespace, game: "Game") -> None:
+    """Make a fresh hotseat game on the game PC and start it: the hotseat server's env file, the game hosted from the
+    main menu by windows/new-start.ps1 + lua/new-hotseat.lua (one human seat per agent, AI in the rest), the server
+    restarted in hotseat mode, and the staging room launched through the bridge."""
+    slots = sorted(game.seats)
+    if slots != list(range(len(slots))) or any(game.seats[i].leader != HOTSEAT_LEADERS[i] for i in slots):
+        raise SystemExit(f"run_hotseat: --prepare needs seats 0..n-1 with the leaders of lua/new-hotseat.lua: "
+                         f"{HOTSEAT_LEADERS[:len(slots)]}")
+    remote = rg.REPO / "remote"
+    env = {"CIV_MCP_DISABLE_LUA": "1", "CIV_MCP_AGENT_MODEL": a.model, "CIV_MCP_SERVER": "hotseat",
+           "CIV_MCP_RUN_ID": a.game_id}
+    write = (f"Set-Content -Path (Join-Path $env:USERPROFILE 'civ6-bench\\mcp-env.json') -Value '{json.dumps(env)}' "
+             "-Encoding UTF8; 'env written'")
+    print(subprocess.run([str(remote / "zps.sh"), "-c", write], capture_output=True, text=True).stdout.strip(),
+          file=sys.stderr)
+    script = game.dir / "new-start.ps1"
+    script.write_text(f"$Speed = 'GAMESPEED_{a.speed.upper()}'; $Seed = {a.seed}; $LuaFile = 'new-hotseat.lua'; "
+                      f"$Extra = 'HUMANS = {len(slots)}'\n" + (rg.REPO / "windows" / "new-start.ps1").read_text())
+    out = subprocess.run([str(remote / "zexec.sh"), str(script), "740"], capture_output=True, text=True).stdout
+    print(out.strip(), file=sys.stderr)
+    if "hotseat game hosted" not in out:
+        raise SystemExit("run_hotseat: --prepare could not host the hotseat game")
+    out = subprocess.run([str(remote / "zexec.sh"), str(rg.REPO / "windows" / "restart-mcp-http.ps1"), "180"],
+                         capture_output=True, text=True).stdout
+    print(f"run_hotseat: {out.strip()}", file=sys.stderr)
+    out = game.helper.mcp("bench_launch_staged_game", timeout=600)
+    print(f"run_hotseat: {out.strip()}", file=sys.stderr)
+    if "Started in" not in out:
+        raise SystemExit("run_hotseat: --prepare could not start the staged game")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--game-id", required=True)
@@ -314,6 +362,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20261106, help="the map seed, for the war room's file key")
     ap.add_argument("--warroom", help="also run the war room collector, publishing the page to this folder")
     ap.add_argument("--print-prompts", action="store_true")
+    ap.add_argument("--prepare", action="store_true",
+                    help="make a fresh hotseat game on the game PC first (kills the running game)")
     a = ap.parse_args()
     if not a.claude_cmd:
         # Game.play holds one machine slot for the whole game, as run_on_account.py does for its run, so claude starts
@@ -323,13 +373,16 @@ def main() -> None:
                         else f"env CLAUDE_CONFIG_DIR={Path.home()}/.claude-{{account}} claude")
     # Run (run_game.py) reads these; the hotseat game has no civ6-mcp files of its own.
     a.track, a.goal, a.game_key, a.run_id, a.civ6mcp_dir, a.civ = "standard", None, a.game_id, a.game_id, "", ""
-    a.agent_name, a.max_sessions, a.prepare, a.load_save, a.start_save = "", 10**6, False, None, None
+    fresh, a.prepare = a.prepare, False
+    a.agent_name, a.max_sessions, a.load_save, a.start_save = "", 10**6, None, None
     game = Game(a)
     if a.print_prompts:
-        print(seat_system_prompt())
+        print(seat_system_prompt(len(a.seat)))
         print("=" * 80)
         print(next(iter(game.seats.values())).kickoff(1))
         return
+    if fresh:
+        prepare(a, game)
     why = game.play()
     print(f"run_hotseat: stopped: {why}", file=sys.stderr)
 

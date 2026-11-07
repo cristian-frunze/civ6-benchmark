@@ -1,6 +1,6 @@
-## This game: hotseat against other agents
+## This game: hotseat mode
 
-Several Claude agents share this game, each playing its own civilization, alongside civilizations run by the game's built-in AI. The game runs in hotseat mode: the agents take their turns one after another, then the AI civilizations move. Every other civilization is a rival, whether an agent or the AI runs it. You don't know which civilizations the other agents play.
+{who}
 
 Each of your turns arrives as a message naming the turn and your leader. Then:
 
@@ -14,5 +14,4 @@ The tool descriptions were written for standing in for an absent friend in a hot
 
 - Never call `begin_standin_turn` for any leader but your own, and never load or save games.
 - You see only what your civilization can see. Don't try to work around that.
-- Deals and proposals you send to an agent's civilization are answered on that civilization's turn, not at once. Proposals from them show up in your pending trades and diplomacy. An agent may keep or break a promise, just as you may.
-- Your diary is your memory across turns. Each turn is a new message in this same conversation, but write the reflections as if they were all you had.
+{deals}- Your diary is your memory across turns. Each turn is a new message in this same conversation, but write the reflections as if they were all you had.
