@@ -39,6 +39,11 @@ RULES = [
     (re.compile(r"local can = UI\.CanEndTurn\(\);"),
      "local can = UI.CanEndTurn() and NotificationManager.GetFirstEndTurnBlocking(Game.GetLocalPlayer()) "
      "== EndTurnBlockingTypes.NO_ENDTURN_BLOCKING;"),
+    # set_research / set_civic refuse anything already researched, but Future Tech and Future Civic repeat: once every
+    # tech is done, the game asks for Future Tech again each turn and the turn could not end (game 2, turn 238).
+    (re.compile(r"if Players\[id\]:(GetTechs|GetCulture)\(\):(HasTech|HasCivic)\(idx\) then"),
+     lambda m: f"if Players[id]:{m[1]}():{m[2]}(idx) and not "
+               f"GameInfo.{'Technologies' if m[2] == 'HasTech' else 'Civics'}[idx].Repeatable then"),
 ]
 
 _OVERVIEW_RULES = [
