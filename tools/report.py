@@ -17,7 +17,13 @@ import statistics
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PRICE = {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 8}
+PRICES = {k: v for k, v in json.loads((REPO / "warroom" / "prices.json").read_text()).items() if isinstance(v, dict)}
+
+
+def price(model: str) -> dict:
+    """$/MTok for the game's model, with 1-hour cache writes as the runners use them."""
+    p = PRICES.get(model) or PRICES["claude-opus-5-5"]
+    return {"input": p["input"], "output": p["output"], "cache_read": p["cache_read"], "cache_write": p["cache_write_1h"]}
 LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only", "g3-science": "Game 3, Science goal",
           "g4-domination": "Game 4, Domination goal"}
 
@@ -68,6 +74,7 @@ def load(gid: str, src: Path) -> dict:
                          "cities": r.get("cities"), "science": round(r.get("science") or 0),
                          "techs": r.get("techs_completed"), "civics": r.get("civics_completed"),
                          "military": r.get("military")} for r in last or []), key=lambda r: -(r["score"] or 0))
+    model = next((r.get("agent_model") for r in diary.values() if r.get("is_agent") and r.get("agent_model")), "")
     S = lambda k: sum(t.get(k) or 0 for t in turns)  # noqa: E731
     secs = [t["end"] - t["start"] for t in turns if t.get("end") and t.get("start")]
     wall = (max(t["end"] for t in turns) - min(t["start"] for t in turns)) / 3600 if turns else 0
@@ -78,7 +85,7 @@ def load(gid: str, src: Path) -> dict:
         "median_s": round(statistics.median(secs)) if secs else 0, "wall_h": round(wall, 1),
         "requests": S("requests"), "tool_calls": S("tool_calls"), "tool_errors": S("tool_errors"),
         "output": S("output"), "cache_read": S("cache_read"), "cache_write": S("cache_write"), "input": S("input"),
-        "split": {k: round(S(k) * p / 1e6, 2) for k, p in PRICE.items()},
+        "split": {k: round(S(k) * p / 1e6, 2) for k, p in price(model).items()},
         "cost": cost_series, "lead": lead_series, "sci": sci_series, "standings": standings,
     }
 

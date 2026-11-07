@@ -16,7 +16,15 @@ import statistics
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PRICE = {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 8}  # Opus 5.5 $/MTok, 1-hour cache writes
+
+
+def price(run: Path) -> dict:
+    """$/MTok for the game's model (warroom/prices.json), with 1-hour cache writes as the runners use them."""
+    model = "claude-opus-5-5"
+    if (run / "game.json").exists():
+        model = (json.loads((run / "game.json").read_text()).get("agents") or [{}])[0].get("model") or model
+    p = json.loads((REPO / "warroom" / "prices.json").read_text())[model]
+    return {"output": p["output"], "cache_read": p["cache_read"], "cache_write": p["cache_write_1h"], "input": p["input"]}
 
 
 def gz(src: Path, dst: Path) -> None:
@@ -45,8 +53,7 @@ def hotseat(run: Path, out: Path) -> None:
         print(f"  {seat} ({xs[0]['leader']}): {len({r['turn'] for r in xs})} turns, ${sum(r.get('usd') or 0 for r in xs):.2f}, "
               f"median {statistics.median(r['seconds'] for r in xs):.0f} s, {sum(r.get('requests') or 0 for r in xs)} requests, "
               f"{sum(1 for r in xs if r.get('try', 1) > 1)} retries")
-    PRICE_KEYS = ("output", "cache_read", "cache_write", "input")
-    print("cost split: " + ", ".join(f"{k} ${sum(r.get(k) or 0 for r in rows) * PRICE[k] / 1e6:.2f}" for k in PRICE_KEYS))
+    print("cost split: " + ", ".join(f"{k} ${sum(r.get(k) or 0 for r in rows) * p / 1e6:.2f}" for k, p in price(run).items()))
     last = [json.loads(ln) for ln in open(run / "rounds.jsonl")][-1]
     print(f"standings at turn {last.get('turn')} (civ, score, cities, science, techs, civics, military, agent), "
           f"winning team {last.get('winning_team')}:")
@@ -88,7 +95,7 @@ def main() -> None:
     print(f"turns {len(turns)} (last {turns[-1]['turn']}), wall {wall:.2f} h, median {statistics.median(secs):.0f} s/turn")
     print(f"usd {S('usd'):.2f}; requests {S('requests')}; tool calls {S('tool_calls')} ({S('tool_errors')} errors)")
     print(f"tokens: output {S('output'):,}, cache read {S('cache_read'):,}, cache write {S('cache_write'):,}, input {S('input'):,}")
-    print("cost split: " + ", ".join(f"{k} ${S(k) * p / 1e6:.2f}" for k, p in PRICE.items()))
+    print("cost split: " + ", ".join(f"{k} ${S(k) * p / 1e6:.2f}" for k, p in price(run).items()))
     last = turns[-1]["turn"]
     for lo in range(1, last + 1, 50):
         hi = min(lo + 49, last)
