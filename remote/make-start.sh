@@ -11,7 +11,7 @@ t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 
 # 1. A new game from the main menu, up to the leader screen (windows/new-start.ps1).
 { echo "\$Speed = '$speed'; \$Seed = $seed; \$Extra = \"DIFFICULTY = '$difficulty'\""; cat "$win/new-start.ps1"; } > "$t/ns.ps1"
-out=$("$here/zexec.sh" "$t/ns.ps1" 900)
+out=$("$here/zexec.sh" "$t/ns.ps1" 1000)
 echo "$out"
 grep -q "LOADED" <<<"$out" || { echo "make-start: the new game did not load"; exit 1; }
 
