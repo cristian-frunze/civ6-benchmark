@@ -22,7 +22,7 @@ Writes, in --runtime-dir/<game-id>/:
   seats/<seat>/        that agent's system.md, mcp.json, sessions.json and the raw stream-json events/ of each turn
 
     python3 tools/run_hotseat.py --game-id h1-four-opus --speed Online --turn-limit 250 \\
-        --seat 0:LEADER_GILGAMESH:Opus-A --seat 1:LEADER_PERICLES:Opus-B ...
+        --seat 0:LEADER_GILGAMESH:Opus-A --seat 1:LEADER_TRAJAN:Opus-B ...
 """
 
 from __future__ import annotations

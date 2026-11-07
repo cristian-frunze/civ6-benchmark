@@ -188,17 +188,30 @@ _STATS_LUA = (
     "    local nc, pop = 0, 0 "
     "    for _, c in p:GetCities():Members() do nc = nc + 1 pop = pop + c:GetPopulation() end "
     "    local st = p:GetStats() "
-    "    local f = {i, cfg:GetLeaderTypeName(), Locale.Lookup(cfg:GetCivilizationShortDescription()), "
-    "      tostring(alive), tostring(p:IsHuman()), p:GetTeam(), p:GetScore(), nc, pop, "
-    "      string.format('%.1f', p:GetTechs():GetScienceYield()), string.format('%.1f', p:GetCulture():GetCultureYield()), "
-    "      string.format('%.1f', p:GetTreasury():GetGoldBalance()), st:GetMilitaryStrength(), "
-    "      st:GetNumTechsResearched(), st:GetNumCivicsCompleted()} "
-    "    for k = 1, #f do f[k] = string.gsub(tostring(f[k]), '|', '/') end "
+    "    local function v(fn) local ok, r = pcall(fn) if ok and r ~= nil then return tostring(r) end return '-1' end "
+    "    local f = {tostring(i), v(function() return cfg:GetLeaderTypeName() end), "
+    "      v(function() return Locale.Lookup(cfg:GetCivilizationShortDescription()) end), "
+    "      tostring(alive), tostring(p:IsHuman()), v(function() return p:GetTeam() end), v(function() return p:GetScore() end), "
+    "      tostring(nc), tostring(pop), "
+    "      v(function() return string.format('%.1f', p:GetTechs():GetScienceYield()) end), "
+    "      v(function() return string.format('%.1f', p:GetCulture():GetCultureYield()) end), "
+    "      v(function() return string.format('%.1f', p:GetTreasury():GetGoldBalance()) end), "
+    "      v(function() return st:GetMilitaryStrength() end), v(function() return st:GetNumTechsResearched() end), "
+    "      v(function() return st:GetNumCivicsCompleted() end)} "
+    "    for k = 1, #f do f[k] = string.gsub(f[k], '|', '/') end "
     "    print('MAJOR|' .. table.concat(f, '|')) "
     "  end "
     "end "
     "print('---END---')"
 )
+def _int(x: str, as_float: bool = False):
+    """A number printed by Lua, or -1 when it printed nil."""
+    try:
+        return float(x) if as_float else int(float(x))
+    except ValueError:
+        return -1
+
+
 _STAT_KEYS = ["id", "leader", "civ", "alive", "human", "team", "score", "cities", "pop", "science", "culture",
               "gold", "military", "techs", "civics"]
 
@@ -211,15 +224,15 @@ async def bench_stats(ctx: Context) -> str:
     for ln in lines:
         f = ln.split("|")
         if f[0] == "GAME" and len(f) >= 4:
-            out.update(turn=int(f[1]), winning_team=int(f[2]), local_player=int(f[3]))
+            out.update(turn=_int(f[1]), winning_team=_int(f[2]), local_player=_int(f[3]))
         elif f[0] == "MAJOR" and len(f) == len(_STAT_KEYS) + 1:
             row = dict(zip(_STAT_KEYS, f[1:]))
             for k in ("alive", "human"):
                 row[k] = row[k] == "true"
             for k in ("id", "team", "score", "cities", "pop", "military", "techs", "civics"):
-                row[k] = int(float(row[k]))
+                row[k] = _int(row[k])
             for k in ("science", "culture", "gold"):
-                row[k] = float(row[k])
+                row[k] = float(_int(row[k], as_float=True))
             out["players"].append(row)
     return json.dumps(out)
 

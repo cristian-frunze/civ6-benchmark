@@ -7,6 +7,10 @@
 # After it: click BEGIN GAME, keep the turn-1 autosave with windows/keep-start.ps1, start the Civ6Mcp task again.
 # Settings (prepend lines like these, as zexec runs one file):
 #   $Speed = 'GAMESPEED_ONLINE'; $Seed = 20261106
+#   $LuaFile = 'new-hotseat.lua'   # a hotseat game instead (lua/new-hotseat.lua): it stops in the staging room, and
+#                              # civ_mcp_hotseat.py's bench_launch_staged_game starts it; $Extra adds Lua globals,
+#                              # e.g. $Extra = 'HUMANS = 1'
+if (-not $LuaFile) { $LuaFile = 'new-game.lua' }   # not $Lua: PowerShell names ignore case, and $lua is the folder
 if (-not $Speed) { $Speed = 'GAMESPEED_QUICK' }
 if (-not $Seed) { $Seed = 20261106 }
 $ErrorActionPreference = 'Continue'
@@ -32,16 +36,20 @@ function Wait-Port($seconds) {
 
 Stop-ScheduledTask -TaskName Civ6Mcp -ErrorAction SilentlyContinue
 Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*civ6-mcp*" } | Stop-Process -Force
-Get-Process CivilizationVI -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep 12   # Steam deregisters the game
-Start-ScheduledTask -TaskName Civ6Launch
-if (-not (Wait-Port 240)) { "FAILED: FireTuner port did not open"; return }
-"port open after launch"
+if (-not $NoRestart) {   # $NoRestart = 1 when the game already sits at the main menu
+    Get-Process CivilizationVI -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep 12   # Steam deregisters the game
+    # Started outside Steam, the game exits and Steam starts it again, so the first port can close again.
+    Start-ScheduledTask -TaskName Civ6Launch
+    Start-Sleep 20
+}
+if (-not (Wait-Port 300)) { "FAILED: FireTuner port did not open"; return }
+"port open"
 
 # The copyright screen, then the main menu. Each state shows up only once the screen before it is gone.
 $t0 = Get-Date; $menu = $false
 $noop = Join-Path $env:TEMP 'bench-noop.lua'; Set-Content -Path $noop -Value 'print("noop")'
-while (((Get-Date) - $t0).TotalSeconds -lt 180 -and -not $menu) {
+while (((Get-Date) - $t0).TotalSeconds -lt 300 -and -not $menu) {
     $states = Tuner '__none__' $noop 6
     if ($states -match "'MainMenu'") { $menu = $true; break }
     if ($states -match "'IntroScreen'") { Tuner 'IntroScreen' (Join-Path $lua 'accept-eula.lua') 6 | Out-Null }
@@ -51,9 +59,14 @@ if (-not $menu) { "FAILED: no MainMenu state"; return }
 "main menu up"
 
 $file = Join-Path $env:TEMP 'bench-new-game.lua'
-Set-Content -Path $file -Encoding UTF8 -Value ("SPEED = '$Speed'`nGAME_SEED = $Seed`nMAP_SEED = $Seed`n" + (Get-Content (Join-Path $lua 'new-game.lua') -Raw))
+Set-Content -Path $file -Encoding UTF8 -Value ("SPEED = '$Speed'`nGAME_SEED = $Seed`nMAP_SEED = $Seed`n$Extra`n" + (Get-Content (Join-Path $lua $LuaFile) -Raw))
 $started = Get-Date
 Tuner 'MainMenu' $file 20
+if ($LuaFile -like '*hotseat*') {
+    Start-Sleep 5
+    Select-String -Path $log -Pattern 'NEWHOTSEAT' | Select-Object -Last 12 | ForEach-Object { $_.Line }
+    "hotseat game hosted: start the hotseat MCP server, then call bench_launch_staged_game"; return
+}
 
 while (((Get-Date) - $started).TotalSeconds -lt 300) {
     if ((Test-Path $log) -and (Get-Item $log).LastWriteTime -gt $started -and (Select-String -Path $log -Pattern 'OnLoadGameViewStateDone' -Quiet)) {

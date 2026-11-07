@@ -11,8 +11,9 @@ local C = {
   game_seed  = GAME_SEED  or 20261106,
   map_seed   = MAP_SEED   or 20261106,
   -- seat order: humans first; names show on the turn-change screen
-  leaders    = LEADERS    or { "LEADER_GILGAMESH", "LEADER_PERICLES", "LEADER_CLEOPATRA", "LEADER_TRAJAN",
-                               "LEADER_BARBAROSSA", "LEADER_PHILIP_II", "LEADER_T_ROOSEVELT", "LEADER_PEDRO" },
+  -- same leaders and slot order as the single-player starts (new-game.lua with this seed), so slot 0 is Sumeria
+  leaders    = LEADERS    or { "LEADER_GILGAMESH", "LEADER_TRAJAN", "LEADER_GORGO", "LEADER_PEDRO",
+                               "LEADER_BARBAROSSA", "LEADER_T_ROOSEVELT", "LEADER_CLEOPATRA", "LEADER_PHILIP_II" },
   names      = NAMES      or { "Opus A", "Opus B", "Opus C", "Opus D" },
   humans     = HUMANS     or 4,
 }
