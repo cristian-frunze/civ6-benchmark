@@ -44,6 +44,18 @@ RULES = [
     (re.compile(r"if Players\[id\]:(GetTechs|GetCulture)\(\):(HasTech|HasCivic)\(idx\) then"),
      lambda m: f"if Players[id]:{m[1]}():{m[2]}(idx) and not "
                f"GameInfo.{'Technologies' if m[2] == 'HasTech' else 'Civics'}[idx].Repeatable then"),
+    # The game-over check names the victory with fallback tests. Game 4 won by Domination on turn 170 but was reported
+    # as a Culture victory: the domination test reads PlayerCities:GetOriginalCapital(), which the base game lacks, so
+    # it failed inside its pcall, and the culture test then counted 0 visiting tourists against 0 domestic ones as
+    # culturally dominant. Domination: look for each rival's original capital among the winner's cities instead.
+    (re.compile(r"local oCap = q:GetCities\(\):GetOriginalCapital\(\)\s+"
+                r"if oCap and oCap:GetOwner\(\) == winnerId then owned = owned \+ 1 end"),
+     "local held = false "
+     "for _, c in wp:GetCities():Members() do "
+     "if c:IsOriginalCapital() and c:GetOriginalOwner() == i then held = true end end "
+     "if held then owned = owned + 1 end"),
+    # Culture: no tourists at all is not dominance.
+    (re.compile(r"if visit < stay then"), "if visit <= 0 or visit < stay then"),
 ]
 
 _OVERVIEW_RULES = [
