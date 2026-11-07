@@ -80,7 +80,8 @@ def load(gid: str, src: Path) -> dict:
     wall = (max(t["end"] for t in turns) - min(t["start"] for t in turns)) / 3600 if turns else 0
     return {
         "id": gid, "title": title, "result": result, "turns": len(turns),
-        "last_turn": lead_series[-1][0] if lead_series else (turns[-1]["turn"] if turns else 0),
+        "last_turn": int(won[1]) if (won := re.search(r"turn (\d+)", result)) else
+                     (lead_series[-1][0] if lead_series else (turns[-1]["turn"] if turns else 0)),
         "usd": round(S("usd"), 2), "usd_per_turn": round(S("usd") / max(len(turns), 1), 3),
         "median_s": round(statistics.median(secs)) if secs else 0, "wall_h": round(wall, 1),
         "requests": S("requests"), "tool_calls": S("tool_calls"), "tool_errors": S("tool_errors"),
@@ -95,11 +96,11 @@ PAGE = r"""<!doctype html>
 <title>Civ 6 Benchmark</title>
 <style>
 :root{color-scheme:light;--bg:#f6f6f4;--surface:#fcfcfb;--line:#e4e3df;--grid:#ecebe7;--ink:#0b0b0b;--ink2:#52514e;--ink3:#7a7974;
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--zero:#b9b8b2}
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--zero:#b9b8b2}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#121211;--surface:#1a1a19;--line:#2c2c2a;
---grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--zero:#55544f}}
+--grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--zero:#55544f}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#121211;--surface:#1a1a19;--line:#2c2c2a;--grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;
---ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--zero:#55544f}
+--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--zero:#55544f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:980px;margin:0 auto;padding:28px 16px 60px}h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:34px 0 4px}
 .sub{color:var(--ink2);margin:0 0 18px}.note{color:var(--ink3);font-size:13px;margin:4px 0 10px}
@@ -129,7 +130,7 @@ font-size:12.5px;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;white-space:
 </main>
 <script>
 const G = __DATA__;
-const COL = ["var(--s1)","var(--s2)","var(--s3)"];
+const COL = ["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
 const fmt = (n, d=0) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function sw(i){return `<span class="sw" style="background:${COL[i]}"></span>`}
