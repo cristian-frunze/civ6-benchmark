@@ -14,6 +14,9 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 | 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs, both as hotseat games so the map is the same | **(B) 4 Opus + 4 AI: Science victory on turn 157 by Rome, an Opus seat**, $277.02 for all four seats, 12.2 hours. The four agents averaged 482 score to the AI civs' 291, and three of them raced for space ([results](results/h1-four-opus/)). (A) 1 Opus + 7 AI running |
 | 5 | Game 3's setup (Science goal, Online) on **Deity**, the hardest level, instead of Prince | queued after experiment 4 |
 | 6 | Game 3's setup with **Sonnet 5.5** (high effort) instead of Opus 5.5 | queued after game 5 |
+| 7 | Game 3 **repeated** exactly (same start, same prompt), to see how much one game varies from the next | queued after game 6 |
+| 8 | Game 3's setup with Opus 5.5 at **medium effort** (Claude Code's default) instead of high | queued after game 7 |
+| 9 | Game 3's setup with **Fable 5.1** (high effort) | queued after game 8 |
 
 All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
 
