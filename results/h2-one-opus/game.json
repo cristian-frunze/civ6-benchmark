@@ -1,0 +1,20 @@
+{
+  "title": "One Opus 5.5 agent and seven built-in AI civs (hotseat)",
+  "game_id": "h2-one-opus",
+  "mode": "hotseat",
+  "effort": "high",
+  "difficulty": "Prince",
+  "map": "Pangaea, standard size",
+  "speed": "Online",
+  "turn_limit": 250,
+  "game_key": "hotseat_20261106_h2-one-opus",
+  "started_at": "2026-11-08T05:40:56+00:00",
+  "agents": [
+    {
+      "name": "Opus",
+      "slot": 0,
+      "leader": "LEADER_GILGAMESH",
+      "model": "claude-opus-5-5"
+    }
+  ]
+}
