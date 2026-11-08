@@ -28,7 +28,8 @@ def price(model: str) -> dict:
 LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only", "g3-science": "Game 3, Science goal",
           "g4-domination": "Game 4, Domination goal", "g5-deity-science": "Game 5, Deity, Science goal",
           "g6-sonnet-science": "Game 6, Sonnet 5.5, Science goal", "g7-science-repeat": "Game 7, game 3 repeated",
-          "g8-opus-medium": "Game 8, Opus medium effort", "g9-fable-science": "Game 9, Fable 5.1, Science goal"}
+          "g8-opus-medium": "Game 8, Opus medium effort", "g9-fable-science": "Game 9, Fable 5.1, Science goal",
+          "g10-fixed-harness": "Game 10, game 3 on the fixed harness"}
 
 
 def _rows(path: Path) -> list[dict]:

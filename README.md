@@ -14,9 +14,10 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 | 4 | Opus vs Opus on a standard 8-civ map, Online speed: (A) 1 Opus + 7 AI vs (B) 4 Opus + 4 AI, same seed and civs, both as hotseat games so the map is the same | **(B) 4 Opus + 4 AI: Science victory on turn 157 by Rome, an Opus seat**, $277.02 for all four seats, 12.2 hours. The four agents averaged 482 score to the AI civs' 291, and three of them raced for space ([results](results/h1-four-opus/)). **(A) 1 Opus + 7 AI: Science victory on turn 168**, $78.02, 2.9 hours, no interventions; on the same map it played far stronger than game 3 (score 268 to 185 and 36 techs to 27 by turn 100) and won 44 turns earlier ([results](results/h2-one-opus/)) |
 | 5 | Game 3's setup (Science goal, Online) on **Deity**, the hardest level, instead of Prince | **Defeat: Greece (AI) won a Science victory on turn 144**; Opus finished last (score 218 to the AI's 415-549, 37 techs to Greece's 68), $37.80 ([results](results/g5-deity-science/)) |
 | 6 | Game 3's setup with **Sonnet 5.5** (high effort) instead of Opus 5.5 | **Science victory, turn 223** (Opus: 212), $58.70 (Opus: $56.43): half the token price, but cache reads cost the same and were 85% of the bill ([results](results/g6-sonnet-science/)) |
-| 7 | Game 3 **repeated** exactly (same start, same prompt), to see how much one game varies from the next | queued after game 6 |
-| 8 | Game 3's setup with Opus 5.5 at **medium effort** (Claude Code's default) instead of high | queued after game 7 |
-| 9 | Game 3's setup with **Fable 5.1** (high effort) | queued after game 8 |
+| 7 | Game 3 **repeated** exactly (same start, same prompt, same harness), to see how much one game varies from the next | running |
+| 8 | Game 3's setup with Opus 5.5 at **medium effort** (Claude Code's default) instead of high, on the fixed harness (below) | queued after game 7 |
+| 9 | Game 3's setup with **Fable 5.1** (high effort), on the fixed harness | queued after game 8 |
+| 10 | Game 3 repeated on the **fixed harness** (Opus 5.5, high effort): the baseline for games 8 and 9, and a measure of the fix | queued after game 9 |
 
 All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
 
@@ -26,11 +27,12 @@ Every game reports API-equivalent cost: input, output, cache-read and cache-writ
 
 Each agent is Claude Code in headless mode (`claude -p`) with the civ6-mcp tools and nothing else: no shell, files, web, CLAUDE.md, memory, hooks or skills (`tools/run_game.py` has the flags). Its system prompt is the CivBench playbook (or CivBench's minimal baseline for the rules-only game), plus three notes in [`prompts/`](prompts/): what the base game lacks, the batch tools below, and that nobody is watching. One line of the subscription's organization instructions still reaches the model; it is about connecting apps and has nothing to do with Civ.
 
-Three changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
+Four changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 
 - **Base game.** civ6-mcp targets Gathering Storm. Its Lua is rewritten on the fly to call `CB_` stand-ins for expansion APIs (`lua/base-game-compat.lua`), which return neutral values when the base game lacks them. Tools for systems the base game doesn't have (governors, dedications, World Congress) are removed.
 - **Batch tools.** A model step takes much longer than a tool call (0.3-1.5 s), so agents get `get_turn_briefing` (overview, units, cities and notifications in one call) and `issue_orders` (a list of unit, city and research orders in one call). Every inner call is still logged as its own tool call.
 - **One shared tuner connection** over HTTP, see [setup](docs/setup.md).
+- **No unplayed turns after a diplomacy pause** (from game 8). When an AI civ opens a proposal during the AI turn, civ6-mcp tells the agent to answer it "then end_turn again", but by then the agent's next turn has begun, and agents ended 0 to 14 turns per game without playing them (`tools/turn_trap.py`). `end_turn` now reports the new turn instead, see [setup](docs/setup.md).
 
 ## What each game records
 

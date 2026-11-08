@@ -62,7 +62,7 @@ How often an agent ended a whole turn with no unit order this way:
 | 5 (Opus, Deity) | 38 | 9 | 0 |
 | **6 (Sonnet 5.5)** | 68 | 34 | **9** |
 
-It cost Sonnet about 9 of 223 turns and Opus 0 to 14 per game. The harness stays as it is until game 9, so that games 7 to 9 run under the same conditions as games 3 and 6. The fix belongs in the message: after an answer, the agent should check whether its next turn has started.
+It cost Sonnet about 9 of 223 turns and Opus 0 to 14 per game. Game 7 still runs on this harness, to repeat game 3 exactly. From game 8 on, `windows/civ_mcp_http.py` fixes it: with an end-turn request in flight it skips civ6-mcp's blocker check, so `end_turn` reports the turn change and says the new turn is open, and after the agent answers a session the AI civs were waiting on, the first `end_turn` of a turn it has not touched is refused once. Game 10 repeats game 3 on the fixed harness, as the baseline for games 8 and 9.
 
 ## Files
 

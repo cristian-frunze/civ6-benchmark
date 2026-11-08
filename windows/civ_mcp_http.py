@@ -177,6 +177,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # The AI civs also wait on a diplomacy session they open with the player mid-turn (game 4, turn 58: civ6-mcp
     # auto-dismissed Brazil's war declaration and reported that the turn had not advanced, but the AI turn was still
     # running, and America then opened a session that waited 20 minutes for an answer nobody was asked for).
+    # The player's turn has ended by then, so after the answer the next turn starts: the message must not say "call
+    # end_turn again", which would end that turn unplayed (see _pending_turn_report).
     async def _session_waiting(game) -> str | None:
         try:
             sessions = await game.get_diplomacy_sessions()
@@ -186,9 +188,57 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             return None
         names = ", ".join(f"{s.other_civ_name} ({s.other_leader_name})" for s in sessions)
         logging.getLogger("civ_mcp_http").info("AI turn waiting on a diplomacy session with %s", names)
-        return (f"The AI civs are waiting on you: a diplomacy session with {names} is open. Read it with "
-                "get_pending_diplomacy, answer it with respond_to_diplomacy (or respond_to_trade for a deal), then "
-                "call end_turn again.")
+        return (f"The AI civs are waiting on you: a diplomacy session with {names} is open. Your turn has already "
+                "ended. Read the session with get_pending_diplomacy and answer it with respond_to_diplomacy (or "
+                "respond_to_trade for a deal). The AI civs then finish their moves and your next turn starts: play "
+                "that turn (get_turn_briefing) before you call end_turn.")
+
+    async def _turn_number(game) -> int | None:
+        try:
+            lines = await game.conn.execute_read("print('TURN|' .. Game.GetCurrentGameTurn()) print('---END---')",
+                                                 timeout=10.0)
+        except Exception:
+            return None
+        return next((int(ln.split("|")[1]) for ln in lines if ln.startswith("TURN|")), None)
+
+    # The diplomacy-pause trap (games 1-6 lost 0 to 14 turns each, tools/turn_trap.py). An AI civ opens a proposal
+    # while the AI civs move; civ6-mcp's end_turn stops with "Turn paused ... respond_to_diplomacy, then end_turn
+    # again" and keeps its end-turn request in flight (_pending_end_turn). The answer lets the AI civs finish, so the
+    # player's next turn starts. The next end_turn is meant to report that turn change, but civ6-mcp first checks
+    # end-turn blockers, which now belong to the new turn ("empty queue in Nippur", units needing orders), and reports
+    # them as if the old turn were still open. Agents then skipped every unit "to finish the old turn" and lost the
+    # new one (game 6, turn 84). While a request is in flight there is nothing to unblock, so that first check is
+    # skipped and civ6-mcp reports the turn change, with a line saying whether the new turn still needs playing.
+    # Only the first query is skipped: civ6-mcp asks again when the turn fails to advance, and that answer counts.
+    import contextvars  # noqa: E402
+
+    from civ_mcp import lua as _lq  # noqa: E402
+
+    _IN_FLIGHT = contextvars.ContextVar("bench_end_turn_in_flight", default=None)
+    _original_blocking_query = _lq.build_end_turn_blocking_query
+
+    def _blocking_query():
+        skips = _IN_FLIGHT.get()
+        if skips and skips[0] > 0:
+            skips[0] -= 1
+            return f'print("NONE"); print("{_lq.SENTINEL}")'
+        return _original_blocking_query()
+
+    _lq.build_end_turn_blocking_query = _blocking_query
+
+    async def _pending_turn_report(fn, args, kwargs) -> str:
+        token = _IN_FLIGHT.set([1])
+        try:
+            out = await fn(*args, **kwargs)
+        finally:
+            _IN_FLIGHT.reset(token)
+        m = re.match(r"Turn (\d+) -> (\d+)", out) if isinstance(out, str) else None
+        if m:
+            logging.getLogger("civ_mcp_http").info("Reported turn %s -> %s after a diplomacy pause", m[1], m[2])
+            out = (f"Turn {m[1]} ended while you answered the AI civ, and this is its report. Your turn {m[2]} is "
+                   f"now open. If you have not played it yet, play it now; if you already have, call end_turn again "
+                   f"to end it.\n\n" + out)
+        return out
 
     def _units_first(fn):
         @functools.wraps(fn)
@@ -196,12 +246,24 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
             game = srv._get_game(ctx)
             if getattr(game, "_pending_end_turn", False):
-                return await fn(*args, **kwargs)  # a turn end in flight: civ6-mcp only polls GameCore
+                return await _pending_turn_report(fn, args, kwargs)  # a turn end in flight: civ6-mcp polls GameCore
+            # After a "waiting on you" answer, the first end_turn of the new turn is refused once: the agent may not
+            # have seen that its turn changed. Any order or overview since then shows it has (_clears_answered).
+            answered = getattr(game, "_bench_answered_at", None)
+            if answered is not None:
+                game._bench_answered_at = None
+                now = await _turn_number(game)
+                if now is not None and now > answered and await _turn_active(game):
+                    logging.getLogger("civ_mcp_http").info("Refused end_turn of unplayed turn %s", now)
+                    return (f"Your turn {now} started after you answered the AI civ, and you have not given any "
+                            f"orders in it yet. Play it first (get_turn_briefing), then call end_turn. If you meant "
+                            f"to end it without orders, call end_turn again.")
             if await _turn_active(game) is False:
                 for i in range(60):  # GameCore polls only, up to 5 minutes
                     if i in (0, 9):  # plus one InGame probe on entry and one at 45 s, as civ6-mcp's own polling does
                         msg = await _session_waiting(game)
                         if msg:
+                            game._bench_answered_at = await _turn_number(game)
                             return msg
                     await asyncio.sleep(5)
                     if await _turn_active(game) is not False:
@@ -230,6 +292,23 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool = mcp._tool_manager.get_tool("end_turn")
     _tool.fn = _units_first(_tool.fn)
+
+    def _clears_answered(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            if ctx is not None:
+                srv._get_game(ctx)._bench_answered_at = None
+            return await fn(*args, **kwargs)
+
+        return wrapper
+
+    # get_turn_briefing (defined below) calls get_game_overview and get_units, so it clears the flag too.
+    for _name in ("unit_action", "skip_remaining_units", "set_city_production", "set_research", "city_action",
+                  "purchase_item", "get_game_overview", "get_units"):
+        _tool = mcp._tool_manager.get_tool(_name)
+        if _tool is not None:
+            _tool.fn = _clears_answered(_tool.fn)
 
     _original_find_exe = launcher._find_game_exe_win32
 
