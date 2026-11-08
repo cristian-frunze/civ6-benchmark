@@ -1,0 +1,38 @@
+{
+  "title": "Four Opus 5.5 agents and four built-in AI civs (hotseat)",
+  "game_id": "h1-four-opus",
+  "mode": "hotseat",
+  "effort": "high",
+  "difficulty": "Prince",
+  "map": "Pangaea, standard size",
+  "speed": "Online",
+  "turn_limit": 250,
+  "game_key": "hotseat_20261106_h1-four-opus",
+  "started_at": "2026-11-07T17:10:00+00:00",
+  "agents": [
+    {
+      "name": "Opus-A",
+      "slot": 0,
+      "leader": "LEADER_GILGAMESH",
+      "model": "claude-opus-5-5"
+    },
+    {
+      "name": "Opus-B",
+      "slot": 1,
+      "leader": "LEADER_TRAJAN",
+      "model": "claude-opus-5-5"
+    },
+    {
+      "name": "Opus-C",
+      "slot": 2,
+      "leader": "LEADER_GORGO",
+      "model": "claude-opus-5-5"
+    },
+    {
+      "name": "Opus-D",
+      "slot": 3,
+      "leader": "LEADER_PEDRO",
+      "model": "claude-opus-5-5"
+    }
+  ]
+}

@@ -5,7 +5,8 @@
 
 Each --game is a results/<id>/ folder (turns.jsonl, diary.jsonl.gz) or, with =<dir>, a live run directory
 (archive/turns.jsonl, archive/civ6mcp/diary_*.jsonl). Without --game it uses every folder in results/. The page is
-self-contained (inline data, SVG drawn in the browser, no external scripts).
+self-contained (inline data, SVG drawn in the browser, no external scripts). Hotseat games are left out:
+tools/report_hotseat.py makes their page.
 """
 
 import argparse
@@ -188,7 +189,9 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--game", action="append", default=[], help="<id> (results/<id>) or <id>=<run dir>")
     a = ap.parse_args()
-    specs = a.game or sorted(p.name for p in (REPO / "results").iterdir() if p.is_dir())
+    # Hotseat games (rounds.jsonl) have several agents per game: tools/report_hotseat.py covers them.
+    specs = a.game or sorted(p.name for p in (REPO / "results").iterdir()
+                             if p.is_dir() and not (p / "rounds.jsonl").exists())
     games = []
     for spec in specs:
         gid, _, src = spec.partition("=")
