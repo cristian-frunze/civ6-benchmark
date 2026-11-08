@@ -56,6 +56,17 @@ RULES = [
      "if held then owned = owned + 1 end"),
     # Culture: no tourists at all is not dominance.
     (re.compile(r"if visit < stay then"), "if visit <= 0 or visit < stay then"),
+    # Score is the last fallback, but a Score victory needs the turn limit. Right when a space race ends, the game
+    # does not count the last project yet (game 5's first check said Score, one 39 s later Technology), so game 6's
+    # Science win on turn 223 of 250 was reported as a Score victory. Before the turn limit, a winner one project
+    # short of the space race won it.
+    (re.compile(r'(\n\s*)victoryType = "VICTORY_SCORE"'),
+     r'\1local svpL, needL, maxT = 0, 5, 0 '
+     r'pcall(function() svpL = wp:GetStats():CB_GetScienceVictoryPoints() '
+     r'needL = wp:GetStats():CB_GetScienceVictoryPointsTotalNeeded() end) '
+     r'pcall(function() maxT = Game.GetMaxTurns() end) '
+     r'if (maxT <= 0 or Game.GetCurrentGameTurn() < maxT) and svpL >= needL - 1 then '
+     r'victoryType = "VICTORY_TECHNOLOGY" else victoryType = "VICTORY_SCORE" end'),
 ]
 
 _OVERVIEW_RULES = [
