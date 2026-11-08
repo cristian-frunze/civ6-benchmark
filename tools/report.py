@@ -26,7 +26,9 @@ def price(model: str) -> dict:
     p = PRICES.get(model) or PRICES["claude-opus-5-5"]
     return {"input": p["input"], "output": p["output"], "cache_read": p["cache_read"], "cache_write": p["cache_write_1h"]}
 LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only", "g3-science": "Game 3, Science goal",
-          "g4-domination": "Game 4, Domination goal"}
+          "g4-domination": "Game 4, Domination goal", "g5-deity-science": "Game 5, Deity, Science goal",
+          "g6-sonnet-science": "Game 6, Sonnet 5.5, Science goal", "g7-science-repeat": "Game 7, game 3 repeated",
+          "g8-opus-medium": "Game 8, Opus medium effort", "g9-fable-science": "Game 9, Fable 5.1, Science goal"}
 
 
 def _rows(path: Path) -> list[dict]:
@@ -89,6 +91,8 @@ def load(gid: str, src: Path) -> dict:
         "output": S("output"), "cache_read": S("cache_read"), "cache_write": S("cache_write"), "input": S("input"),
         "split": {k: round(S(k) * p / 1e6, 2) for k, p in price(model).items()},
         "cost": cost_series, "lead": lead_series, "sci": sci_series, "standings": standings,
+        "agent": " ".join(w.capitalize() for w in (model or "claude-opus-5-5").split("-")[1:2])
+                 + " " + ".".join((model or "claude-opus-5-5").split("-")[2:4]),
     }
 
 
@@ -117,12 +121,12 @@ font-size:12.5px;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;white-space:
 .tip b{font-weight:600}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:760px){.grid2{grid-template-columns:1fr}}
 .agent{font-weight:600}
 </style></head><body><main>
-<h1>Civ 6 benchmark: Opus 5.5</h1>
-<p class="sub">Claude Opus 5.5 (high effort) against the game's built-in AI, base game, Prince, standard Pangaea, same seed and civs. Games 1-2 at Quick speed (330-turn limit), later games at Online speed (250). Costs are API-equivalent at list prices. <a href="hotseat.html" style="color:inherit">Hotseat games</a> (several Opus seats on one map) have their own page.</p>
+<h1>Civ 6 benchmark: Claude vs the built-in AI</h1>
+<p class="sub">One Claude agent (Opus 5.5 at high effort unless the game's name says otherwise) against the game's built-in AI: base game, Prince unless the name says Deity, standard Pangaea, same seed and civs. Games 1-2 at Quick speed (330-turn limit), later games at Online speed (250). Costs are API-equivalent at list prices. <a href="hotseat.html" style="color:inherit">Hotseat games</a> (several Opus seats on one map) have their own page.</p>
 <div class="card"><table id="summary"></table></div>
 <h2>Cumulative API-equivalent cost</h2><p class="note">Dollars spent by the end of each turn.</p>
 <div class="card"><div class="legend" id="lg-cost"></div><div class="chart" id="c-cost"></div></div>
-<h2>Tech lead over the best AI civ</h2><p class="note">Techs Opus had researched minus the most any AI civ had, per turn. Above zero, Opus leads.</p>
+<h2>Tech lead over the best AI civ</h2><p class="note">Techs the agent had researched minus the most any AI civ had, per turn. Above zero, the agent leads.</p>
 <div class="card"><div class="legend" id="lg-lead"></div><div class="chart" id="c-lead"></div></div>
 <h2>Where the money goes</h2><p class="note">API-equivalent dollars by token type. Every request rereads the whole conversation from cache.</p>
 <div class="card"><table id="split"></table></div>
@@ -143,7 +147,7 @@ document.getElementById("split").innerHTML =
  G.map((g,i)=>`<tr><td>${sw(i)}${esc(g.title)}</td><td>$${fmt(g.split.cache_read,2)}</td><td>$${fmt(g.split.cache_write,2)}</td><td>$${fmt(g.split.output,2)}</td><td>$${fmt(g.split.input,2)}</td></tr>`).join("");
 document.getElementById("standings").innerHTML = G.map((g,i)=>`<div class="card"><div style="font-weight:600;margin-bottom:6px">${sw(i)}${esc(g.title)}, turn ${g.last_turn}</div><table>
  <tr><th>Civ</th><th>Score</th><th>Cities</th><th>Sci</th><th>Techs</th><th>Military</th></tr>` +
- g.standings.map(r=>`<tr class="${r.agent?'agent':''}"><td>${esc(r.civ)}${r.agent?' (Opus)':''}</td><td>${r.score}</td><td>${r.cities}</td><td>${r.science}</td><td>${r.techs}</td><td>${r.military}</td></tr>`).join("") + `</table></div>`).join("");
+ g.standings.map(r=>`<tr class="${r.agent?'agent':''}"><td>${esc(r.civ)}${r.agent?` (${esc(g.agent)})`:''}</td><td>${r.score}</td><td>${r.cities}</td><td>${r.science}</td><td>${r.techs}</td><td>${r.military}</td></tr>`).join("") + `</table></div>`).join("");
 
 function legend(id){document.getElementById(id).innerHTML = G.map((g,i)=>`<span>${sw(i)}${esc(g.title)}</span>`).join("")}
 function line(id, key, yfmt, zero){
