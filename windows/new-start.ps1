@@ -57,6 +57,7 @@ while (((Get-Date) - $t0).TotalSeconds -lt 300 -and -not $menu) {
 }
 if (-not $menu) { "FAILED: no MainMenu state"; return }
 "main menu up"
+if ($MenuOnly) { "main menu only: stopping here"; return }   # $MenuOnly = 1: just relaunch to the main menu (e.g. before load_hotseat_save)
 
 $file = Join-Path $env:TEMP 'bench-new-game.lua'
 Set-Content -Path $file -Encoding UTF8 -Value ("SPEED = '$Speed'`nGAME_SEED = $Seed`nMAP_SEED = $Seed`n$Extra`n" + (Get-Content (Join-Path $lua $LuaFile) -Raw))

@@ -294,6 +294,15 @@ class Game:
                     "is_error": row.get("is_error"), "limit": row.get("limit"), "result": (row.get("result") or "")[:300],
                 })
                 self.write_manifest()
+                # A win can come mid-turn (game h1: Rome finished its last space project with a Great Engineer on turn
+                # 157). The game then refuses every unit order, so the seat can never end its turn and the round
+                # check above never runs: check for a winner after every seat turn.
+                stats = self.stats()
+                if stats and stats.get("winning_team", -1) >= 0:
+                    self.append("rounds.jsonl", {"ts": time.time(), **stats})
+                    over = f"team {stats['winning_team']} won on turn {stats.get('turn')}"
+                    self.write_telemetry(stats, over)
+                    return f"game over: {over}"
                 if row.get("exit_code") and not row.get("session_id"):
                     return f"claude failed to start for {seat.name} (exit {row['exit_code']}): {row.get('result')}"
                 if row.get("is_error") and not row.get("limit") and rg.seconds(row) < 120:
