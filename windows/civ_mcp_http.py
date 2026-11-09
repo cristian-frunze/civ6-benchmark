@@ -838,6 +838,46 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _GameState.end_turn = _gs_end_turn_recorded
 
+    # A turn that ended was reported as "Turn 144 -> 144" (game 9, turn 144; 37 times in games 1-9, 27 of them in
+    # game 4, which was at war most of the game). When a civ at war with the player opens a session during the AI
+    # turns, civ6-mcp closes it, waits for the turn to change and goes on to the report, but keeps the turn number it
+    # read before the session. The same number named the autosave, so the start of the new turn was saved over the
+    # start of the old one (0_MCP_0144 held turn 145, and there was no 0_MCP_0145, the save a hang on turn 145 reloads),
+    # and civ6-mcp's per-turn advisor budget was not reset. The autosave now takes the turn the game is on, and the
+    # report the turn read after the end turn.
+    import civ_mcp.end_turn as _etm  # noqa: E402
+
+    _original_autosave = _etm.save_game
+
+    async def _autosave_of_turn_on(conn, name, *args, **kwargs):
+        m = re.fullmatch(r"0_MCP_(\d+)", name) if isinstance(name, str) else None
+        if m:
+            now = await _turn_number(types.SimpleNamespace(conn=conn))
+            if now is not None and now > int(m[1]):
+                logging.getLogger("civ_mcp_http").info("Autosave of turn %s named for it, not %s", now, name)
+                name = f"0_MCP_{now:04d}"
+        return await _original_autosave(conn, name, *args, **kwargs)
+
+    _etm.save_game = _autosave_of_turn_on
+
+    _original_execute_end_turn = _etm.execute_end_turn
+
+    async def _end_turn_reports_turn_on(gs, *args, **kwargs):
+        out = await _original_execute_end_turn(gs, *args, **kwargs)
+        m = re.match(r"Turn (\d+) -> (\d+)", out) if isinstance(out, str) else None
+        if not m or int(m[2]) > int(m[1]):
+            return out
+        now = await _turn_number(gs)
+        if now is None or now <= int(m[1]):
+            return out
+        logging.getLogger("civ_mcp_http").info("Turn report said %s -> %s; the game is on turn %s", m[1], m[2], now)
+        if now > getattr(gs, "_high_water_turn", 0):  # civ6-mcp's own bookkeeping for a turn that advanced
+            gs._advisor_calls_this_turn = 0
+            gs._high_water_turn = now
+        return f"Turn {m[1]} -> {now}" + out[m.end():]
+
+    _etm.execute_end_turn = _end_turn_reports_turn_on
+
     def _hang_note(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):

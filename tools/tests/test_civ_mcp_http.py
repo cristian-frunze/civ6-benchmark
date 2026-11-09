@@ -519,6 +519,72 @@ async def main():
     check("activate that worked: unchanged, no query", await GameState.activate_great_person(g, 1)
           == "GP_ACTIVATED|Isaac Newton at 42,40" and g.conn.reads == [])
 
+    # 25. A turn that ends after civ6-mcp closes a session from a civ at war: the report names the new turn and the
+    #     advisor budget resets (game 9, turn 144: "Turn 144 -> 144"); the autosave is named for the turn it holds.
+    check("execute_end_turn and the end-turn autosave are patched",
+          et.execute_end_turn is ns["_end_turn_reports_turn_on"] and et.save_game is ns["_autosave_of_turn_on"])
+    class WarConn(Conn):
+        async def execute_write(self, lua, timeout=None):
+            if '"EXIT" == "EXIT"' in lua: self.turn = 145  # the AI turns finish once the session is closed
+            return await super().execute_write(lua, timeout)
+    class WarGame(Game):
+        def __init__(self):
+            super().__init__(turn=144)
+            self.conn = WarConn(144); self.conn.blockers = False
+            self._high_water_turn, self._advisor_calls_this_turn = 144, 7
+        async def get_diplomacy_sessions(self):
+            return [] if self.conn.turn > 144 or not self.conn.endturn_sent else [SimpleNamespace(
+                is_at_war=True, other_player_id=4, other_civ_name="Brazil", other_leader_name="Pedro II",
+                dialogue_text="War!", reason_text="", deal_summary="", buttons="")]
+    GAME = WarGame()
+    unfixed = await ns["_original_execute_end_turn"](GAME)
+    check("war session, unfixed: civ6-mcp reports the old turn", unfixed.startswith("Turn 144 -> 144"),
+          repr(unfixed[:40]))
+    check("war session, unfixed: advisor budget not reset", GAME._advisor_calls_this_turn == 7)
+    GAME = WarGame()
+    out = await stock()
+    check("war session: the report names the new turn", out.startswith("Turn 144 -> 145"), repr(out[:40]))
+    check("war session: only the turn number changed", out == unfixed.replace("Turn 144 -> 144", "Turn 144 -> 145", 1))
+    check("war session: advisor budget reset, high-water turn 145",
+          GAME._advisor_calls_this_turn == 0 and GAME._high_water_turn == 145)
+    check("war session: one end-turn request", GAME.conn.endturn_sent == 1, GAME.conn.endturn_sent)
+    real_execute = ns["_original_execute_end_turn"]
+    try:
+        for name, report, turn, want in (
+            ("same turn while the game is still on it: unchanged", "Turn 50 -> 50 | Score: 9\nx", 50,
+             "Turn 50 -> 50 | Score: 9\nx"),
+            ("an advancing report: unchanged", "Turn 50 -> 51 | Score: 9", 52, "Turn 50 -> 51 | Score: 9"),
+            ("game over after the war session", "Turn 50 -> 50\nGAME OVER — VICTORY!", 51,
+             "Turn 50 -> 51\nGAME OVER — VICTORY!"),
+            ("not a report: unchanged", "Cannot end turn: a unit still needs orders", 51,
+             "Cannot end turn: a unit still needs orders")):
+            async def fake_execute(gs, _r=report): return _r
+            ns["_original_execute_end_turn"] = fake_execute
+            GAME = Game(turn=turn)
+            out = await stock()
+            check(f"report: {name}", out == want, repr(out))
+    finally:
+        ns["_original_execute_end_turn"] = real_execute
+    real_autosave = ns["_original_autosave"]
+    try:
+        saved = []
+        async def fake_save(conn, name): saved.append(name); return "saved"
+        ns["_original_autosave"] = fake_save
+        for name, given, turn, want in (
+            ("named for the turn the game is on", "0_MCP_0144", 145, "0_MCP_0145"),
+            ("right name: unchanged", "0_MCP_0145", 145, "0_MCP_0145"),
+            ("other saves: unchanged", "BENCH_PANGAEA_ONLINE_T1", 145, "BENCH_PANGAEA_ONLINE_T1")):
+            saved.clear()
+            await et.save_game(Conn(turn), given)
+            check(f"autosave: {name}", saved == [want], saved)
+        class NoTurn(Conn):
+            async def execute_read(self, lua, timeout=None): raise RuntimeError("no answer")
+        saved.clear()
+        await et.save_game(NoTurn(145), "0_MCP_0144")
+        check("autosave: turn unreadable, name kept", saved == ["0_MCP_0144"], saved)
+    finally:
+        ns["_original_autosave"] = real_autosave
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])
