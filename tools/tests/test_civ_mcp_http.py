@@ -476,6 +476,49 @@ async def main():
     check("no units with orders: civ6-mcp's Lua unchanged", g.conn.writes == [lq.build_fortify_remaining_units()]
           and g.conn.reads == [lq.build_skip_remaining_units()] and out == "FORTIFIED|1 fortified, 0 healing\nSKIPPED|3 units", out)
 
+    # 24. A move that reaches its tile with no moves left says so; so does a refused activation.
+    check("move_unit and activate_great_person are patched", GameState.move_unit is ns["_move_says_moves_left"]
+          and GameState.activate_great_person is ns["_activate_says_no_moves"])
+    class MovesConn:
+        def __init__(self, moves): self.moves, self.reads = moves, []
+        async def execute_read(self, lua, timeout=None):
+            self.reads.append(lua)
+            return ([f"MOVES|{self.moves}"] if self.moves is not None else []) + [lq.SENTINEL]
+    def moves_game(moves): return SimpleNamespace(conn=MovesConn(moves))
+    arrived = "MOVING_TO|44,40|from:44,41|now_at:44,40|(moved dx:+0 dy:-1)\nRevealed 3 tiles"
+    for name, result, moves, want in (
+        ("arrived, 0 moves: said on the first line", arrived, 0,
+         "MOVING_TO|44,40|from:44,41|now_at:44,40|(moved dx:+0 dy:-1)|arrived with no moves left: it can build, "
+         "found or activate there next turn\nRevealed 3 tiles"),
+        ("arrived with moves: unchanged", arrived, 1, arrived),
+        ("stopped mid path: unchanged", "MOVING_TO|40,42|from:42,39|now_at:42,40|STOPPED_MID_PATH (moves exhausted)", 0,
+         "MOVING_TO|40,42|from:42,39|now_at:42,40|STOPPED_MID_PATH (moves exhausted)"),
+        ("blocked: unchanged", "MOVING_TO|44,40|from:44,40|now_at:44,40|BLOCKED (x)", 0,
+         "MOVING_TO|44,40|from:44,40|now_at:44,40|BLOCKED (x)"),
+        ("unit gone: unchanged", arrived, None, arrived),
+        ("error: unchanged", "Error: UNIT_NOT_FOUND", 0, "Error: UNIT_NOT_FOUND")):
+        async def fake_move(self, i, x, y, _r=result): return _r
+        ns["_original_move_unit"] = fake_move
+        out = await GameState.move_unit(moves_game(moves), 1, 44, 40)
+        check(f"move: {name}", out == want, out)
+    near = "MOVING_TO|4,40|from:5,41|now_at:4,40|(moved dx:-1 dy:-1)"
+    async def fake_move(self, i, x, y): return near
+    ns["_original_move_unit"] = fake_move
+    check("move: a target that is a prefix of now_at is not an arrival",
+          await GameState.move_unit(moves_game(0), 1, 4, 4) == near)
+    refused = "Error: CANNOT_ACTIVATE|Isaac Newton (UNIT_GREAT_SCIENTIST) at (42,40) charges=1. Valid tiles: 42,40=DISTRICT_CAMPUS"
+    for moves, want in ((0, refused + " It has no moves left this turn, and a great person needs moves to activate: "
+                         "activate it on the same tile next turn."), (2, refused)):
+        async def fake_act(self, i): return refused
+        ns["_original_activate"] = fake_act
+        out = await GameState.activate_great_person(moves_game(moves), 1)
+        check(f"activate refused with {moves} moves", out == want, out)
+    async def fake_act(self, i): return "GP_ACTIVATED|Isaac Newton at 42,40"
+    ns["_original_activate"] = fake_act
+    g = moves_game(0)
+    check("activate that worked: unchanged, no query", await GameState.activate_great_person(g, 1)
+          == "GP_ACTIVATED|Isaac Newton at 42,40" and g.conn.reads == [])
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])

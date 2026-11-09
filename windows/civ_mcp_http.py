@@ -567,6 +567,44 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _gsm.GameState.skip_remaining_units = _skip_remaining_ready
 
+    # A move that reached its tile never said the unit had used up its moves, so agents sent the next order at once
+    # and got "no moves remaining": 20 to 42 improve orders a game (games 1 to 8) came right after the builder's own
+    # move, and a Great Scientist moved onto its Campus was refused with no reason and the tile listed as valid
+    # (game 9, turn 67; it activated there the next turn). Both results now say so.
+    def _moves_lua(unit_index):
+        return (f"local u = Players[Game.GetLocalPlayer()]:GetUnits():FindID({unit_index}) "
+                f"if u then print('MOVES|' .. tostring(u:GetMovesRemaining())) end print('{_lq.SENTINEL}')")
+
+    async def _no_moves_left(game, unit_index) -> bool:
+        try:
+            lines = await game.conn.execute_read(_moves_lua(unit_index))
+            return any(l.startswith("MOVES|") and float(l.split("|")[1]) <= 0 for l in lines)
+        except Exception:
+            return False
+
+    _original_move_unit = _gsm.GameState.move_unit
+
+    async def _move_says_moves_left(self, unit_index, target_x, target_y):
+        result = await _original_move_unit(self, unit_index, target_x, target_y)
+        head, sep, rest = result.partition("\n")
+        if (f"now_at:{target_x},{target_y}|" in head + "|" and "|BLOCKED" not in head
+                and await _no_moves_left(self, unit_index)):
+            head += "|arrived with no moves left: it can build, found or activate there next turn"
+        return head + sep + rest
+
+    _gsm.GameState.move_unit = _move_says_moves_left
+
+    _original_activate = _gsm.GameState.activate_great_person
+
+    async def _activate_says_no_moves(self, unit_index):
+        result = await _original_activate(self, unit_index)
+        if result.startswith("Error: CANNOT_ACTIVATE|") and await _no_moves_left(self, unit_index):
+            result += (" It has no moves left this turn, and a great person needs moves to activate: activate it "
+                       "on the same tile next turn.")
+        return result
+
+    _gsm.GameState.activate_great_person = _activate_says_no_moves
+
     # When an exclusive popup is up, civ6-mcp's dismiss_popup (run before every end turn) calls Close() in each Lua
     # state named like a popup until it hides, up to 20 times. InvitePopup (multiplayer invites) never hides, so a
     # scan spent 20 round trips on it: 27 s against 5 s, in a third of the scans (57 of 170 in games 8 and 9), and
