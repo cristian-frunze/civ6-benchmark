@@ -446,6 +446,36 @@ async def main():
     i, j = lua.index("local obsOk_0"), lua.index("local canSlot_0 = ")
     check("nothing else in set_policies changes", lua[:i] + lua[j:] == orig)
 
+    # 23. skip_remaining_units leaves units with orders of their own alone, after the game finishes moving units.
+    check("skip_remaining_units is the patched method", GameState.skip_remaining_units is ns["_skip_remaining_ready"])
+    class SkipConn:
+        def __init__(self, keep_replies): self.keep_replies, self.writes, self.reads = list(keep_replies), [], []
+        async def execute_write(self, lua, timeout=None):
+            if "IsReadyToSelect" in lua:
+                return self.keep_replies.pop(0) + [lq.SENTINEL]
+            self.writes.append(lua)
+            return ["OK:FORTIFIED|1 fortified, 0 healing", lq.SENTINEL]
+        async def execute_read(self, lua, timeout=None):
+            self.reads.append(lua)
+            return ["OK:SKIPPED|3 units", lq.SENTINEL]
+    class SkipGame:
+        def __init__(self, replies): self.conn = SkipConn(replies)
+    g = SkipGame([["BUSY|true"], ["BUSY|false", "KEEP|196608", "KEEP|262146"]])
+    out = await GameState.__dict__["skip_remaining_units"](g)
+    spared = "unit:GetMovesRemaining() > 0 and not __keep[unit:GetID()] then"
+    check("skip waits for the game, then spares the units with orders",
+          g.conn.keep_replies == [] and len(g.conn.writes) == 1 and len(g.conn.reads) == 1
+          and g.conn.writes[0].startswith("local __keep = {[196608] = true, [262146] = true}\n")
+          and spared in g.conn.writes[0] and g.conn.reads[0].startswith("local __keep = {[196608] = true")
+          and spared in g.conn.reads[0] and "UnitManager.FinishMoves(unit)" in g.conn.reads[0], g.conn.writes[:1])
+    check("skip reports what it left alone", out == "FORTIFIED|1 fortified, 0 healing\nSKIPPED|3 units\nKEPT|2 units the "
+          "game does not count as waiting for orders (on auto-explore, still moving, fortified or asleep) were left "
+          "alone", out)
+    g = SkipGame([["BUSY|false"]])
+    out = await GameState.__dict__["skip_remaining_units"](g)
+    check("no units with orders: civ6-mcp's Lua unchanged", g.conn.writes == [lq.build_fortify_remaining_units()]
+          and g.conn.reads == [lq.build_skip_remaining_units()] and out == "FORTIFIED|1 fortified, 0 healing\nSKIPPED|3 units", out)
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])

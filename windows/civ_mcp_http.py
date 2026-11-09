@@ -506,6 +506,67 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _lq.build_policies_query = _policies_query_current
     _lq.build_set_policies = _set_policies_current
 
+    # skip_remaining_units, which agents call before nearly every end_turn, fortified and then ended the moves of
+    # every unit with moves left. That also hit units with orders of their own: a scout on auto-explore (the game
+    # moves it when the turn ends, so it sat still: 23 of 24 turns with a skip against 2 of 9 without), and a unit
+    # still walking a move civ6-mcp had already called "STOPPED_MID_PATH" (it reads the tile while the unit moves):
+    # 106 of 152 multi-turn moves followed by a skip had stopped by the next turn. The game's own test for "needs
+    # orders" is unit:IsReadyToSelect() (GetFirstReadyUnit: "moves remaining, not automated"). Wait for the game to
+    # finish moving units, then skip only the units that test says are waiting for orders.
+    _UNIT_LOOP = "    if x ~= -9999 and unit:GetMovesRemaining() > 0 then\n"
+    _KEEP_LUA = (
+        "local me = Game.GetLocalPlayer() "
+        "local busy = false pcall(function() busy = UI.IsGameCoreBusy() end) "
+        "print('BUSY|' .. tostring(busy)) "
+        "for _, unit in Players[me]:GetUnits():Members() do "
+        "if unit:GetX() ~= -9999 and unit:GetMovesRemaining() > 0 then "
+        "local ready, queued = true, false "
+        "pcall(function() ready = unit:IsReadyToSelect() end) "
+        "pcall(function() queued = UnitManager.GetQueuedDestination(unit) ~= nil end) "
+        "if queued or not ready then print('KEEP|' .. unit:GetID()) end end end "
+        f"print('{_lq.SENTINEL}')")
+
+    async def _units_with_orders(game) -> set[int]:
+        waited = 0.0
+        while True:
+            try:
+                lines = await game.conn.execute_write(_KEEP_LUA)
+            except Exception:
+                return set()
+            if "BUSY|true" not in lines or waited >= 4.0:
+                return {int(l.split("|")[1]) for l in lines if l.startswith("KEEP|")}
+            await asyncio.sleep(0.5)
+            waited += 0.5
+
+    def _sparing(lua, keep):
+        if not keep:
+            return lua
+        if _UNIT_LOOP not in lua:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's skip/fortify Lua changed: units with orders not spared")
+            return lua
+        guard = "local __keep = {" + ", ".join(f"[{i}] = true" for i in sorted(keep)) + "}\n"
+        return guard + lua.replace(
+            _UNIT_LOOP, "    if x ~= -9999 and unit:GetMovesRemaining() > 0 and not __keep[unit:GetID()] then\n")
+
+    async def _skip_remaining_ready(self):
+        keep = await _units_with_orders(self)
+        fortify_result = ""
+        try:
+            fortify_result = _gsm._action_result(
+                await self.conn.execute_write(_sparing(_lq.build_fortify_remaining_units(), keep)))
+        except Exception as e:
+            logging.getLogger("civ_mcp_http").debug("Fortify remaining failed: %s", e)
+        skip_result = _gsm._action_result(await self.conn.execute_read(_sparing(_lq.build_skip_remaining_units(), keep)))
+        out = f"{fortify_result}\n{skip_result}" if fortify_result and not fortify_result.startswith("Error") \
+            else skip_result
+        if keep:
+            logging.getLogger("civ_mcp_http").info("skip_remaining_units left %d units with orders alone", len(keep))
+            out += (f"\nKEPT|{len(keep)} units the game does not count as waiting for orders (on auto-explore, still "
+                    "moving, fortified or asleep) were left alone")
+        return out
+
+    _gsm.GameState.skip_remaining_units = _skip_remaining_ready
+
     # When an exclusive popup is up, civ6-mcp's dismiss_popup (run before every end turn) calls Close() in each Lua
     # state named like a popup until it hides, up to 20 times. InvitePopup (multiplayer invites) never hides, so a
     # scan spent 20 round trips on it: 27 s against 5 s, in a third of the scans (57 of 170 in games 8 and 9), and

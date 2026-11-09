@@ -37,7 +37,7 @@ Nine changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`, plus smaller f
 - **Attack results that match the game** (from game 10). civ6-mcp read the unit's tile before a move-and-attack order had run, so every melee attack from 2 or more tiles away came back as "STOPPED_SHORT ... Try again next turn" (12 to 26 times a game), though the unit had almost always moved and attacked. The result now comes from the unit and target as they stand once the order has played out. A ranged unit whose shot the game refused no longer walks off instead (civ6-mcp fell back to a melee attack, which a ranged unit cannot make, so it only moved), and the combat estimate stops counting adjacent shots as melee.
 - **Promotions by the game's rule** (from game 10). civ6-mcp healed a promoted unit to full and left its moves; the game heals 50 HP and ends the unit's turn, and agents had learned to promote before attacking.
 - **No hidden resources** (from game 10). Three tools named strategic resources the player had not revealed yet (the map tools already hid them).
-- **Auto-explore that lasts** (from game 10). A scout set to auto-explore stopped after one turn and needed orders again. The harness now sends auto-explore again each turn until the agent gives the unit another order.
+- **Auto-explore and long moves that last** (from game 10). `skip_remaining_units`, called before nearly every end turn, ended the moves of scouts on auto-explore and of units still walking a multi-turn move, so they stopped after one turn. It now skips only the units the game counts as waiting for orders, and the harness sends auto-explore again each turn until the agent gives the unit another order.
 
 ## What each game records
 
