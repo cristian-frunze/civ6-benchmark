@@ -294,6 +294,27 @@ async def main():
     check("read failure keeps civ6-mcp's answer", "Try again next turn" in out, repr(out[-60:]))
     check("unit_action's attack calls the patched method", GameState.attack_unit is ns["_attack_unit_settled"])
 
+    # 12. A ranged unit never falls back to a melee move; a refused adjacent shot is tried once more.
+    lua = lq.build_attack_unit(9, 43, 45)
+    check("ranged units take the ranged path", ns["_IS_RANGED"].rstrip("\n") + " or " + ns["_RANGED_UNIT"] in lua)
+    check("no melee fallback for ranged units", f"elseif dist <= 1 and not {ns['_RANGED_UNIT']} then" in lua
+          and 'print("ERR:RANGED_REFUSED|' in lua and "on (43,45) next to it" in lua
+          and lua.index("ERR:RANGED_REFUSED") < lua.index("UnitOperationTypes.MOVE_TO"))
+    check("the estimate counts an adjacent shot as ranged",
+          "local isRanged = attRS > 0\n" in lq.build_combat_estimate_query(9, 43, 45))
+    REFUSED = EST + "Error: RANGED_REFUSED|The game would not let UNIT_ARCHER fire from (39,40) at UNIT_WARRIOR on (43,45)"
+    FIRED = EST + "RANGE_ATTACK|target:UNIT_WARRIOR at (43,45)|pre_hp:51/100|your HP:100|range:2 dist:1"
+    for name, script, want in (("refused once, fires on the retry", [REFUSED, FIRED], FIRED),
+                               ("refused twice: the error, unit not moved", [REFUSED, REFUSED], REFUSED),
+                               ("fires at once: no retry", [FIRED, REFUSED], FIRED)):
+        calls = []
+        async def scripted(self, ui, tx, ty, script=script):
+            calls.append(1)
+            return script[len(calls) - 1]
+        ns["_original_attack_unit"] = scripted
+        out = await attack(AttackGame([START]), 9, 43, 45)
+        check(f"ranged: {name}", out == want and len(calls) == (1 if name.startswith("fires") else 2), out[-60:])
+
 asyncio.run(main())
 
 # 8. Menu load: a missed "Load Game" clicks "Single Player" again (game 7, turn 102; game 8's start).

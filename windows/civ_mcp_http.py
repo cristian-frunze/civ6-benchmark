@@ -255,11 +255,57 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return (f"Error: STOPPED_SHORT|Unit moved from {start} to {here} but could not reach {foe} at ({tx},{ty}): "
                 f"{ame[2]} tiles away, {moves}. No attack happened.")
 
+    # When the game refused a ranged unit's shot at an adjacent target, civ6-mcp fell back to a melee move-and-attack.
+    # Ranged units cannot melee, so that only moved the unit, often out of the city it garrisoned (14 times in games
+    # 1-9, 11 of them from a city tile; "first call moved archer instead of ranged attack", game 8 turn 29). The
+    # refusal's cause is unknown: the same units fired on the next call, and 162 other adjacent shots worked. Here a
+    # ranged unit always takes the ranged path, a refused adjacent shot is tried once more a second later, and if the
+    # game still refuses, the unit stays where it is and the agent is told. civ6-mcp's combat estimate also counted an
+    # adjacent shot as melee (melee strength, river and flanking modifiers, damage to the attacker), so the estimate
+    # treats every attack by a ranged unit as ranged.
+    _RANGED_UNIT = '(unitInfo ~= nil and (unitInfo.RangedCombat or 0) > 0 and unitInfo.Domain ~= "DOMAIN_AIR")'
+    _IS_RANGED = "local isRanged = UnitManager.CanStartOperation(unit, UnitOperationTypes.RANGE_ATTACK, nil, true)\n"
+    _MELEE_FALLBACK = ("    elseif dist <= 1 then\n"
+                       "        -- Ranged failed at melee range: fall through to melee attack below\n"
+                       "        isRanged = false\n")
+    _original_build_attack_unit = _lq.build_attack_unit
+
+    def _build_attack_unit_ranged(unit_index, target_x, target_y):
+        lua = _original_build_attack_unit(unit_index, target_x, target_y)
+        if lua.count(_IS_RANGED) != 1 or lua.count(_MELEE_FALLBACK) != 1:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's attack Lua changed: ranged-attack fix not applied")
+            return lua
+        refused = (f"    elseif dist <= 1 then\n"
+                   f'        print("ERR:RANGED_REFUSED|The game would not let " .. (unitInfo and unitInfo.UnitType or '
+                   f'"the unit") .. " fire from (" .. ux .. "," .. uy .. ") at " .. enemyName .. " on ({int(target_x)},'
+                   f'{int(target_y)}) next to it. The unit has not moved: ranged units cannot melee, so fire from '
+                   f'another tile in range, or attack with another unit.")\n'
+                   f'        print("{_lq.SENTINEL}"); return\n')
+        lua = lua.replace(_IS_RANGED, _IS_RANGED.rstrip("\n") + f" or {_RANGED_UNIT}\n")
+        return lua.replace(_MELEE_FALLBACK,
+                           _MELEE_FALLBACK.replace("dist <= 1 then", f"dist <= 1 and not {_RANGED_UNIT} then") + refused)
+
+    _lq.build_attack_unit = _build_attack_unit_ranged
+    _original_estimate_query = _lq.build_combat_estimate_query
+
+    def _estimate_query_ranged(unit_index, target_x, target_y):
+        lua = _original_estimate_query(unit_index, target_x, target_y)
+        if lua.count("local isRanged = attRS > 0 and dist > 1\n") != 1:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's estimate Lua changed: ranged fix not applied")
+            return lua
+        return lua.replace("local isRanged = attRS > 0 and dist > 1\n", "local isRanged = attRS > 0\n")
+
+    _lq.build_combat_estimate_query = _estimate_query_ranged
     _original_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
         before = await _attack_state(self, unit_index, target_x, target_y)
         result = await _original_attack_unit(self, unit_index, target_x, target_y)
+        if "RANGED_REFUSED|" in result:
+            await asyncio.sleep(1.0)
+            result = await _original_attack_unit(self, unit_index, target_x, target_y)
+            logging.getLogger("civ_mcp_http").info("Ranged attack refused once; the retry 1 s later gave: %s",
+                                                   result.strip().splitlines()[-1][:160])
         if "STOPPED_SHORT|" not in result or before is None or before[0] == "gone":
             return result
         after, waited = None, 0.0
