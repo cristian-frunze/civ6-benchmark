@@ -33,7 +33,10 @@ for g in sys.argv[1:]:
                     if x.get("tool") in ("unit_action", "issue_orders", "city_attack") and not res.startswith("Error") \
                             and "NO_MOVES" not in res:
                         unit_orders += 1
-                    if x.get("tool") == "end_turn" and res.startswith("Turn ") and k > j - 1:
+                    # An end_turn that reports the paused turn's own change ("Turn <tp> -> ...") ends nothing: civ6-mcp
+                    # reports a turn end still in flight that way (always from game 8 on, and before that when the new
+                    # turn had no blockers). The new turn ends at the next end_turn after it.
+                    if x.get("tool") == "end_turn" and res.startswith("Turn ") and not res.startswith(f"Turn {tp} ->"):
                         break
                     if x.get("tool") == "end_turn" and "Turn paused" in res:
                         break

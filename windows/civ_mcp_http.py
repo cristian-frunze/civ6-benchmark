@@ -129,18 +129,22 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         "print('---END---')"
     )
 
-    # A leader screen left open with no diplomacy session stalls the AI turns (bench_compat.LEADER_SCREEN_LUA).
+    # A leader screen left open with no diplomacy session stalls the AI turns (bench_compat.LEADER_SCREEN_LUA). The
+    # close can take more than one try: a view still finishing its conversation only fades to the overview at first.
     async def _close_idle_leader_screen(ctx, wait=0.0):
         if wait:
             await asyncio.sleep(wait)  # the engine closes the session a frame later
-        try:
-            lines = await srv._get_game(ctx).conn.execute_write(bc.LEADER_SCREEN_LUA, timeout=10.0)
-        except Exception:
-            logging.getLogger("civ_mcp_http").warning("leader screen check failed", exc_info=True)
-            return
-        if "LEADER_SCREEN|CLOSED" in lines:
+        for _ in range(3):
+            try:
+                lines = await srv._get_game(ctx).conn.execute_write(bc.LEADER_SCREEN_LUA, timeout=10.0)
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("leader screen check failed", exc_info=True)
+                return
+            if "LEADER_SCREEN|CLOSED" not in lines:
+                return
             logging.getLogger("civ_mcp_http").info("Closed a leader screen left open with no diplomacy session")
             await asyncio.sleep(1.0)
+        logging.getLogger("civ_mcp_http").warning("The leader screen was still open after 3 attempts to close it")
 
     def _then_close_leader_screen(fn):
         @functools.wraps(fn)
@@ -152,9 +156,27 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
-    for _name in ("respond_to_diplomacy", "respond_to_trade"):
+    # Trades hung the next end turn (games 1-8: 14 of 23 end turns after a propose_trade hung, 3 of 1,600 after
+    # turns with no diplomacy). The diplomacy screen locks the engine's event queue when it opens
+    # (UI.ReferenceCurrentEvent in DiplomacyActionView.lua) and releases the lock only when it closes. A session the
+    # player started does not close the screen: it goes back to the overview, and the game closes it when the
+    # player's turn ends, but only if it is visible. civ6-mcp's propose_trade hid it instead, so nothing ever closed
+    # it, the AI turns stalled behind the lock, and civ6-mcp reloaded the turn after ~10 minutes, undoing it. Here
+    # propose_trade leaves the screen up and the leader-screen check closes it, which releases the lock.
+    from civ_mcp import game_state as _gsm  # noqa: E402
+    from civ_mcp import lua as _lq  # noqa: E402
+
+    async def _propose_trade_no_hide(self, other_player_id, offer_items, request_items):
+        lines = await self.conn.execute_write(_lq.build_propose_trade(other_player_id, offer_items, request_items))
+        return _gsm._action_result(lines)
+
+    _gsm.GameState.propose_trade = _propose_trade_no_hide
+
+    for _name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "test_trade", "send_diplomatic_action",
+                  "propose_peace", "form_alliance"):
         _tool = mcp._tool_manager.get_tool(_name)
-        _tool.fn = _then_close_leader_screen(_tool.fn)
+        if _tool is not None:
+            _tool.fn = _then_close_leader_screen(_tool.fn)
 
     # civ6-mcp warns that InGame queries while the AI civs move can stall their turns, and polls only GameCore then.
     # Two cases reach end_turn while they move: civ6-mcp re-entering a turn end still in flight (after mid-turn
@@ -201,7 +223,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             return None
         return next((int(ln.split("|")[1]) for ln in lines if ln.startswith("TURN|")), None)
 
-    # The diplomacy-pause trap (games 1-6 lost 0 to 14 turns each, tools/turn_trap.py). An AI civ opens a proposal
+    # The diplomacy-pause trap (games 1-7 lost 0 to 11 turns each, tools/turn_trap.py). An AI civ opens a proposal
     # while the AI civs move; civ6-mcp's end_turn stops with "Turn paused ... respond_to_diplomacy, then end_turn
     # again" and keeps its end-turn request in flight (_pending_end_turn). The answer lets the AI civs finish, so the
     # player's next turn starts. The next end_turn is meant to report that turn change, but civ6-mcp first checks
@@ -211,8 +233,6 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # skipped and civ6-mcp reports the turn change, with a line saying whether the new turn still needs playing.
     # Only the first query is skipped: civ6-mcp asks again when the turn fails to advance, and that answer counts.
     import contextvars  # noqa: E402
-
-    from civ_mcp import lua as _lq  # noqa: E402
 
     _IN_FLIGHT = contextvars.ContextVar("bench_end_turn_in_flight", default=None)
     _original_blocking_query = _lq.build_end_turn_blocking_query
@@ -246,7 +266,13 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
             game = srv._get_game(ctx)
             if getattr(game, "_pending_end_turn", False):
-                return await _pending_turn_report(fn, args, kwargs)  # a turn end in flight: civ6-mcp polls GameCore
+                if not await _request_dropped(game):
+                    return await _pending_turn_report(fn, args, kwargs)  # in flight: civ6-mcp polls GameCore
+                logging.getLogger("civ_mcp_http").info(
+                    "The end-turn request from turn %s is no longer in flight (the turn is open again): sending a new "
+                    "one", game._pending_end_turn_from)
+                game._pending_end_turn = False
+                game._pending_end_turn_from = None
             # After a "waiting on you" answer, the first end_turn of the new turn is refused once: the agent may not
             # have seen that its turn changed. Any order or overview since then shows it has (_clears_answered).
             answered = getattr(game, "_bench_answered_at", None)
@@ -290,8 +316,71 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
+    # The second hang, after first contact (game 8, turn 13, 11 hangs in a row; game 7, turn 20): Spain greeted the
+    # player during the end of the turn, civ6-mcp reported "Turn paused" and kept its request in flight, but the
+    # greeting had cancelled it and the turn was open again. Each later end_turn only waited ~10 minutes for a turn
+    # change that nobody had asked for, and the reload brought back the same greeting. A request is in flight while
+    # the player's turn is inactive. When the turn number is unchanged and the player's turn is active, the game is
+    # waiting for the player, so the next end_turn sends a new request (game 7, turn 20: that one ended the turn in
+    # 25 s). Checked twice, 3 s apart, so a request that is just resuming is not sent twice.
+    async def _request_dropped(game) -> bool:
+        start = getattr(game, "_pending_end_turn_from", None)
+        if start is None:
+            return False
+        for i in range(2):
+            if i:
+                await asyncio.sleep(3)
+            if await _turn_number(game) != start or await _turn_active(game) is not True:
+                return False
+        return True
+
+    # When the AI turns hang, civ6-mcp reloads the save made at the start of the turn and ends the turn again,
+    # without telling the agent. Everything the agent did in that turn is gone (game 8, turn 209: the trades and the
+    # research choice were undone and the agent did not know why research was empty again). Name it.
+    from civ_mcp.game_state import GameState as _GameState  # noqa: E402
+
+    _END_TURN_RESULTS = contextvars.ContextVar("bench_end_turn_results", default=None)
+    _original_gs_end_turn = _GameState.end_turn
+
+    async def _gs_end_turn_recorded(self, *args, **kwargs):
+        out = await _original_gs_end_turn(self, *args, **kwargs)
+        seen = _END_TURN_RESULTS.get()
+        if seen is not None and isinstance(out, str):
+            seen.append(out)
+        return out
+
+    _GameState.end_turn = _gs_end_turn_recorded
+
+    def _hang_note(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            token = _END_TURN_RESULTS.set([])
+            try:
+                out = await fn(*args, **kwargs)
+                seen = _END_TURN_RESULTS.get()
+            finally:
+                _END_TURN_RESULTS.reset(token)
+            hangs = [s for s in seen if s.startswith("HANG:")]
+            if not hangs or not isinstance(out, str):
+                return out
+            turn = hangs[0].split(":")[1]
+            logging.getLogger("civ_mcp_http").info("Told the agent that turn %s was reloaded after a hang", turn)
+            retries = max(1, len(seen) - 1)  # every end turn after the first was a retry
+            times = "once" if retries == 1 else f"{retries} times"
+            note = (f"The AI turns hung after you ended turn {turn}, so the game was reloaded from the save made at "
+                    f"the start of turn {turn} and the turn was ended again ({times}). Everything you did in turn "
+                    f"{turn} was undone: unit orders, production and research choices, purchases, trades. ")
+            if re.match(rf"Turn {turn} -> \d+", out):
+                note += "The turn then ended without them, and this is its report."
+            else:
+                note += (f"The result of ending it again is below. While turn {turn} is open, give your orders "
+                         f"again (get_turn_briefing shows the turn) before you call end_turn.")
+            return note + "\n\n" + out
+
+        return wrapper
+
     _tool = mcp._tool_manager.get_tool("end_turn")
-    _tool.fn = _units_first(_tool.fn)
+    _tool.fn = _hang_note(_units_first(_tool.fn))
 
     def _clears_answered(fn):
         @functools.wraps(fn)
