@@ -344,6 +344,66 @@ def _click_text_again(target, *args, **kwargs):
 
 launcher._click_text = _click_text_again
 
+# civ6-mcp brings the game to the front with SetForegroundWindow before each menu click, but Windows refuses that
+# call from a background process, silently. OCR reads the game window's own pixels, so it still finds the buttons,
+# while the clicks land on whatever window covers the game. On 2026-11-09 a browser window on the game's screen
+# took every click: all of game 8's start loads failed. Raising the game in the z-order (topmost, then back to
+# normal) needs no foreground rights, so the click reaches it.
+_original_bring_to_front_win32 = launcher._bring_to_front_win32
+
+
+def _bring_to_front_win32_raised() -> None:
+    _original_bring_to_front_win32()
+    import ctypes
+    from ctypes import wintypes
+
+    win = launcher._find_game_window_win32()
+    if win is None:
+        return
+    u = ctypes.WinDLL("user32")  # its own function objects: civ6-mcp's ctypes.windll.user32 keeps its signatures
+    u.GetForegroundWindow.restype = wintypes.HWND
+    u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_uint]
+    hwnd = wintypes.HWND(win.window_id)
+    if u.GetForegroundWindow() == hwnd.value:
+        return
+    flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+    u.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, flags)  # HWND_TOPMOST
+    u.SetWindowPos(hwnd, wintypes.HWND(-2), 0, 0, 0, 0, flags)  # HWND_NOTOPMOST: stays above the other windows
+    logging.getLogger("civ_mcp_http").info("Game window was not in front: raised it above the other windows")
+
+
+launcher._bring_to_front_win32 = _bring_to_front_win32_raised
+
+# civ6-mcp clicks by moving the cursor onto the target and pressing. The game's menu only takes a click on a button
+# it has seen the mouse move over, so once a click is lost the cursor stays on the button, and every later click
+# there (the same spot after each relaunch) comes with no movement and is ignored. With the cursor moved off the
+# button first, a menu load that had failed for 25 minutes worked on the first try (2026-11-09). Start each click
+# 40 px away.
+_original_click_win32 = launcher._click_win32
+
+
+def _click_win32_moving(x: int, y: int) -> None:
+    import ctypes
+    import time
+
+    u = ctypes.WinDLL("user32")
+    old = None
+    try:  # physical pixels, as civ6-mcp's own click uses
+        u.SetThreadDpiAwarenessContext.restype = ctypes.c_ssize_t
+        u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_ssize_t]
+        old = u.SetThreadDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    except Exception:
+        pass
+    u.SetCursorPos(int(x) + 40, int(y) + 40)
+    if old:
+        u.SetThreadDpiAwarenessContext(old)
+    time.sleep(0.15)
+    _original_click_win32(x, y)
+
+
+launcher._click_win32 = _click_win32_moving
+
 # --- Batch tools ---------------------------------------------------------------------------------------
 
 _BRIEFING = ["get_game_overview", "get_units", "get_cities", "get_notifications"]

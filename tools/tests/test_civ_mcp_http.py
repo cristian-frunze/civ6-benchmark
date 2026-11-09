@@ -169,6 +169,11 @@ import inspect
 check("civ6-mcp's menu navigation calls the patched _click_text",
       "_click_text(\"Load Game\"" in inspect.getsource(launcher._navigate_to_save_sync)
       and launcher._click_text is ns["_click_text_again"])
+check("civ6-mcp's bring-to-front calls the z-order raise",
+      "_bring_to_front_win32()" in inspect.getsource(launcher._bring_to_front)
+      and launcher._bring_to_front_win32 is ns["_bring_to_front_win32_raised"])
+check("civ6-mcp's click starts away from the target",
+      "_click_win32(x, y)" in inspect.getsource(launcher._click) and launcher._click_win32 is ns["_click_win32_moving"])
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL PASS" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

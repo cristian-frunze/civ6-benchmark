@@ -47,9 +47,9 @@ Game 7 settled two more cities (8 to 6) and was ahead of game 3 on score at turn
 
 ## The turn-102 crash
 
-The end of turn 102 hung, and after 15 minutes Claude Code timed out the `end_turn` call. The game had dropped to the main menu. For about 30 minutes, every reload failed with "Could not find 'Load Game' button": `restart_and_load`, `load_game_save` and `load_save_from_menu` alike, on four saves. The PC's server log shows why. civ6-mcp clicks "Single Player" and then looks for "Load Game" by OCR for 5 seconds, but the click opened nothing, and OCR still read the main menu. The first session gave up and stopped. The runner resumed the same conversation, and a few attempts later a `restart_and_load` worked. Turn 102 then hung a second time, so the agent loaded the turn-101 autosave and replayed turns 101 and 102 with some choices changed ("to change RNG path"). The game went on normally from turn 103.
+The end of turn 102 hung, and after 15 minutes Claude Code timed out the `end_turn` call. The game had dropped to the main menu. For about 30 minutes, every reload failed with "Could not find 'Load Game' button": `restart_and_load`, `load_game_save` and `load_save_from_menu` alike, on four saves. The cause, found after game 7: civ6-mcp finds the menu buttons by OCR on the game window's own pixels and clicks them, but the clicks were ignored. A browser window had come up over the game, and the game's menu only takes a click on a button the mouse has moved over, while the cursor stayed parked on "Single Player" after the first missed click. The first session gave up and stopped. The runner resumed the same conversation, and a few attempts later a `restart_and_load` worked. Turn 102 then hung a second time, so the agent loaded the turn-101 autosave and replayed turns 101 and 102 with some choices changed ("to change RNG path"). The game went on normally from turn 103.
 
-From game 8 on, `windows/civ_mcp_http.py` clicks "Single Player" again, up to 3 times, when "Load Game" does not appear.
+From game 8 on, `windows/civ_mcp_http.py` raises the game window when it is not in front and starts every click 40 px from its target (see [setup](../../docs/setup.md)).
 
 ## Diplomacy-pause trap
 
