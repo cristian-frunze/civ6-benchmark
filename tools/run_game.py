@@ -314,10 +314,15 @@ class Run:
             self.load_clean(a.load_save)
 
     def mcp(self, tool: str, args: dict | None = None, timeout: int = 120) -> str:
-        """One civ6-mcp tool call through tools/mcp_call.py; returns its printed result."""
-        return subprocess.run(["uv", "run", "-q", "--with", "mcp==1.26.0", "python", str(REPO / "tools" / "mcp_call.py"),
-                               "--url", self.a.mcp_url, "--chars", "4000", tool, json.dumps(args or {})],
-                              capture_output=True, text=True, timeout=timeout, cwd=REPO).stdout
+        """One civ6-mcp tool call through tools/mcp_call.py; returns its printed result. A call that times out
+        returns a note instead of raising: with the game at the main menu, get_units retries its connection for
+        up to ~110 s, and one that ran past 120 s ended game 8's first start between load attempts."""
+        try:
+            return subprocess.run(["uv", "run", "-q", "--with", "mcp==1.26.0", "python", str(REPO / "tools" / "mcp_call.py"),
+                                   "--url", self.a.mcp_url, "--chars", "4000", tool, json.dumps(args or {})],
+                                  capture_output=True, text=True, timeout=timeout, cwd=REPO).stdout
+        except subprocess.TimeoutExpired:
+            return f"{tool} timed out after {timeout} s"
 
     def load_clean(self, save: str, tries: int = 3) -> None:
         """Load a turn-start save and check that every unit still has all its moves before the agent starts.
@@ -330,6 +335,9 @@ class Run:
         for attempt in range(1, tries + 1):
             out = self.mcp("restart_and_load", {"save_name": save}, timeout=600)
             print(f"run_game: {out.strip()}", file=sys.stderr)
+            if "Load: FAILED" in out:  # still at the main menu, where each get_units waits ~110 s for a game
+                print(f"run_game: start check failed (load {attempt}/{tries}): the load failed", file=sys.stderr)
+                continue
             units = ""
             for _ in range(12):  # the FireTuner port can take a few seconds to open after the load
                 time.sleep(5)

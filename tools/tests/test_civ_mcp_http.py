@@ -1,7 +1,7 @@
-"""Offline test of the diplomacy-pause fix in windows/civ_mcp_http.py, against civ6-mcp's real execute_end_turn,
-with a fake game connection. No game or network needed.
+"""Offline tests of windows/civ_mcp_http.py's fixes to civ6-mcp: the diplomacy-pause fix, run against civ6-mcp's
+real execute_end_turn with a fake game connection, and the menu-load click retry. No game or network needed.
 
-    cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_trap_fix.py
+    cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_civ_mcp_http.py
 """
 import asyncio, os, shutil, sys, tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -145,6 +145,30 @@ async def main():
     check("no refusal when the turn has not changed", not out.startswith("Your turn"), repr(out.splitlines()[0]))
 
 asyncio.run(main())
+
+# 8. Menu load: a missed "Load Game" clicks "Single Player" again (game 7, turn 102; game 8's start).
+import civ_mcp.game_launcher as launcher
+def fake_clicks(script):
+    calls = []
+    def f(target, *a, **k):
+        calls.append(target)
+        return script.pop(0) if script else False
+    return f, calls
+ns["_original_click_text"], calls = fake_clicks([False, True, True])  # Load Game missed, Single Player, Load Game
+check("missed Load Game retried after a second Single Player click",
+      launcher._click_text("Load Game", timeout=5, exact=True, post_delay=0.5, y_offset=15) is True, calls)
+check("retry order", calls == ["Load Game", "Single Player", "Load Game"], calls)
+ns["_original_click_text"], calls = fake_clicks([False])
+check("other targets are not retried", launcher._click_text("Autosaves", timeout=10) is False and calls == ["Autosaves"], calls)
+ns["_original_click_text"], calls = fake_clicks([])
+check("gives up when Single Player is gone", launcher._click_text("Load Game") is False
+      and calls == ["Load Game"] + ["Single Player"] * 3, calls)
+ns["_original_click_text"], calls = fake_clicks([False, True, False, True, False, True, False])
+check("gives up after 3 retries", launcher._click_text("Load Game") is False and len(calls) == 7, calls)
+import inspect
+check("civ6-mcp's menu navigation calls the patched _click_text",
+      "_click_text(\"Load Game\"" in inspect.getsource(launcher._navigate_to_save_sync)
+      and launcher._click_text is ns["_click_text_again"])
 shutil.rmtree(TMP, ignore_errors=True)
 print("ALL PASS" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

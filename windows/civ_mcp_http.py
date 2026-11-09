@@ -322,6 +322,28 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     launcher._find_game_exe_win32 = _find_dx11_exe
 
+# civ6-mcp loads a save from the menu by OCR: click "Single Player", then look 5 s for "Load Game". Sometimes the
+# first click opens nothing, and OCR still reads the main menu (Single Player, Multiplayer, Game Options), so the
+# load fails. In game 7 every reload failed this way for 30 minutes after the turn-102 hang, and game 8's start
+# load failed once. Click "Single Player" again and look again, up to 3 times.
+_original_click_text = launcher._click_text
+
+
+def _click_text_again(target, *args, **kwargs):
+    if _original_click_text(target, *args, **kwargs):
+        return True
+    if target != "Load Game":
+        return False
+    for i in range(3):
+        logging.getLogger("civ_mcp_http").info("'Load Game' not found: clicking 'Single Player' again (%d/3)", i + 1)
+        if _original_click_text("Single Player", timeout=10, exact=True, post_delay=1.5) and \
+                _original_click_text(target, *args, **kwargs):
+            return True
+    return False
+
+
+launcher._click_text = _click_text_again
+
 # --- Batch tools ---------------------------------------------------------------------------------------
 
 _BRIEFING = ["get_game_overview", "get_units", "get_cities", "get_notifications"]
