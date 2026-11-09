@@ -178,6 +178,104 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if _tool is not None:
             _tool.fn = _then_close_leader_screen(_tool.fn)
 
+    # A melee attack from 2 or more tiles away is a move-and-attack. civ6-mcp sends the order and reads the unit's
+    # position in the same Lua call, before the order has run, so it always found the unit on its starting tile and
+    # answered "STOPPED_SHORT ... Try again next turn from closer position" (12 to 26 times a game). In games 3, 7
+    # and 8 the next unit listing showed the unit had moved every time, and it had usually attacked: the target's HP
+    # had dropped, or it was dead and the unit stood on its tile. Here the unit and the target tile are read again
+    # until the order has played out (about 2 seconds, at most 6), and the result says what happened.
+    def _attack_state_lua(unit_index, tx, ty):
+        return (
+            "local me = Game.GetLocalPlayer() "
+            f"local u = UnitManager.GetUnit(me, {int(unit_index)}) "
+            "if u == nil or u:GetX() == -9999 then print('ME|GONE') else "
+            f"  print('ME|' .. u:GetX() .. '|' .. u:GetY() .. '|' .. Map.GetPlotDistance(u:GetX(), u:GetY(), {int(tx)}, "
+            f"{int(ty)}) .. '|' .. (u:GetMaxDamage() - u:GetDamage()) .. '|' .. u:GetMovesRemaining()) "
+            "end "
+            f"local us = Map.GetUnitsAt({int(tx)}, {int(ty)}) "
+            "if us then for o in us:Units() do if o:GetOwner() ~= me then "
+            "  local e = GameInfo.Units[o:GetType()] "
+            "  print('FOE|' .. (e and e.UnitType or '?') .. '|' .. (o:GetMaxDamage() - o:GetDamage()) .. '|' "
+            "    .. (e and e.Combat or 0)) "
+            "end end end "
+            "print('---END---')"
+        )
+
+    async def _attack_state(game, unit_index, tx, ty):
+        """(me, foe): me is 'gone' or (x, y, distance to target, HP, moves left); foe is (unit type, HP, combat
+        strength) of the unit an attack on the tile hits (a military one before a civilian), or None. None when the
+        read fails."""
+        try:
+            lines = await game.conn.execute_write(_attack_state_lua(unit_index, tx, ty), timeout=10.0)
+        except Exception:
+            return None
+        me, foes = None, []
+        for ln in lines:
+            p = ln.split("|")
+            if p[0] == "ME":
+                me = "gone" if p[1] == "GONE" else tuple(int(float(v)) for v in p[1:6])
+            elif p[0] == "FOE" and len(p) >= 4:
+                foes.append((p[1], int(float(p[2])), int(float(p[3]))))
+        if me is None:
+            return None
+        foe = next((f for f in foes if f[2] > 0), foes[0] if foes else None)
+        return me, foe
+
+    def _attack_resolved(before, after) -> bool:
+        (bme, bfoe), (ame, afoe) = before, after
+        if ame == "gone" or ame[2] == 0:  # died, or killed the target and moved onto its tile
+            return True
+        if bfoe and (afoe is None or afoe[0] != bfoe[0] or afoe[1] != bfoe[1]):
+            return True
+        return ame[3] != bme[3]
+
+    def _attack_report(before, after, tx, ty, waited) -> str:
+        (bme, bfoe), (ame, afoe) = before, after
+        foe = bfoe[0] if bfoe else "the target"
+        start = f"({bme[0]},{bme[1]})"
+        if ame == "gone":
+            return (f"MELEE_ATTACK|target:{foe} at ({tx},{ty})|Your unit moved from {start} to attack and no longer "
+                    "exists: it died in the attack.")
+        here = f"({ame[0]},{ame[1]})"
+        moves = f"moves left: {ame[4]}"
+        if _attack_resolved(before, after):
+            killed = bfoe and (afoe is None or afoe[0] != bfoe[0])
+            gone = "killed" if bfoe and bfoe[2] > 0 else "captured"
+            enemy = f"enemy HP:{bfoe[1]} -> {gone}" if killed else (f"enemy HP:{bfoe[1]} -> {afoe[1]}" if bfoe else "")
+            where = f"advanced into ({tx},{ty})" if ame[2] == 0 else f"attacked from {here}"
+            return (f"MELEE_ATTACK|target:{foe} at ({tx},{ty})|moved from {start} and {where}|{enemy}"
+                    f"|your HP:{bme[3]} -> {ame[3]}|{moves}")
+        if (ame[0], ame[1]) == (bme[0], bme[1]):
+            return (f"Error: NOT_MOVED|The move-and-attack order was sent, but after {waited:.0f} seconds the unit is "
+                    f"still at {start} and no combat has happened. Check get_units before you order it again.")
+        if ame[2] == 1:
+            then = "It can attack again this turn." if ame[4] > 0 else "It has no moves left to attack this turn."
+            return (f"MOVED_ADJACENT|Unit moved from {start} to {here}, next to {foe} at ({tx},{ty}), and did not "
+                    f"attack ({moves}). {then}")
+        return (f"Error: STOPPED_SHORT|Unit moved from {start} to {here} but could not reach {foe} at ({tx},{ty}): "
+                f"{ame[2]} tiles away, {moves}. No attack happened.")
+
+    _original_attack_unit = _gsm.GameState.attack_unit
+
+    async def _attack_unit_settled(self, unit_index, target_x, target_y):
+        before = await _attack_state(self, unit_index, target_x, target_y)
+        result = await _original_attack_unit(self, unit_index, target_x, target_y)
+        if "STOPPED_SHORT|" not in result or before is None or before[0] == "gone":
+            return result
+        after, waited = None, 0.0
+        while waited < 6.0:
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            after = await _attack_state(self, unit_index, target_x, target_y) or after
+            if after and _attack_resolved(before, after):
+                break
+        if after is None:
+            return result
+        logging.getLogger("civ_mcp_http").info("Move-and-attack re-read after %.1f s: %s -> %s", waited, before, after)
+        return result.split("Error: STOPPED_SHORT|", 1)[0] + _attack_report(before, after, target_x, target_y, waited)
+
+    _gsm.GameState.attack_unit = _attack_unit_settled
+
     # civ6-mcp warns that InGame queries while the AI civs move can stall their turns, and polls only GameCore then.
     # Two cases reach end_turn while they move: civ6-mcp re-entering a turn end still in flight (after mid-turn
     # diplomacy), and a turn number that advanced before the player's turn started (game 2, turn 145: the agent's

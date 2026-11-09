@@ -1,6 +1,7 @@
 """Offline tests of windows/civ_mcp_http.py's fixes to civ6-mcp: the diplomacy-pause fix and the dropped end-turn
 request, run against civ6-mcp's real execute_end_turn with a fake game connection; the diplomacy screen left locked
-by trades; the note after a hang reload; and the menu-load click retry. No game or network needed.
+by trades; the note after a hang reload; the move-and-attack result; and the menu-load click retry. No game or
+network needed.
 
     cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_civ_mcp_http.py
 """
@@ -234,6 +235,64 @@ async def main():
     steps = ["Turn 5 -> 6"]
     out = await ns["_hang_note"](recovering)(ctx=CTX)
     check("no note without a hang", out == "Turn 5 -> 6", repr(out))
+
+    # 11. Move-and-attack: civ6-mcp reads the unit's tile before the order runs and always says STOPPED_SHORT. The
+    #     wrapper reads the unit and the target tile again until the order has played out.
+    class AttackConn:
+        def __init__(self, states): self.states, self.reads = list(states), 0
+        async def execute_write(self, lua, timeout=None):
+            assert "'ME|'" in lua and "Map.GetUnitsAt(43, 45)" in lua and "GetUnit(me, 9)" in lua, lua
+            self.reads += 1
+            return (self.states.pop(0) if len(self.states) > 1 else self.states[0]) + [lq.SENTINEL]
+    class AttackGame:
+        def __init__(self, states): self.conn = AttackConn(states)
+    EST = "Combat Estimate (Melee):\n  Est damage to defender: ~44\n"
+    async def stopped_short(self, ui, tx, ty):
+        return (EST + "Error: STOPPED_SHORT|Unit moved to (42,43) but could not reach target at (43,45) — 2 tiles "
+                "away. Movement exhausted by terrain. Try again next turn from closer position.")
+    async def adjacent(self, ui, tx, ty): return EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|enemy HP:41 -> 41/100"
+    attack = GameState.__dict__["attack_unit"]
+    START = ["ME|42|43|2|100|4", "FOE|UNIT_WARRIOR|41|20"]
+    cases = [
+        ("kill and advance", [START, START, ["ME|43|45|0|88|0"]], 3,
+         EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|moved from (42,43) and advanced into (43,45)|enemy HP:41 -> "
+               "killed|your HP:100 -> 88|moves left: 0"),
+        ("attack, target survives", [START, ["ME|43|44|1|78|0", "FOE|UNIT_WARRIOR|12|20"]], 2,
+         EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|moved from (42,43) and attacked from (43,44)|enemy HP:41 -> "
+               "12|your HP:100 -> 78|moves left: 0"),
+        ("civilian captured", [["ME|42|43|2|100|4", "FOE|UNIT_BUILDER|100|0"], ["ME|43|45|0|100|0"]], 2,
+         EST + "MELEE_ATTACK|target:UNIT_BUILDER at (43,45)|moved from (42,43) and advanced into (43,45)|enemy HP:100 -> "
+               "captured|your HP:100 -> 100|moves left: 0"),
+        ("unit died", [START, ["ME|GONE", "FOE|UNIT_WARRIOR|30|20"]], 2,
+         EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|Your unit moved from (42,43) to attack and no longer exists: "
+               "it died in the attack."),
+        ("moved next to it, no attack", [START, ["ME|43|44|1|100|1", "FOE|UNIT_WARRIOR|41|20"]], 13,
+         EST + "MOVED_ADJACENT|Unit moved from (42,43) to (43,44), next to UNIT_WARRIOR at (43,45), and did not attack "
+               "(moves left: 1). It can attack again this turn."),
+        ("really stopped short", [START, ["ME|44|44|2|100|0", "FOE|UNIT_WARRIOR|41|20"]], 13,
+         EST + "Error: STOPPED_SHORT|Unit moved from (42,43) to (44,44) but could not reach UNIT_WARRIOR at (43,45): 2 "
+               "tiles away, moves left: 0. No attack happened."),
+        ("never moved", [START], 13,
+         EST + "Error: NOT_MOVED|The move-and-attack order was sent, but after 6 seconds the unit is still at (42,43) "
+               "and no combat has happened. Check get_units before you order it again."),
+    ]
+    ns["_original_attack_unit"] = stopped_short
+    for name, states, reads, want in cases:
+        g = AttackGame(states)
+        out = await attack(g, 9, 43, 45)
+        check(f"move-and-attack: {name}", out == want and g.conn.reads == reads, f"{g.conn.reads} reads: {out!r}")
+    ns["_original_attack_unit"] = adjacent
+    g = AttackGame([START])
+    out = await attack(g, 9, 43, 45)
+    check("adjacent attack passes through, one read", out == EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|enemy "
+          "HP:41 -> 41/100" and g.conn.reads == 1, f"{g.conn.reads} reads: {out!r}")
+    class Failing:
+        async def execute_write(self, lua, timeout=None): raise TimeoutError
+    ns["_original_attack_unit"] = stopped_short
+    g = AttackGame([]); g.conn = Failing()
+    out = await attack(g, 9, 43, 45)
+    check("read failure keeps civ6-mcp's answer", "Try again next turn" in out, repr(out[-60:]))
+    check("unit_action's attack calls the patched method", GameState.attack_unit is ns["_attack_unit_settled"])
 
 asyncio.run(main())
 
