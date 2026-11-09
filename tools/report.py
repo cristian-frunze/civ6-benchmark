@@ -102,11 +102,11 @@ PAGE = r"""<!doctype html>
 <title>Civ 6 Benchmark</title>
 <style>
 :root{color-scheme:light;--bg:#f6f6f4;--surface:#fcfcfb;--line:#e4e3df;--grid:#ecebe7;--ink:#0b0b0b;--ink2:#52514e;--ink3:#7a7974;
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--zero:#b9b8b2}
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--zero:#b9b8b2}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#121211;--surface:#1a1a19;--line:#2c2c2a;
---grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--zero:#55544f}}
+--grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--zero:#55544f}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#121211;--surface:#1a1a19;--line:#2c2c2a;--grid:#262624;--ink:#f0efec;--ink2:#c3c2b7;
---ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--zero:#55544f}
+--ink3:#8f8e88;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--zero:#55544f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:980px;margin:0 auto;padding:28px 16px 60px}h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:34px 0 4px}
 .sub{color:var(--ink2);margin:0 0 18px}.note{color:var(--ink3);font-size:13px;margin:4px 0 10px}
@@ -114,7 +114,8 @@ main{max-width:980px;margin:0 auto;padding:28px 16px 60px}h1{font-size:24px;marg
 table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
 th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--grid);white-space:nowrap}th{color:var(--ink2);font-weight:600}
 td:first-child,th:first-child{text-align:left}tr:last-child td{border-bottom:0}
-.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:baseline}
+.sw{display:inline-block;width:16px;height:10px;margin-right:7px;vertical-align:-1px}
+.res{text-align:left;white-space:normal;min-width:150px}#summary td:first-child{white-space:normal;min-width:150px}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--ink2);margin:2px 0 8px}
 .chart{position:relative}.chart svg{display:block;width:100%;height:auto}
 .tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 9px;
@@ -136,13 +137,18 @@ font-size:12.5px;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;white-space:
 </main>
 <script>
 const G = __DATA__;
-const COL = ["var(--s1)","var(--s2)","var(--s3)","var(--s4)","var(--s5)","var(--s6)"];
+// One fixed style per game, so a color always means the same game. Repeats of game 3's setup (7, and 10 on the
+// fixed harness) share its aqua, dashed and dotted; the 8-hue palette never cycles for these ten.
+const STYLE = {"g1-standard":[1],"g2-baseline":[2],"g3-science":[3],"g4-domination":[4],"g5-deity-science":[5],
+  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"]};
+const st = i => STYLE[G[i].id] || [i % 8 + 1], col = i => `var(--s${st(i)[0]})`;
+const dash = i => st(i)[1] ? ` stroke-dasharray="${st(i)[1]}"` : "";
 const fmt = (n, d=0) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-function sw(i){return `<span class="sw" style="background:${COL[i]}"></span>`}
+function sw(i){return `<svg class="sw" viewBox="0 0 16 10" aria-hidden="true"><line x1="0" y1="5" x2="16" y2="5" stroke="${col(i)}" stroke-width="3"${dash(i)}/></svg>`}
 document.getElementById("summary").innerHTML =
- `<tr><th>Game</th><th>Result</th><th>Turns</th><th>Cost</th><th>$ / turn</th><th>Median s / turn</th><th>Hours</th><th>Requests</th><th>Tool calls</th></tr>` +
- G.map((g,i)=>`<tr><td>${sw(i)}${esc(g.title)}</td><td style="text-align:left">${esc(g.result)}</td><td>${g.last_turn}</td><td>$${fmt(g.usd,2)}</td><td>$${fmt(g.usd_per_turn,2)}</td><td>${g.median_s}</td><td>${g.wall_h}</td><td>${fmt(g.requests)}</td><td>${fmt(g.tool_calls)}</td></tr>`).join("");
+ `<tr><th>Game</th><th class="res">Result</th><th>Turns</th><th>Cost</th><th>$ / turn</th><th>Median s / turn</th><th>Hours</th><th>Requests</th><th>Tool calls</th></tr>` +
+ G.map((g,i)=>`<tr><td>${sw(i)}${esc(g.title)}</td><td class="res">${esc(g.result)}</td><td>${g.last_turn}</td><td>$${fmt(g.usd,2)}</td><td>$${fmt(g.usd_per_turn,2)}</td><td>${g.median_s}</td><td>${g.wall_h}</td><td>${fmt(g.requests)}</td><td>${fmt(g.tool_calls)}</td></tr>`).join("");
 document.getElementById("split").innerHTML =
  `<tr><th>Game</th><th>Cache read</th><th>Cache write</th><th>Output</th><th>Input</th></tr>` +
  G.map((g,i)=>`<tr><td>${sw(i)}${esc(g.title)}</td><td>$${fmt(g.split.cache_read,2)}</td><td>$${fmt(g.split.cache_write,2)}</td><td>$${fmt(g.split.output,2)}</td><td>$${fmt(g.split.input,2)}</td></tr>`).join("");
@@ -164,11 +170,11 @@ function line(id, key, yfmt, zero){
   const xs = W < 600 ? 100 : 50;
   for (let x = xs; x <= xmax; x += xs) s += `<text x="${X(x)}" y="${H-8}" text-anchor="middle" font-size="12" fill="var(--ink3)">T${x}</text>`;
   G.forEach((g,i) => { const p = g[key]; if (!p.length) return;
-    s += `<path d="${p.map((q,j)=>(j?'L':'M')+X(q[0]).toFixed(1)+','+Y(q[1]).toFixed(1)).join('')}" fill="none" stroke="${COL[i]}" stroke-width="2" stroke-linejoin="round"/>`;
-    const e = p[p.length-1]; s += `<circle cx="${X(e[0])}" cy="${Y(e[1])}" r="4" fill="${COL[i]}" stroke="var(--surface)" stroke-width="2"/>
+    s += `<path d="${p.map((q,j)=>(j?'L':'M')+X(q[0]).toFixed(1)+','+Y(q[1]).toFixed(1)).join('')}" fill="none" stroke="${col(i)}" stroke-width="2" stroke-linejoin="round"${dash(i)}/>`;
+    const e = p[p.length-1]; s += `<circle cx="${X(e[0])}" cy="${Y(e[1])}" r="4" fill="${col(i)}" stroke="var(--surface)" stroke-width="2"/>
     <text x="${X(e[0])+8}" y="${Y(e[1])+4}" font-size="12" fill="var(--ink2)">${yfmt(e[1])}</text>`; });
   s += `<line id="${id}-x" y1="${m.t}" y2="${H-m.b}" stroke="var(--ink3)" stroke-width="1" visibility="hidden"/>`;
-  s += G.map((g,i)=>`<circle id="${id}-d${i}" r="4" fill="${COL[i]}" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join("");
+  s += G.map((g,i)=>`<circle id="${id}-d${i}" r="4" fill="${col(i)}" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join("");
   s += `<rect x="${m.l}" y="0" width="${W-m.l-m.r}" height="${H}" fill="transparent"/></svg><div class="tip"></div>`;
   el.innerHTML = s; const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), vx = document.getElementById(id+"-x");
   svg.addEventListener("pointermove", ev => { const r = svg.getBoundingClientRect(), sx = (ev.clientX - r.left) * W / r.width;
@@ -195,8 +201,9 @@ def main() -> None:
     ap.add_argument("--game", action="append", default=[], help="<id> (results/<id>) or <id>=<run dir>")
     a = ap.parse_args()
     # Hotseat games (rounds.jsonl) have several agents per game: tools/report_hotseat.py covers them.
-    specs = a.game or sorted(p.name for p in (REPO / "results").iterdir()
-                             if p.is_dir() and not (p / "rounds.jsonl").exists())
+    specs = a.game or sorted((p.name for p in (REPO / "results").iterdir()
+                              if p.is_dir() and not (p / "rounds.jsonl").exists()),
+                             key=lambda n: (n[0], int(re.match(r"\D*(\d+)", n)[1]) if re.match(r"\D*\d", n) else 0, n))
     games = []
     for spec in specs:
         gid, _, src = spec.partition("=")
