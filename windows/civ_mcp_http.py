@@ -296,6 +296,33 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return lua.replace("local isRanged = attRS > 0 and dist > 1\n", "local isRanged = attRS > 0\n")
 
     _lq.build_combat_estimate_query = _estimate_query_ranged
+
+    # Promotions broke the game's rule. civ6-mcp applies them with GameCore's SetPromotion (the game's own PROMOTE
+    # command failed silently for its authors) and then healed the unit to full and left its moves. In the game, a
+    # promotion heals EXPERIENCE_PROMOTE_HEALED HP (50 in the base game's GlobalParameters.xml) and ends the unit's
+    # turn. Agents noticed ("Promotion did not consume the archer's attack", game 7 turn 82; "Promotion did not consume
+    # War-Cart's moves and healed it fully - promote before attacking when possible", game 9 turn 27). Here the heal
+    # and the end of the unit's turn follow the game's rule.
+    _FULL_HEAL = "pcall(function() unit:SetDamage(0) end)\n"
+    _PROMOTE_RULE = (
+        "local healed = 50\n"
+        "pcall(function() local p = GameInfo.GlobalParameters['EXPERIENCE_PROMOTE_HEALED'] "
+        "if p then healed = tonumber(p.Value) or 50 end end)\n"
+        "pcall(function() unit:SetDamage(math.max(0, unit:GetDamage() - healed)) end)\n"
+        "pcall(function() UnitManager.FinishMoves(unit) end)\n")
+    _PROMOTED_LINE = 'print("OK:PROMOTED|" .. promoName .. "|stored:" .. stored .. "->" .. storedAfter)\n'
+    _original_build_promote_unit = _lq.build_promote_unit
+
+    def _build_promote_unit_rule(unit_index, promotion_type):
+        lua = _original_build_promote_unit(unit_index, promotion_type)
+        if lua.count(_FULL_HEAL) != 1 or lua.count(_PROMOTED_LINE) != 1:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's promotion Lua changed: promotion rule not applied")
+            return lua
+        return lua.replace(_FULL_HEAL, _PROMOTE_RULE).replace(
+            _PROMOTED_LINE, _PROMOTED_LINE[:-2] + ' .. "|healed up to " .. healed .. " HP, and the unit\'s turn has '
+            'ended (the game\'s rule for promotions)")\n')
+
+    _lq.build_promote_unit = _build_promote_unit_rule
     _original_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
@@ -523,8 +550,104 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
+    # Auto-explore lasted one turn. unit_action's "automate" sends the game's own UNITOPERATION_AUTOMATE_EXPLORE (as
+    # the game's unit panel does), and the scout explores that turn, but from the next turn on it sat on its tile with
+    # full moves and needed orders again (game 8: turns 19-20 at (38,38), 24-25 at (37,34); game 9: "automation
+    # appears to drop each turn - re-issuing automate every turn", then "moving scout manually from now on"). What
+    # cancels it was not found. Here the harness remembers the units the agent automated and sends auto-explore again
+    # at the start of each of its turns, until the agent gives that unit any other order or the unit stops moving.
+    _EXPLORE_HASH = 'GameInfo.UnitOperations["UNITOPERATION_AUTOMATE_EXPLORE"].Hash'
+
+    def _explore_again_lua(ids):
+        return (
+            f"local me = Game.GetLocalPlayer() local hash = {_EXPLORE_HASH} "
+            f"for _, id in ipairs({{{', '.join(str(int(i)) for i in ids)}}}) do "
+            "  local u = UnitManager.GetUnit(me, id % 65536) "
+            "  if u == nil or u:GetX() == -9999 then print('EXPLORER|' .. id .. '|GONE') "
+            "  else "
+            "    local x, y, m = u:GetX(), u:GetY(), u:GetMovesRemaining() "
+            "    local sent = 'KEPT' "
+            "    if m > 0 and UnitManager.CanStartOperation(u, hash, nil, nil) then "
+            "      UnitManager.RequestOperation(u, hash, {}) sent = 'SENT' "
+            "    elseif m > 0 then sent = 'REFUSED' end "
+            "    print('EXPLORER|' .. id .. '|' .. sent .. '|' .. x .. '|' .. y .. '|' .. m) "
+            "  end "
+            "end print('---END---')"
+        )
+
+    def _tracks_explorers(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            try:
+                ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+                uid, action = kwargs.get("unit_id"), str(kwargs.get("action") or "").lower()
+                game = srv._get_game(ctx) if ctx is not None else None
+                if game is not None and uid is not None:
+                    explorers = game.__dict__.setdefault("_bench_explorers", {})
+                    m = re.match(r"AUTOMATED\|(\d+),(\d+)", str(out))
+                    if action == "automate" and m:
+                        explorers[int(uid)] = (int(m.group(1)), int(m.group(2)))
+                    elif action != "automate":
+                        explorers.pop(int(uid), None)
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("explorer tracking failed", exc_info=True)
+            return out
+
+        return wrapper
+
+    async def _explore_again(game, reloaded=False) -> str:
+        explorers = game.__dict__.get("_bench_explorers") or {}
+        if not explorers or await _turn_active(game) is not True:
+            return ""
+        lines = await game.conn.execute_write(_explore_again_lua(sorted(explorers)), timeout=10.0)
+        sent, stopped = [], []
+        for ln in lines:
+            p = ln.split("|")
+            if p[0] != "EXPLORER" or len(p) < 3:
+                continue
+            uid = int(p[1])
+            if p[2] == "GONE":
+                explorers.pop(uid, None)
+                continue
+            x, y, moves = int(p[3]), int(p[4]), int(float(p[5]))
+            # It did not move during the last turn (a hang reload puts it back, so that does not count), or the game
+            # will not explore from here: auto-explore is over.
+            if moves > 0 and ((explorers.get(uid) == (x, y) and not reloaded) or p[2] == "REFUSED"):
+                explorers.pop(uid, None)
+                stopped.append(f"unit {uid} at ({x},{y})")
+                continue
+            explorers[uid] = (x, y)
+            if p[2] == "SENT":
+                sent.append(f"unit {uid} from ({x},{y})")
+        logging.getLogger("civ_mcp_http").info("Auto-explore sent again: %s; stopped: %s", sent, stopped)
+        note = ""
+        if sent:
+            note += (f"\n\nAuto-explore continues for {', '.join(sent)} (the harness sends it again each turn "
+                     "until you give the unit another order).")
+        if stopped:
+            note += (f"\n\nAuto-explore has stopped for {', '.join(stopped)}: it did not move last turn, or the game "
+                     "will not explore from there. Give it orders.")
+        return note
+
+    def _explores_again(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            if isinstance(out, str) and re.search(r"Turn \d+ -> \d+", out):
+                ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+                try:
+                    out += await _explore_again(srv._get_game(ctx), reloaded=out.startswith("The AI turns hung"))
+                except Exception:
+                    logging.getLogger("civ_mcp_http").warning("sending auto-explore again failed", exc_info=True)
+            return out
+
+        return wrapper
+
     _tool = mcp._tool_manager.get_tool("end_turn")
-    _tool.fn = _hang_note(_units_first(_tool.fn))
+    _tool.fn = _explores_again(_hang_note(_units_first(_tool.fn)))
+    _tool = mcp._tool_manager.get_tool("unit_action")
+    _tool.fn = _tracks_explorers(_tool.fn)
 
     def _clears_answered(fn):
         @functools.wraps(fn)

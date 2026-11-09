@@ -209,9 +209,10 @@ async def main():
     # 10. A hang reload is named: civ6-mcp reloads the turn's start and ends it again (game 8, turn 209).
     check("GameState.end_turn records results", GameState.end_turn is ns["_gs_end_turn_recorded"])
     tool = mcp._tool_manager.get_tool("end_turn")
-    check("end_turn tool: hang note outside the units/pending wrapper", tool.fn.__code__ is bound
-          and tool.fn.__wrapped__.__code__ is ns["_hang_note"](stock).__code__
-          and tool.fn.__wrapped__.__wrapped__.__code__ is ns["_units_first"](stock).__code__)
+    check("end_turn tool: explore, then hang note, outside the units/pending wrapper", tool.fn.__code__ is bound
+          and tool.fn.__wrapped__.__code__ is ns["_explores_again"](stock).__code__
+          and tool.fn.__wrapped__.__wrapped__.__code__ is ns["_hang_note"](stock).__code__
+          and tool.fn.__wrapped__.__wrapped__.__wrapped__.__code__ is ns["_units_first"](stock).__code__)
     import inspect
     src_et = inspect.getsource(tool.fn.__wrapped__.__wrapped__.__wrapped__)
     check("civ6-mcp's end_turn tool calls gs.end_turn for the first try and the retry",
@@ -314,6 +315,79 @@ async def main():
         ns["_original_attack_unit"] = scripted
         out = await attack(AttackGame([START]), 9, 43, 45)
         check(f"ranged: {name}", out == want and len(calls) == (1 if name.startswith("fires") else 2), out[-60:])
+
+    # 13. Promotions follow the game's rule: heal EXPERIENCE_PROMOTE_HEALED HP (not to full), end the unit's turn.
+    lua = lq.build_promote_unit(9, "PROMOTION_BATTLECRY")
+    check("promotion: no full heal", "SetDamage(0)" not in lua)
+    check("promotion: heals the game's amount", "GlobalParameters['EXPERIENCE_PROMOTE_HEALED']" in lua
+          and "unit:SetDamage(math.max(0, unit:GetDamage() - healed))" in lua)
+    check("promotion: ends the unit's turn", "UnitManager.FinishMoves(unit)" in lua
+          and lua.index("exp:SetPromotion") < lua.index("FinishMoves"))
+    check("promotion: the agent is told", "the unit's turn has ended (the game's rule for promotions)" in lua)
+
+    # 14. Auto-explore: the harness remembers automated units and sends auto-explore again at each new turn.
+    class ExploreConn:
+        def __init__(self, units, active=True): self.units, self.active, self.sent = units, active, []
+        async def execute_read(self, lua, timeout=None):
+            return [f"ACTIVE|{str(self.active).lower()}", lq.SENTINEL]
+        async def execute_write(self, lua, timeout=None):
+            assert "UNITOPERATION_AUTOMATE_EXPLORE" in lua and "ipairs({" in lua, lua
+            out = []
+            for uid, st in sorted(self.units.items()):
+                if st == "gone": out.append(f"EXPLORER|{uid}|GONE"); continue
+                x, y, m, ok = st
+                kind = "SENT" if m > 0 and ok else ("REFUSED" if m > 0 else "KEPT")
+                if kind == "SENT": self.sent.append(uid)
+                out.append(f"EXPLORER|{uid}|{kind}|{x}|{y}|{m}")
+            return out + [lq.SENTINEL]
+    class ExploreGame:
+        def __init__(self, units, active=True): self.conn = ExploreConn(units, active)
+    GAME = ExploreGame({})
+    async def unit_action(ctx=None, unit_id=None, action=None, **k):
+        return {"automate": "AUTOMATED|39,40", "move": "MOVING_TO|40,41"}[action]
+    track = ns["_tracks_explorers"](unit_action)
+    await track(ctx=CTX, unit_id=196608, action="automate")
+    await track(CTX, unit_id=262146, action="automate")
+    check("automate is remembered with its tile", GAME._bench_explorers == {196608: (39, 40), 262146: (39, 40)},
+          GAME._bench_explorers)
+    await track(ctx=CTX, unit_id=262146, action="move", target_x=40, target_y=41)
+    check("another order ends it", GAME._bench_explorers == {196608: (39, 40)}, GAME._bench_explorers)
+    script = ["Turn 6 -> 7 | Score: 10"]
+    async def end_turn_fake(ctx=None): return script[0]
+    et_wrapped = ns["_explores_again"](end_turn_fake)
+    GAME.conn.units = {196608: (41, 42, 3, True)}
+    out = await et_wrapped(ctx=CTX)
+    check("explore sent again at the new turn", GAME.conn.sent == [196608] and out.startswith("Turn 6 -> 7")
+          and "Auto-explore continues for unit 196608 from (41,42)" in out and GAME._bench_explorers[196608] == (41, 42),
+          out)
+    GAME.conn.units = {196608: (41, 42, 3, True)}; GAME.conn.sent = []
+    out = await et_wrapped(ctx=CTX)
+    check("unit that did not move: stopped and the agent told", GAME.conn.sent == [196608]
+          and "Auto-explore has stopped for unit 196608 at (41,42)" in out and "continues" not in out
+          and GAME._bench_explorers == {}, out)
+    GAME._bench_explorers = {196608: (41, 42)}; GAME.conn.sent = []
+    script[0] = "The AI turns hung after you ended turn 7, so the game was reloaded ...\n\nTurn 7 -> 8 | Score: 10"
+    out = await et_wrapped(ctx=CTX)
+    check("after a hang reload the same tile is not a stop", "continues for unit 196608" in out
+          and 196608 in GAME._bench_explorers, out[-120:])
+    GAME._bench_explorers = {196608: (41, 42), 5: (1, 1), 6: (2, 2)}
+    GAME.conn.units = {196608: (43, 44, 0, True), 5: "gone", 6: (2, 3, 3, False)}; GAME.conn.sent = []
+    script[0] = "Turn 8 -> 9 | Score: 11"
+    out = await et_wrapped(ctx=CTX)
+    check("no moves: kept quietly; gone: dropped; refused: stopped", GAME.conn.sent == []
+          and GAME._bench_explorers == {196608: (43, 44)} and "stopped for unit 6 at (2,3)" in out
+          and "continues" not in out, (GAME._bench_explorers, out))
+    script[0] = "Turn paused - AI diplomatic proposal from Brazil"
+    out = await et_wrapped(ctx=CTX)
+    check("no new turn: nothing sent", out == script[0] and GAME.conn.sent == [])
+    GAME.conn.active = False; script[0] = "Turn 9 -> 10"; GAME.conn.units = {196608: (45, 44, 3, True)}
+    out = await et_wrapped(ctx=CTX)
+    check("AI civs still moving: nothing sent", out == "Turn 9 -> 10" and GAME.conn.sent == [])
+    tools = mcp._tool_manager
+    chain, f = [], tools.get_tool("unit_action").fn
+    while f is not None:
+        chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+    check("unit_action carries the explorer tracking", ns["_tracks_explorers"](stock).__code__ in chain)
 
 asyncio.run(main())
 
