@@ -18,6 +18,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
+PAUSE_S = 1800  # a gap this long between two turns is a pause from outside (game 9: the game PC was closed), not play
+
+
+def play_hours(turns) -> tuple[float, float]:
+    """Hours from the first turn's start to the last turn's end, less pauses between turns; and the pauses."""
+    rows = sorted((t for t in turns if t.get("start") and t.get("end")), key=lambda t: t["start"])
+    if not rows:
+        return 0.0, 0.0
+    paused = sum(b["start"] - a["end"] for a, b in zip(rows, rows[1:]) if b["start"] - a["end"] > PAUSE_S)
+    return (max(t["end"] for t in rows) - rows[0]["start"] - paused) / 3600, paused / 3600
+
+
 def price(run: Path) -> dict:
     """$/MTok for the game's model (warroom/prices.json), with 1-hour cache writes as the runners use them."""
     model = "claude-opus-5-5"
@@ -94,8 +106,9 @@ def main() -> None:
 
     S = lambda k: sum(t.get(k) or 0 for t in turns)  # noqa: E731
     secs = [t["end"] - t["start"] for t in turns if t.get("end") and t.get("start")]
-    wall = (max(t["end"] for t in turns) - min(t["start"] for t in turns)) / 3600
-    print(f"turns {len(turns)} (last {turns[-1]['turn']}), wall {wall:.2f} h, median {statistics.median(secs):.0f} s/turn")
+    wall, paused = play_hours(turns)
+    print(f"turns {len(turns)} (last {turns[-1]['turn']}), wall {wall:.2f} h"
+          + (f" ({paused:.2f} h of pauses left out)" if paused else "") + f", median {statistics.median(secs):.0f} s/turn")
     print(f"usd {S('usd'):.2f}; requests {S('requests')}; tool calls {S('tool_calls')} ({S('tool_errors')} errors)")
     print(f"tokens: output {S('output'):,}, cache read {S('cache_read'):,}, cache write {S('cache_write'):,}, input {S('input'):,}")
     print("cost split: " + ", ".join(f"{k} ${S(k) * p / 1e6:.2f}" for k, p in price(run).items()))

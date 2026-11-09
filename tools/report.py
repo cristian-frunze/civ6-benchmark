@@ -21,6 +21,18 @@ REPO = Path(__file__).resolve().parent.parent
 PRICES = {k: v for k, v in json.loads((REPO / "warroom" / "prices.json").read_text()).items() if isinstance(v, dict)}
 
 
+PAUSE_S = 1800  # a gap this long between two turns is a pause from outside (game 9: the game PC was closed), not play
+
+
+def play_hours(turns) -> tuple[float, float]:
+    """Hours from the first turn's start to the last turn's end, less pauses between turns; and the pauses."""
+    rows = sorted((t for t in turns if t.get("start") and t.get("end")), key=lambda t: t["start"])
+    if not rows:
+        return 0.0, 0.0
+    paused = sum(b["start"] - a["end"] for a, b in zip(rows, rows[1:]) if b["start"] - a["end"] > PAUSE_S)
+    return (max(t["end"] for t in rows) - rows[0]["start"] - paused) / 3600, paused / 3600
+
+
 def price(model: str) -> dict:
     """$/MTok for the game's model, with 1-hour cache writes as the runners use them."""
     p = PRICES.get(model) or PRICES["claude-opus-5-5"]
@@ -81,7 +93,7 @@ def load(gid: str, src: Path) -> dict:
     model = next((r.get("agent_model") for r in diary.values() if r.get("is_agent") and r.get("agent_model")), "")
     S = lambda k: sum(t.get(k) or 0 for t in turns)  # noqa: E731
     secs = [t["end"] - t["start"] for t in turns if t.get("end") and t.get("start")]
-    wall = (max(t["end"] for t in turns) - min(t["start"] for t in turns)) / 3600 if turns else 0
+    wall = play_hours(turns)[0]
     return {
         "id": gid, "title": title, "result": result, "turns": len(turns),
         "last_turn": int(won[1]) if (won := re.search(r"turn (\d+)", result)) else
