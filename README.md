@@ -15,9 +15,9 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 | 5 | Game 3's setup (Science goal, Online) on **Deity**, the hardest level, instead of Prince | **Defeat: Greece (AI) won a Science victory on turn 144**; Opus finished last (score 218 to the AI's 415-549, 37 techs to Greece's 68), $37.80 ([results](results/g5-deity-science/)) |
 | 6 | Game 3's setup with **Sonnet 5.5** (high effort) instead of Opus 5.5 | **Science victory, turn 223** (Opus: 212), $58.70 (Opus: $56.43): half the token price, but cache reads cost the same and were 85% of the bill ([results](results/g6-sonnet-science/)) |
 | 7 | Game 3 **repeated** exactly (same start, same prompt, same harness), to see how much one game varies from the next | **Science victory, turn 206** (game 3: 212), $62.87 (game 3: $56.43), $5.25 of it in a game crash on turn 102. It had 8 cities to game 3's 6 but about the same tech count throughout ([results](results/g7-science-repeat/)) |
-| 8 | Game 3's setup with Opus 5.5 at **medium effort** (Claude Code's default) instead of high, on the fixed harness (below) | queued after game 7 |
-| 9 | Game 3's setup with **Fable 5.1** (high effort), on the fixed harness | queued after game 8 |
-| 10 | Game 3 repeated on the **fixed harness** (Opus 5.5, high effort): the baseline for games 8 and 9, and a measure of the fix | queued after game 9 |
+| 8 | Game 3's setup with Opus 5.5 at **medium effort** (Claude Code's default) instead of high, on the fixed harness (below) | **Science victory, turn 224** (games 3 and 7: 212 and 206), $54.83, one project ahead of Greece. It led the AI in techs from turn 100 on, by up to 9, but went bankrupt late. Medium effort cut output and thinking only 3 to 8%. 3.8 of its 8.6 hours went to 18 AI-turn hangs, fixed from game 10 ([results](results/g8-opus-medium/)) |
+| 9 | Game 3's setup with **Fable 5.1** (high effort), on game 8's harness | running |
+| 10 | Game 3 repeated on the **fixed harness**, hang fixes included (Opus 5.5, high effort): the baseline for games 8 and 9, and a measure of the fixes | queued after game 9 |
 
 All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
 
@@ -27,12 +27,13 @@ Every game reports API-equivalent cost: input, output, cache-read and cache-writ
 
 Each agent is Claude Code in headless mode (`claude -p`) with the civ6-mcp tools and nothing else: no shell, files, web, CLAUDE.md, memory, hooks or skills (`tools/run_game.py` has the flags). Its system prompt is the CivBench playbook (or CivBench's minimal baseline for the rules-only game), plus three notes in [`prompts/`](prompts/): what the base game lacks, the batch tools below, and that nobody is watching. One line of the subscription's organization instructions still reaches the model; it is about connecting apps and has nothing to do with Civ.
 
-Four changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
+Five changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 
 - **Base game.** civ6-mcp targets Gathering Storm. Its Lua is rewritten on the fly to call `CB_` stand-ins for expansion APIs (`lua/base-game-compat.lua`), which return neutral values when the base game lacks them. Tools for systems the base game doesn't have (governors, dedications, World Congress) are removed.
 - **Batch tools.** A model step takes much longer than a tool call (0.3-1.5 s), so agents get `get_turn_briefing` (overview, units, cities and notifications in one call) and `issue_orders` (a list of unit, city and research orders in one call). Every inner call is still logged as its own tool call.
 - **One shared tuner connection** over HTTP, see [setup](docs/setup.md).
-- **No unplayed turns after a diplomacy pause** (from game 8). When an AI civ opens a proposal during the AI turn, civ6-mcp tells the agent to answer it "then end_turn again", but by then the agent's next turn has begun, and agents ended 0 to 14 turns per game without playing them (`tools/turn_trap.py`). `end_turn` now reports the new turn instead, see [setup](docs/setup.md).
+- **No unplayed turns after a diplomacy pause** (from game 8). When an AI civ opens a proposal during the AI turn, civ6-mcp tells the agent to answer it "then end_turn again", but by then the agent's next turn has begun, and agents ended up to 11 turns per game without playing them (game 8, on the fix: 0) (`tools/turn_trap.py`). `end_turn` now reports the new turn instead, see [setup](docs/setup.md).
+- **Fewer AI-turn hangs, and the agent hears about the rest** (from game 10). civ6-mcp hid the game's diplomacy screen after a trade instead of closing it, and the screen keeps the engine locked until it closes: 14 of 23 end turns after a trade hung for 10 minutes, then civ6-mcp reloaded the turn. A first-contact greeting could also cancel the end-turn request while civ6-mcp kept waiting on it (game 8 lost 2.4 hours that way on turn 13). The screen is now closed properly, a cancelled request is sent again, and when a hang reload still happens, `end_turn` tells the agent that its turn was undone.
 
 ## What each game records
 

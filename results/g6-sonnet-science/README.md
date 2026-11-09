@@ -55,14 +55,16 @@ How often an agent ended a whole turn with no unit order this way:
 
 | Game | Diplomacy pauses | Game had moved to the next turn | Next turn ended with no unit order |
 |---|---|---|---|
-| 1 (Opus, playbook) | 59 | 12 | 6 |
-| 2 (Opus, rules only) | 88 | 32 | 14 |
+| 1 (Opus, playbook) | 59 | 12 | 5 |
+| 2 (Opus, rules only) | 88 | 32 | 11 |
 | 3 (Opus, Science goal) | 53 | 16 | 3 |
 | 4 (Opus, Domination goal) | 37 | 8 | 1 |
 | 5 (Opus, Deity) | 38 | 9 | 0 |
-| **6 (Sonnet 5.5)** | 68 | 34 | **9** |
+| **6 (Sonnet 5.5)** | 68 | 34 | **8** |
+| 7 (Opus, game 3 repeated) | 63 | 8 | 1 |
+| 8 (Opus medium effort, fixed harness) | 60 | 11 | 0 |
 
-It cost Sonnet about 9 of 223 turns and Opus 0 to 14 per game. Game 7 still runs on this harness, to repeat game 3 exactly. From game 8 on, `windows/civ_mcp_http.py` fixes it: with an end-turn request in flight it skips civ6-mcp's blocker check, so `end_turn` reports the turn change and says the new turn is open, and after the agent answers a session the AI civs were waiting on, the first `end_turn` of a turn it has not touched is refused once. Game 10 repeats game 3 on the fixed harness, as the baseline for games 8 and 9.
+It cost Sonnet about 8 of 223 turns and Opus 0 to 11 per game. (The first count read civ6-mcp's report of a turn end still in flight, "Turn N -> N+1" after the pause, as the end of the new turn, and gave 6, 14 and 9 for games 1, 2 and 6.) Game 7 still runs on this harness, to repeat game 3 exactly. From game 8 on, `windows/civ_mcp_http.py` fixes it: with an end-turn request in flight it skips civ6-mcp's blocker check, so `end_turn` reports the turn change and says the new turn is open, and after the agent answers a session the AI civs were waiting on, the first `end_turn` of a turn it has not touched is refused once. Game 10 repeats game 3 on the fixed harness, as the baseline for games 8 and 9.
 
 ## Files
 
