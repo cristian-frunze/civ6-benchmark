@@ -467,6 +467,45 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _gsm.GameState.set_city_production = _set_production_settled
 
+    # get_policies listed every unlocked policy the slots take, obsolete ones included; the game's own government
+    # screen also checks IsPolicyObsolete. set_policies accepted an obsolete policy, the game took it out of its
+    # slot again, and the next turn opened with an empty-slot blocker: game 3 slotted Conscription (replaced by
+    # Levee en Masse) on 28 turns and Liberalism (New Deal) on 9, game 4 Conscription on 24 and Urban Planning
+    # (Colonial Offices) on 9. Obsolete policies are no longer listed, and set_policies names what replaced one.
+    _AVAIL_LOOP = "    if pCulture:IsPolicyUnlocked(policy.Index) then\n"
+    _original_policies_query = _lq.build_policies_query
+    _original_set_policies = _lq.build_set_policies
+
+    def _policies_query_current():
+        lua = _original_policies_query()
+        if _AVAIL_LOOP not in lua:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's policies query changed: obsolete policies not hidden")
+            return lua
+        return lua.replace(_AVAIL_LOOP, (
+            "    local obsOk, isObs = pcall(function() return pCulture:IsPolicyObsolete(policy.Hash) end)\n"
+            "    if pCulture:IsPolicyUnlocked(policy.Index) and not (obsOk and isObs) then\n"))
+
+    def _set_policies_current(assignments):
+        lua = _original_set_policies(assignments)
+        for slot, policy in assignments.items():
+            anchor = f"local canSlot_{slot} = "
+            if str(policy).upper() == "NONE" or anchor not in lua or not re.fullmatch(r"[A-Z0-9_]+", str(policy)):
+                continue
+            lua = lua.replace(anchor, (
+                f"local obsOk_{slot}, obs_{slot} = pcall(function() return pCulture:IsPolicyObsolete(pe_{slot}.Hash) end); "
+                f"if obsOk_{slot} and obs_{slot} then local by_{slot} = ''; "
+                f"pcall(function() for r in GameInfo.ObsoletePolicies() do if r.PolicyType == '{policy}' then "
+                f"local np = GameInfo.Policies[r.ObsoletePolicy]; "
+                f"if np and pCulture:IsPolicyUnlocked(np.Index) then by_{slot} = r.ObsoletePolicy; break end end end end); "
+                f"print('ERR:POLICY_OBSOLETE|{policy} is obsolete' .. (by_{slot} ~= '' and (': ' .. by_{slot} .. "
+                f"' replaced it') or '') .. '. The game takes an obsolete policy out of its slot, so the slot would be "
+                f"empty again next turn. Pick another policy from get_policies.'); print('{_lq.SENTINEL}'); return end; "
+                + anchor), 1)
+        return lua
+
+    _lq.build_policies_query = _policies_query_current
+    _lq.build_set_policies = _set_policies_current
+
     # When an exclusive popup is up, civ6-mcp's dismiss_popup (run before every end turn) calls Close() in each Lua
     # state named like a popup until it hides, up to 20 times. InvitePopup (multiplayer invites) never hides, so a
     # scan spent 20 round trips on it: 27 s against 5 s, in a third of the scans (57 of 170 in games 8 and 9), and

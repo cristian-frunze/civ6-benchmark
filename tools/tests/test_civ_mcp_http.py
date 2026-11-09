@@ -432,6 +432,20 @@ async def main():
         check(f"production: {name}", out == want and len(calls) == sends and g.dismissed == dismissed,
               (len(calls), g.dismissed, out))
 
+    # 22. Obsolete policies: not listed, and set_policies refuses them, naming the replacement.
+    lua = lq.build_policies_query()
+    check("get_policies skips obsolete policies", "pCulture:IsPolicyObsolete(policy.Hash)" in lua
+          and "if pCulture:IsPolicyUnlocked(policy.Index) and not (obsOk and isObs) then" in lua)
+    orig = ns["_original_set_policies"]({0: "POLICY_CONSCRIPTION", 4: "NONE"})
+    lua = lq.build_set_policies({0: "POLICY_CONSCRIPTION", 4: "NONE"})
+    check("set_policies checks obsolescence before CanSlotPolicy", "IsPolicyObsolete(pe_0.Hash)" in lua
+          and lua.index("IsPolicyObsolete(pe_0.Hash)") < lua.index("local canSlot_0 = ")
+          and "ERR:POLICY_OBSOLETE|POLICY_CONSCRIPTION is obsolete" in lua and "replaced it" in lua
+          and "GameInfo.ObsoletePolicies()" in lua)
+    check("a cleared slot gets no check", "pe_4" not in lua and "obsOk_4" not in lua)
+    i, j = lua.index("local obsOk_0"), lua.index("local canSlot_0 = ")
+    check("nothing else in set_policies changes", lua[:i] + lua[j:] == orig)
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])
