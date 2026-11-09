@@ -325,6 +325,43 @@ async def main():
           and lua.index("exp:SetPromotion") < lua.index("FinishMoves"))
     check("promotion: the agent is told", "the unit's turn has ended (the game's rule for promotions)" in lua)
 
+    # 15. City attack: the NO_LOS message names the tile instead of concatenating a Lua table.
+    lua = lq.build_city_attack(393221, 46, 29)
+    check("city attack NO_LOS message is plain text", "{target_x}" not in lua and "{target_y}" not in lua
+          and 'Line of sight to (46,29) is blocked from (" .. cx' in lua)
+
+    # 16. Units the agent used up are not reported as killed.
+    from civ_mcp.lua.models import UnitInfo, TurnSnapshot
+    def U(uid, name, ut, x, y, charges=0):
+        return UnitInfo(unit_id=uid, unit_index=uid % 65536, name=name, unit_type=ut, x=x, y=y, moves_remaining=0,
+                        max_moves=2, health=100, max_health=100, build_charges=charges)
+    before = TurnSnapshot(turn=17, units={1: U(1, "Settler", "UNIT_SETTLER", 41, 41), 2: U(2, "Builder", "UNIT_BUILDER", 40, 40, 1),
+                                          3: U(3, "Builder", "UNIT_BUILDER", 42, 42, 3), 4: U(4, "Warrior", "UNIT_WARRIOR", 43, 43),
+                                          5: U(5, "Slinger", "UNIT_SLINGER", 44, 44)},
+                          cities={}, current_research="", current_civic="")
+    after = TurnSnapshot(turn=18, units={}, cities={}, current_research="", current_civic="")
+    async def act(ctx=None, unit_id=None, action=None, **k):
+        return "Error: NO_MOVES|x" if unit_id == 4 else "OK"
+    rec = ns["_records_spent"](act)
+    for uid, a in ((1, "found_city"), (2, "improve"), (3, "improve"), (4, "delete"), (6, "move")):
+        await rec(ctx=CTX, unit_id=uid, action=a)
+    async def upg(ctx=None, unit_id=None): return "UPGRADED|UNIT_ARCHER"
+    await ns["_records_spent"](upg, action="upgrade")(ctx=CTX, unit_id=5)
+    msgs = {e.message: e.priority for e in GameState._diff_snapshots(before, after)}
+    check("settler that founded a city", msgs.get("Your Settler (UNIT_SETTLER) was used to found a city (last seen at (41,41)).") == 3, msgs)
+    check("builder on its last charge", msgs.get("Your Builder (UNIT_BUILDER) used its last build charge (last seen at (40,40)).") == 3)
+    check("builder with charges to spare is still 'killed'", msgs.get("Your Builder (UNIT_BUILDER) was killed! Last seen at (42,42).") == 1)
+    check("failed order: still 'killed'", msgs.get("Your Warrior (UNIT_WARRIOR) was killed! Last seen at (43,43).") == 1)
+    check("upgrade", msgs.get("Your Slinger (UNIT_SLINGER) was upgraded and has a new id (last seen at (44,44)).") == 3)
+    check("cleared after the report", ns["_SPENT"] == {}, ns["_SPENT"])
+
+    # 17. Unrevealed resources stay hidden in get_cities, get_builder_tasks and the wonder advisor.
+    for name, lua in (("cities", lq.build_cities_query()), ("builder tasks", lq.build_builder_tasks_query()),
+                      ("wonder advisor", lq.build_wonder_advisor_query(65536, "BUILDING_PYRAMIDS"))):
+        body = lua.split("end\n", 1)[1]
+        check(f"{name}: resources read through the reveal check", lua.startswith("local function __benchRes(plot)")
+              and "__benchRes(plot)" in body and "plot:GetResourceType()" not in body)
+
     # 14. Auto-explore: the harness remembers automated units and sends auto-explore again at each new turn.
     class ExploreConn:
         def __init__(self, units, active=True): self.units, self.active, self.sent = units, active, []

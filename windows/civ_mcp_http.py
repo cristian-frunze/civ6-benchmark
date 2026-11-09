@@ -323,6 +323,50 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             'ended (the game\'s rule for promotions)")\n')
 
     _lq.build_promote_unit = _build_promote_unit_rule
+
+    # A city's ranged attack on a target it cannot see crashed instead of saying so: civ6-mcp's NO_LOS message is
+    # outside its f-string, so the Lua reads `"..." .. {target_x} .. ","`, a table, and fails with "operator .. is not
+    # supported for table .. string" (game 7, turn 113; the agent blamed stacked units).
+    _CITY_NO_LOS = '" .. {target_x} .. "," .. {target_y} .. "'
+    _original_build_city_attack = _lq.build_city_attack
+
+    def _build_city_attack_fixed(city_id, target_x, target_y):
+        lua = _original_build_city_attack(city_id, target_x, target_y)
+        return lua.replace(_CITY_NO_LOS, f"{int(target_x)},{int(target_y)}")
+
+    _lq.build_city_attack = _build_city_attack_fixed
+
+    # Hidden resources leaked. A strategic resource stays hidden until its tech (Resources.PrereqTech: Niter needs
+    # Military Engineering, Iron Bronze Working, ...), and civ6-mcp's map tools hide it until then, but get_cities
+    # ("Needs builder: NITER@x,y", in every briefing), get_builder_tasks (game 9, turn 29: a Niter mine listed as
+    # URGENT before it was revealed) and the wonder advisor named it. Here those three read resources through the
+    # same check the map tools use.
+    _RES_SEEN_LUA = (
+        "local function __benchRes(plot) "
+        "  local idx = plot:GetResourceType() "
+        "  if idx < 0 then return idx end "
+        "  local r = GameInfo.Resources[idx] "
+        "  if r == nil or r.PrereqTech == nil then return idx end "
+        "  local t = GameInfo.Technologies[r.PrereqTech] "
+        "  if t == nil or Players[Game.GetLocalPlayer()]:GetTechs():HasTech(t.Index) then return idx end "
+        "  return -1 "
+        "end\n")
+
+    def _hides_unrevealed(name):
+        original = getattr(_lq, name)
+
+        @functools.wraps(original)
+        def build(*args, **kwargs):
+            lua = original(*args, **kwargs)
+            if "plot:GetResourceType()" not in lua:
+                logging.getLogger("civ_mcp_http").warning("civ6-mcp's %s changed: resource check not applied", name)
+                return lua
+            return _RES_SEEN_LUA + lua.replace("plot:GetResourceType()", "__benchRes(plot)")
+
+        setattr(_lq, name, build)
+
+    for _name in ("build_cities_query", "build_builder_tasks_query", "build_wonder_advisor_query"):
+        _hides_unrevealed(_name)
     _original_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
@@ -648,6 +692,62 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _tool.fn = _explores_again(_hang_note(_units_first(_tool.fn)))
     _tool = mcp._tool_manager.get_tool("unit_action")
     _tool.fn = _tracks_explorers(_tool.fn)
+
+    # civ6-mcp's turn report calls every own unit missing after the turn "killed" ("Your Builder (UNIT_BUILDER) was
+    # killed!"), including the ones the agent used up itself: a settler that founded a city, a builder's last charge,
+    # an upgrade (the unit gets a new id), a disband. Those orders run asynchronously, so the unit is often still in
+    # the snapshot taken when end_turn starts. That was 22 to 35 false alarms a game in games 6 to 8 ("'Builder
+    # killed' messages are last-charge consumption; not enemy action", game 6, turn 107). Here the agent's own orders
+    # that can use a unit up are remembered for the turn, and a unit that vanished after one is reported as such.
+    _SPENDS = {"found_city": "was used to found a city", "improve": "used its last build charge",
+               "remove_feature": "used its last build charge", "sacrifice_charges": "used up its charges",
+               "delete": "was disbanded on your order", "activate": "was used up when activated",
+               "spread_religion": "used its last spread charge", "upgrade": "was upgraded and has a new id"}
+    _SPENT: dict[int, str] = {}
+
+    def _records_spent(fn, action=None):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            try:
+                kind = action or str(kwargs.get("action") or "").lower()
+                uid = kwargs.get("unit_id")
+                if kind in _SPENDS and uid is not None and not str(out).lstrip().startswith("Error"):
+                    _SPENT[int(uid)] = _SPENDS[kind]
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("recording a spent unit failed", exc_info=True)
+            return out
+
+        return wrapper
+
+    _original_diff = _GameState.__dict__["_diff_snapshots"].__func__
+
+    def _diff_with_spent(before, after):
+        events = _original_diff(before, after)
+        try:
+            for uid, ub in before.units.items():
+                reason = _SPENT.get(uid)
+                if reason is None or uid in after.units:
+                    continue
+                if "build charge" in reason and getattr(ub, "build_charges", 0) > 1:
+                    continue  # it had charges to spare (the snapshot may be one charge behind), so it was killed
+                killed = f"Your {ub.name} ({ub.unit_type}) was killed! Last seen at ({ub.x},{ub.y})."
+                for i, e in enumerate(events):
+                    if e.message == killed:
+                        events[i] = _lq.TurnEvent(priority=3, category=e.category, message=(
+                            f"Your {ub.name} ({ub.unit_type}) {reason} (last seen at ({ub.x},{ub.y}))."))
+                        break
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("rewording spent units failed", exc_info=True)
+        _SPENT.clear()
+        return events
+
+    _GameState._diff_snapshots = staticmethod(_diff_with_spent)
+    _tool = mcp._tool_manager.get_tool("unit_action")
+    _tool.fn = _records_spent(_tool.fn)
+    _tool = mcp._tool_manager.get_tool("upgrade_unit")
+    if _tool is not None:
+        _tool.fn = _records_spent(_tool.fn, action="upgrade")
 
     def _clears_answered(fn):
         @functools.wraps(fn)

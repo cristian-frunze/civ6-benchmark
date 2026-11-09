@@ -27,7 +27,7 @@ Every game reports API-equivalent cost: input, output, cache-read and cache-writ
 
 Each agent is Claude Code in headless mode (`claude -p`) with the civ6-mcp tools and nothing else: no shell, files, web, CLAUDE.md, memory, hooks or skills (`tools/run_game.py` has the flags). Its system prompt is the CivBench playbook (or CivBench's minimal baseline for the rules-only game), plus three notes in [`prompts/`](prompts/): what the base game lacks, the batch tools below, and that nobody is watching. One line of the subscription's organization instructions still reaches the model; it is about connecting apps and has nothing to do with Civ.
 
-Eight changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
+Nine changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`, plus smaller fixes listed in [setup](docs/setup.md):
 
 - **Base game.** civ6-mcp targets Gathering Storm. Its Lua is rewritten on the fly to call `CB_` stand-ins for expansion APIs (`lua/base-game-compat.lua`), which return neutral values when the base game lacks them. Tools for systems the base game doesn't have (governors, dedications, World Congress) are removed.
 - **Batch tools.** A model step takes much longer than a tool call (0.3-1.5 s), so agents get `get_turn_briefing` (overview, units, cities and notifications in one call) and `issue_orders` (a list of unit, city and research orders in one call). Every inner call is still logged as its own tool call.
@@ -36,6 +36,7 @@ Eight changes to stock civ6-mcp, all in `windows/civ_mcp_http.py`:
 - **Fewer AI-turn hangs, and the agent hears about the rest** (from game 10). civ6-mcp hid the game's diplomacy screen after a trade instead of closing it, and the screen keeps the engine locked until it closes: 14 of 23 end turns after a trade hung for 10 minutes, then civ6-mcp reloaded the turn. A first-contact greeting could also cancel the end-turn request while civ6-mcp kept waiting on it (game 8 lost 2.4 hours that way on turn 13). The screen is now closed properly, a cancelled request is sent again, and when a hang reload still happens, `end_turn` tells the agent that its turn was undone.
 - **Attack results that match the game** (from game 10). civ6-mcp read the unit's tile before a move-and-attack order had run, so every melee attack from 2 or more tiles away came back as "STOPPED_SHORT ... Try again next turn" (12 to 26 times a game), though the unit had almost always moved and attacked. The result now comes from the unit and target as they stand once the order has played out. A ranged unit whose shot the game refused no longer walks off instead (civ6-mcp fell back to a melee attack, which a ranged unit cannot make, so it only moved), and the combat estimate stops counting adjacent shots as melee.
 - **Promotions by the game's rule** (from game 10). civ6-mcp healed a promoted unit to full and left its moves; the game heals 50 HP and ends the unit's turn, and agents had learned to promote before attacking.
+- **No hidden resources** (from game 10). Three tools named strategic resources the player had not revealed yet (the map tools already hid them).
 - **Auto-explore that lasts** (from game 10). A scout set to auto-explore stopped after one turn and needed orders again. The harness now sends auto-explore again each turn until the agent gives the unit another order.
 
 ## What each game records
