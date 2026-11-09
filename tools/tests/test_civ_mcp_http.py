@@ -585,6 +585,31 @@ async def main():
     finally:
         ns["_original_autosave"] = real_autosave
 
+    # 26. The turn snapshot's units read goes to InGame, as get_units does: GameCore has no
+    #     UnitManager.CanStartOperation, so civ6-mcp's line-of-sight check failed the whole read (309 times).
+    import inspect
+    from civ_mcp.connection import GameConnection
+    check("execute_read is patched", GameConnection.execute_read is ns["_units_read_in_game"])
+    check("the snapshot still reads the units with the same query in GameCore",
+          "execute_read(lq.build_units_query())" in inspect.getsource(GameState._take_snapshot)
+          and lq.build_units_query() == lq.build_units_query() and "CanStartOperation" in lq.build_units_query())
+    class StateConn:
+        def __init__(self): self.calls = []
+        async def execute_write(self, lua, timeout=5.0): self.calls.append(("InGame", lua)); return ["w"]
+    real_read = ns["_original_execute_read"]
+    try:
+        async def fake_read(self, lua, timeout=5.0): self.calls.append(("GameCore", lua)); return ["r"]
+        ns["_original_execute_read"] = fake_read
+        c = StateConn()
+        out = await GameConnection.execute_read(c, lq.build_units_query())
+        check("units query: sent to InGame", c.calls == [("InGame", lq.build_units_query())] and out == ["w"])
+        c = StateConn()
+        out = await GameConnection.execute_read(c, "print(Game.GetCurrentGameTurn())", timeout=3.0)
+        check("other reads: still GameCore", c.calls == [("GameCore", "print(Game.GetCurrentGameTurn())")]
+              and out == ["r"])
+    finally:
+        ns["_original_execute_read"] = real_read
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])

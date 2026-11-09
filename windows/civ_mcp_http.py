@@ -628,6 +628,23 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _glc.dismiss_popup = _dismiss_skipping
 
+    # end_turn's turn report diffs two snapshots of the empire, and the snapshot read the units in GameCore, where
+    # UnitManager.CanStartOperation does not exist. civ6-mcp's units query calls it to check line of sight when a
+    # ranged unit has an enemy in range but not adjacent, so then the whole read failed ("[string]:65: function
+    # expected instead of nil") and the report lost its events: units hurt or killed, buildings finished, cities
+    # grown. All 309 "Post-turn snapshot failed" in the server log through game 10's turn 60 were this, about one turn
+    # in six, often turns with fighting. get_units sends the same query to InGame, where it works; so does the
+    # snapshot now (its overview and city reads already go there).
+    _UNITS_QUERY = _lq.build_units_query()
+    _original_execute_read = GameConnection.execute_read
+
+    async def _units_read_in_game(self, lua_code, *args, **kwargs):
+        if lua_code == _UNITS_QUERY:
+            return await self.execute_write(lua_code, *args, **kwargs)
+        return await _original_execute_read(self, lua_code, *args, **kwargs)
+
+    GameConnection.execute_read = _units_read_in_game
+
     # civ6-mcp warns that InGame queries while the AI civs move can stall their turns, and polls only GameCore then.
     # Two cases reach end_turn while they move: civ6-mcp re-entering a turn end still in flight (after mid-turn
     # diplomacy), and a turn number that advanced before the player's turn started (game 2, turn 145: the agent's
