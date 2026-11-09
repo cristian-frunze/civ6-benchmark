@@ -209,10 +209,11 @@ async def main():
     # 10. A hang reload is named: civ6-mcp reloads the turn's start and ends it again (game 8, turn 209).
     check("GameState.end_turn records results", GameState.end_turn is ns["_gs_end_turn_recorded"])
     tool = mcp._tool_manager.get_tool("end_turn")
-    check("end_turn tool: explore, then hang note, outside the units/pending wrapper", tool.fn.__code__ is bound
-          and tool.fn.__wrapped__.__code__ is ns["_explores_again"](stock).__code__
-          and tool.fn.__wrapped__.__wrapped__.__code__ is ns["_hang_note"](stock).__code__
-          and tool.fn.__wrapped__.__wrapped__.__wrapped__.__code__ is ns["_units_first"](stock).__code__)
+    chain, f = [], tool.fn
+    while f is not None:
+        chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+    want = [bound] + [ns[w](stock).__code__ for w in ("_names_promotions", "_explores_again", "_hang_note", "_units_first")]
+    check("end_turn tool: promotions named, explore, hang note, then the units/pending wrapper", chain[:5] == want)
     import inspect
     src_et = inspect.getsource(tool.fn.__wrapped__.__wrapped__.__wrapped__)
     check("civ6-mcp's end_turn tool calls gs.end_turn for the first try and the retry",
@@ -361,6 +362,25 @@ async def main():
         body = lua.split("end\n", 1)[1]
         check(f"{name}: resources read through the reveal check", lua.startswith("local function __benchRes(plot)")
               and "__benchRes(plot)" in body and "plot:GetResourceType()" not in body)
+
+    # 18. The promotion blocker names the units; the GP advisor finds the class in GreatPersonClasses.
+    class PromoConn:
+        async def execute_read(self, lua, timeout=None):
+            assert "GetExperienceForNextLevel" in lua
+            return ["PROMO|655366|UNIT_ARCHER|39,41", "PROMO|720898|UNIT_SUMERIAN_WAR_CART|43,38", lq.SENTINEL]
+    class PromoGame:
+        conn = PromoConn()
+    GAME = PromoGame()
+    blocked = "Cannot end turn:\n  * Unit available for promotion  -> Use: get_unit_promotions(unit_id=...) then promote_unit()"
+    async def et_blocked(ctx=None): return blocked
+    out = await ns["_names_promotions"](et_blocked)(ctx=CTX)
+    check("promotion blocker names the units", "* Unit available for promotion (UNIT_ARCHER 655366 at (39,41); "
+          "UNIT_SUMERIAN_WAR_CART 720898 at (43,38))  -> Use:" in out, out)
+    async def et_plain(ctx=None): return "Turn 5 -> 6"
+    check("no blocker: unchanged", await ns["_names_promotions"](et_plain)(ctx=CTX) == "Turn 5 -> 6")
+    lua = lq.build_gp_advisor_query(9)
+    check("GP advisor looks the class up in GreatPersonClasses", "for row in GameInfo.GreatPersonClasses() do" in lua
+          and lua.index("GreatPersonClasses()") < lua.index('if gpClass == "" then'))
 
     # 14. Auto-explore: the harness remembers automated units and sends auto-explore again at each new turn.
     class ExploreConn:

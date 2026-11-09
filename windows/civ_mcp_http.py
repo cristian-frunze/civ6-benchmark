@@ -367,6 +367,24 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     for _name in ("build_cities_query", "build_builder_tasks_query", "build_wonder_advisor_query"):
         _hides_unrevealed(_name)
+
+    # get_gp_advisor failed every time (7 of 7 calls in games 3, 6 and 7: "Could not get GP advisor info. Is this a
+    # Great Person unit?"). It reads the class from Units.GreatPersonClass, a column the game does not have; the
+    # GreatPersonClasses table maps each class to its UnitType.
+    _GP_CLASS = "pcall(function() gpClass = uInfo.GreatPersonClass end)\n"
+    _original_gp_advisor = _lq.build_gp_advisor_query
+
+    def _gp_advisor_class(unit_index):
+        lua = _original_gp_advisor(unit_index)
+        if lua.count(_GP_CLASS) != 1:
+            logging.getLogger("civ_mcp_http").warning("civ6-mcp's GP advisor Lua changed: class lookup not fixed")
+            return lua
+        return lua.replace(_GP_CLASS, _GP_CLASS + (
+            'if gpClass == nil or gpClass == "" then gpClass = "" '
+            "for row in GameInfo.GreatPersonClasses() do "
+            "if row.UnitType == uInfo.UnitType then gpClass = row.GreatPersonClassType break end end end\n"))
+
+    _lq.build_gp_advisor_query = _gp_advisor_class
     _original_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
@@ -688,8 +706,53 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
+    # end_turn's promotion blocker never said which unit ("* Unit available for promotion -> Use:
+    # get_unit_promotions(unit_id=...)", 262 times in games 1-9; "A promotion notification is pending but I couldn't
+    # tell which unit", game 7, turn 129). Name the units, by the XP formula civ6-mcp's own blocker check uses.
+    _PROMO_LUA = (
+        "local me = Game.GetLocalPlayer() "
+        "for _, u in Players[me]:GetUnits():Members() do "
+        "  if u:GetX() ~= -9999 then "
+        "    local ok, exp = pcall(function() return u:GetExperience() end) "
+        "    local ui = GameInfo.Units[u:GetType()] "
+        "    local promClass = ui and ui.PromotionClass or '' "
+        "    if ok and exp and promClass ~= '' then "
+        "      local promoCount = 0 "
+        "      for p in GameInfo.UnitPromotions() do "
+        "        if p.PromotionClass == promClass and exp:HasPromotion(p.Index) then promoCount = promoCount + 1 end "
+        "      end "
+        "      local needed = exp:GetExperienceForNextLevel() * (promoCount + 1) * (promoCount + 2) / 2 "
+        "      if exp:GetExperiencePoints() >= needed then "
+        "        print('PROMO|' .. u:GetID() .. '|' .. ui.UnitType .. '|' .. u:GetX() .. ',' .. u:GetY()) "
+        "      end "
+        "    end "
+        "  end "
+        "end print('---END---')"
+    )
+    _PROMO_LINE = "* Unit available for promotion"
+
+    def _names_promotions(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            if not isinstance(out, str) or _PROMO_LINE not in out:
+                return out
+            try:
+                ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+                lines = await srv._get_game(ctx).conn.execute_read(_PROMO_LUA, timeout=10.0)
+                units = ["{1} {0} at ({2})".format(*ln.split("|")[1:4]) for ln in lines if ln.startswith("PROMO|")
+                         and len(ln.split("|")) >= 4]
+                if units:
+                    i = out.index(_PROMO_LINE) + len(_PROMO_LINE)
+                    out = out[:i] + " (" + "; ".join(units) + ")" + out[i:]
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("naming promotable units failed", exc_info=True)
+            return out
+
+        return wrapper
+
     _tool = mcp._tool_manager.get_tool("end_turn")
-    _tool.fn = _explores_again(_hang_note(_units_first(_tool.fn)))
+    _tool.fn = _names_promotions(_explores_again(_hang_note(_units_first(_tool.fn))))
     _tool = mcp._tool_manager.get_tool("unit_action")
     _tool.fn = _tracks_explorers(_tool.fn)
 
