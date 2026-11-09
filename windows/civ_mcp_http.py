@@ -411,6 +411,85 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _gsm.GameState.attack_unit = _attack_unit_settled
 
+    # set_city_production sends CityManager.RequestOperation and reads the queue straight back. While the game
+    # holds orders (an exclusive popup is open: natural wonder, wonder built, era, or an AI diplomacy session
+    # waits for an answer), the order waits in line and the read-back says SILENT_FAILURE, "Retry the same call".
+    # Games 1-8 had 16 of these. In game 2, turn 224, the "failed" Moon Landing was in the queue once the agent
+    # answered Germany's deal; in game 8, turn 179, the same orders worked right after dismiss_popup. Name the
+    # session that holds the order, or close the popups and wait for it to land; send it once more only if it
+    # still has not (the order clears the queue first, so a second copy cannot pile up).
+    _original_set_production = _gsm.GameState.set_city_production
+
+    async def _sessions_open(game) -> str | None:
+        try:
+            sessions = await game.get_diplomacy_sessions()
+        except Exception:
+            return None
+        return ", ".join(f"{s.other_civ_name} ({s.other_leader_name})" for s in sessions) if sessions else None
+
+    async def _production_now(game, city_id, item_name) -> str | None:
+        try:
+            lines = await game.conn.execute_read(_lq.build_verify_production(city_id, item_name))
+        except Exception:
+            return None
+        return next((l.split("|", 1)[1] for l in lines if l.startswith("CONFIRMED|")), None)
+
+    async def _set_production_settled(self, city_id, item_type, item_name, target_x=None, target_y=None):
+        result = await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
+        if not result.startswith("Error: SILENT_FAILURE|"):
+            return result
+        log = logging.getLogger("civ_mcp_http")
+        held = await _sessions_open(self)
+        if held:
+            log.info("Production order %s held by a diplomacy session with %s", item_name, held)
+            return (f"Error: ORDER_HELD|{item_name} is not set yet: a diplomacy session with {held} is open, and the "
+                    "game holds city orders until you answer it (get_pending_diplomacy, then respond_to_diplomacy or "
+                    "respond_to_trade). The order then goes through by itself; check the city before you set it again.")
+        try:
+            closed = await self.dismiss_popup()
+        except Exception:
+            closed = ""
+        closed = ", ".join(dict.fromkeys(closed[len("Dismissed: "):].split(". ")[0].split(", "))) \
+            if closed.startswith("Dismissed: ") else ""
+        waited = 0.0
+        while waited < 3.0:
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            turns = await _production_now(self, city_id, item_name)
+            if turns:
+                log.info("Production order %s landed %.1f s late (popups closed: %s)", item_name, waited, closed or "none")
+                why = f"after open popups were closed ({closed})" if closed else f"{waited:.1f} s late"
+                return f"PRODUCING|{item_name}|{turns} (the game applied the order {why})"
+        retry = await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
+        log.info("Production order %s still unset %.1f s later (popups closed: %s); sent again: %s",
+                 item_name, waited, closed or "none", retry[:160])
+        return retry
+
+    _gsm.GameState.set_city_production = _set_production_settled
+
+    # When an exclusive popup is up, civ6-mcp's dismiss_popup (run before every end turn) calls Close() in each Lua
+    # state named like a popup until it hides, up to 20 times. InvitePopup (multiplayer invites) never hides, so a
+    # scan spent 20 round trips on it: 27 s against 5 s, in a third of the scans (57 of 170 in games 8 and 9), and
+    # the agent read "InvitePopup" 20 times in the list of closed popups. The scan now skips it.
+    import civ_mcp.game_lifecycle as _glc  # noqa: E402
+
+    _original_dismiss = _glc.dismiss_popup
+    _NEVER_HIDES = ("InvitePopup",)
+
+    async def _dismiss_skipping(conn):
+        states = getattr(conn, "lua_states", None)
+        if not isinstance(states, dict):
+            return await _original_dismiss(conn)
+        skipped = {i: n for i, n in states.items() if n in _NEVER_HIDES}
+        for i in skipped:
+            states.pop(i, None)
+        try:
+            return await _original_dismiss(conn)
+        finally:
+            states.update(skipped)
+
+    _glc.dismiss_popup = _dismiss_skipping
+
     # civ6-mcp warns that InGame queries while the AI civs move can stall their turns, and polls only GameCore then.
     # Two cases reach end_turn while they move: civ6-mcp re-entering a turn end still in flight (after mid-turn
     # diplomacy), and a turn number that advanced before the player's turn started (game 2, turn 145: the agent's
@@ -575,8 +654,45 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _END_TURN_RESULTS = contextvars.ContextVar("bench_end_turn_results", default=None)
     _original_gs_end_turn = _GameState.end_turn
 
+    # A diplomacy pause names the civ but not its player id, and respond_to_diplomacy needs the id: agents guessed
+    # (Spain's greeting answered as player 1 in games 3, 7 and 8; Brazil's in game 9) and got a bare NO_SESSION.
+    # The pause now carries the id, and NO_SESSION names the sessions that are open.
+    _SESSION_LINES = ("diplomatic proposal from", "diplomacy encounter pending with")
+
+    async def _with_player_ids(game, text):
+        if not isinstance(text, str) or not any(m in text for m in _SESSION_LINES):
+            return text
+        try:
+            sessions = await game.get_diplomacy_sessions()
+        except Exception:
+            return text
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if any(m in line for m in _SESSION_LINES):
+                for s in sessions:
+                    lines[i] = lines[i].replace(f"{s.other_civ_name} ({s.other_leader_name})",
+                                                f"{s.other_civ_name} ({s.other_leader_name}, player {s.other_player_id})")
+        return "\n".join(lines)
+
+    _original_diplomacy_respond = _GameState.diplomacy_respond
+
+    async def _respond_names_sessions(self, other_player_id, response):
+        out = await _original_diplomacy_respond(self, other_player_id, response)
+        if not (isinstance(out, str) and out.startswith("Error: NO_SESSION")):
+            return out
+        try:
+            sessions = await self.get_diplomacy_sessions()
+        except Exception:
+            return out
+        open_now = "; ".join(f"{s.other_civ_name} ({s.other_leader_name}), player {s.other_player_id}" for s in sessions)
+        return (f"Error: NO_SESSION|No diplomacy session is open with player {other_player_id}. "
+                + (f"Open now: {open_now}. Answer it with that player id." if open_now
+                   else "None is open now, so nothing is waiting for an answer."))
+
+    _GameState.diplomacy_respond = _respond_names_sessions
+
     async def _gs_end_turn_recorded(self, *args, **kwargs):
-        out = await _original_gs_end_turn(self, *args, **kwargs)
+        out = await _with_player_ids(self, await _original_gs_end_turn(self, *args, **kwargs))
         seen = _END_TURN_RESULTS.get()
         if seen is not None and isinstance(out, str):
             seen.append(out)

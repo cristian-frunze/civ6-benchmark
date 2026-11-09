@@ -382,6 +382,100 @@ async def main():
     check("GP advisor looks the class up in GreatPersonClasses", "for row in GameInfo.GreatPersonClasses() do" in lua
           and lua.index("GreatPersonClasses()") < lua.index('if gpClass == "" then'))
 
+    # 19. A production order the game holds (open popup or diplomacy session) is not reported as a silent failure.
+    from types import SimpleNamespace
+    SILENT = ("Error: SILENT_FAILURE|BUILDING_WORKSHOP appeared to set but the game engine did not persist it "
+              "(NOT_SET|current=NONE|expected=BUILDING_WORKSHOP). Retry the same call, or use purchase_item to "
+              "force-commit with gold/faith.")
+    class ProdConn:
+        def __init__(self, lands_after): self.lands_after, self.reads = lands_after, 0
+        async def execute_read(self, lua, timeout=None):
+            assert 'cur == "BUILDING_WORKSHOP"' in lua and "FindID(65536 % 65536)" in lua, lua
+            self.reads += 1
+            if self.lands_after is not None and self.reads >= self.lands_after:
+                return ["CONFIRMED|5 turns", lq.SENTINEL]
+            return ["NOT_SET|current=NONE|expected=BUILDING_WORKSHOP", lq.SENTINEL]
+    class ProdGame:
+        def __init__(self, lands_after=None, sessions=(), popups="No popups to dismiss."):
+            self.conn, self.sessions, self.popups, self.dismissed = ProdConn(lands_after), list(sessions), popups, 0
+        async def get_diplomacy_sessions(self): return self.sessions
+        async def dismiss_popup(self):
+            self.dismissed += 1
+            return self.popups
+    setprod = GameState.__dict__["set_city_production"]
+    check("set_city_production is the patched method", setprod is ns["_set_production_settled"])
+    germany = SimpleNamespace(other_civ_name="Germany", other_leader_name="Frederick Barbarossa")
+    cases = [
+        ("confirmed at once: passed through", ProdGame(), ["PRODUCING|BUILDING_WORKSHOP|5 turns"],
+         "PRODUCING|BUILDING_WORKSHOP|5 turns", 1, 0),
+        ("diplomacy session open: named, nothing closed or resent", ProdGame(sessions=[germany]), [SILENT],
+         "Error: ORDER_HELD|BUILDING_WORKSHOP is not set yet: a diplomacy session with Germany (Frederick Barbarossa) "
+         "is open, and the game holds city orders until you answer it (get_pending_diplomacy, then "
+         "respond_to_diplomacy or respond_to_trade). The order then goes through by itself; check the city before "
+         "you set it again.", 1, 0),
+        ("popups closed, order lands", ProdGame(lands_after=2, popups="Dismissed: cinematic_camera, NaturalWonderPopup, "
+         "NaturalWonderPopup, InvitePopup, InvitePopup. Also: diplomacy session active — use respond_to_diplomacy."),
+         [SILENT], "PRODUCING|BUILDING_WORKSHOP|5 turns (the game applied the order after open popups were closed "
+         "(cinematic_camera, NaturalWonderPopup, InvitePopup))", 1, 1),
+        ("no popups, order lands late", ProdGame(lands_after=1), [SILENT],
+         "PRODUCING|BUILDING_WORKSHOP|5 turns (the game applied the order 0.5 s late)", 1, 1),
+        ("never lands: sent once more", ProdGame(), [SILENT, "PRODUCING|BUILDING_WORKSHOP|5 turns"],
+         "PRODUCING|BUILDING_WORKSHOP|5 turns", 2, 1),
+    ]
+    for name, g, script, want, sends, dismissed in cases:
+        calls = []
+        async def scripted(self, cid, it, nm, tx=None, ty=None, script=script):
+            calls.append((cid, it, nm, tx, ty))
+            return script[len(calls) - 1]
+        ns["_original_set_production"] = scripted
+        out = await setprod(g, 65536, "BUILDING", "BUILDING_WORKSHOP")
+        check(f"production: {name}", out == want and len(calls) == sends and g.dismissed == dismissed,
+              (len(calls), g.dismissed, out))
+
+    # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
+    import civ_mcp.game_lifecycle as glc
+    check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])
+    seen_states = []
+    async def fake_dismiss(conn):
+        seen_states.append(dict(conn.lua_states))
+        return "Dismissed: NaturalWonderPopup"
+    ns["_original_dismiss"] = fake_dismiss
+    conn = SimpleNamespace(lua_states={1: "InGame", 57: "InvitePopup", 60: "NaturalWonderPopup"})
+    out = await glc.dismiss_popup(conn)
+    check("InvitePopup left out of the scan and restored", seen_states == [{1: "InGame", 60: "NaturalWonderPopup"}]
+          and conn.lua_states == {1: "InGame", 57: "InvitePopup", 60: "NaturalWonderPopup"}
+          and out == "Dismissed: NaturalWonderPopup", (seen_states, conn.lua_states))
+
+    # 20. Diplomacy pauses carry the player id; NO_SESSION names the sessions that are open.
+    spain = SimpleNamespace(other_civ_name="Spain", other_leader_name="Philip II", other_player_id=7)
+    class DiploGame:
+        def __init__(self, sessions): self.sessions = sessions
+        async def get_diplomacy_sessions(self): return self.sessions
+    paused = ('Turn paused — AI diplomatic proposal from Spain (Philip II) [active].\nSpain (Philip II) says: "Hola"\n'
+              "Use respond_to_diplomacy to handle it, then end_turn again.")
+    out = await ns["_with_player_ids"](DiploGame([spain]), paused)
+    check("pause names the player id, only on the pause line",
+          out.startswith("Turn paused — AI diplomatic proposal from Spain (Philip II, player 7) [active].")
+          and '\nSpain (Philip II) says: "Hola"' in out, out)
+    pending = "Cannot end turn: diplomacy encounter pending with Spain (Philip II) [active]. Use respond_to_diplomacy."
+    check("blocker names the player id", "pending with Spain (Philip II, player 7) [active]"
+          in await ns["_with_player_ids"](DiploGame([spain]), pending))
+    check("no pause: unchanged, no query", await ns["_with_player_ids"](None, "Turn 5 -> 6") == "Turn 5 -> 6")
+    check("respond_to_diplomacy calls the patched method", GameState.diplomacy_respond is ns["_respond_names_sessions"])
+    for name, script, sessions, want in (
+        ("wrong id: the open session is named", "Error: NO_SESSION", [spain],
+         "Error: NO_SESSION|No diplomacy session is open with player 1. Open now: Spain (Philip II), player 7. Answer it "
+         "with that player id."),
+        ("nothing open", "Error: NO_SESSION", [],
+         "Error: NO_SESSION|No diplomacy session is open with player 1. None is open now, so nothing is waiting for an "
+         "answer."),
+        ("answered: passed through", "OK:RESPONDED|POSITIVE|SESSION_CONTINUES", [spain],
+         "OK:RESPONDED|POSITIVE|SESSION_CONTINUES")):
+        async def respond(self, pid, resp, script=script): return script
+        ns["_original_diplomacy_respond"] = respond
+        out = await GameState.__dict__["diplomacy_respond"](DiploGame(sessions), 1, "POSITIVE")
+        check(f"respond: {name}", out == want, out)
+
     # 14. Auto-explore: the harness remembers automated units and sends auto-explore again at each new turn.
     class ExploreConn:
         def __init__(self, units, active=True): self.units, self.active, self.sent = units, active, []
