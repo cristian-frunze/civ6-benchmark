@@ -11,6 +11,7 @@ Shared by windows/civ_mcp_http.py (single player, FireTuner) and windows/civ_mcp
 
 import os
 import re
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -91,6 +92,23 @@ XP_TOOLS = [
 ALLIANCE_NOTE = (
     "\n\nBase game: there is one alliance type (alliance_type is ignored), and it needs the Civil Service "
     "civic, not Diplomatic Service."
+)
+
+# Spy missions the base game has (Base/Assets/Gameplay/Data/UnitOperations.xml) but civ6-mcp leaves out of its op
+# table, so get_spies never offered them and spy_action answered UNKNOWN_MISSION. Game 11, turn 172: the agent sent
+# DISRUPT_ROCKETRY into a Greek city, got UNKNOWN_MISSION, wrote that Greece's space race could not be slowed, and
+# Greece won it about 5 turns ahead. The game hashes an op as ~crc32 of its type name, which reproduces all ten
+# hashes civ6-mcp hardcodes.
+def op_hash(type_name: str) -> int:
+    h = ~zlib.crc32(type_name.encode()) & 0xFFFFFFFF
+    return h - (1 << 32) if h >= 1 << 31 else h
+
+
+SPY_OPS = {name: op_hash("UNITOPERATION_SPY_" + name) for name in ("DISRUPT_ROCKETRY", "LISTENING_POST")}
+SPY_NOTE = (
+    "\n\nAlso in the base game: DISRUPT_ROCKETRY, against a city with a Spaceport district (8 turns; on success the "
+    "city loses progress on its space race project), and LISTENING_POST. get_spies lists each where the spy can "
+    "start it."
 )
 
 # When civ6-mcp closes an AI-opened diplomacy session itself (DiplomacyManager.CloseSession, as in its "goodbye

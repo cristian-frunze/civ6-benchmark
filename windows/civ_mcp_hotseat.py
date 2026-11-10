@@ -76,6 +76,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _tool = mcp._tool_manager.get_tool("form_alliance")
     if _tool is not None:
         _tool.description += bc.ALLIANCE_NOTE
+    import civ_mcp.lua.espionage as _esp  # noqa: E402
+
+    _esp._SPY_OP_HASHES.update(bc.SPY_OPS)
+    _tool = mcp._tool_manager.get_tool("spy_action")
+    if _tool is not None:
+        _tool.description += bc.SPY_NOTE
 
 
 async def _close_idle_leader_screen(ctx, wait=0.0):

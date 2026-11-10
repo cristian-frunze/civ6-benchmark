@@ -610,6 +610,24 @@ async def main():
     finally:
         ns["_original_execute_read"] = real_read
 
+    # 27. Base-game spy missions civ6-mcp leaves out: DISRUPT_ROCKETRY (game 11 answered UNKNOWN_MISSION) and
+    #     LISTENING_POST. The hash rule reproduces every hash civ6-mcp hardcodes.
+    import civ_mcp.lua.espionage as esp
+    bc = ns["bc"]
+    names = {"TRAVEL": "TRAVEL_NEW_CITY"}
+    check("op hash rule matches civ6-mcp's table",
+          all(bc.op_hash("UNITOPERATION_SPY_" + names.get(k, k)) == v
+              for k, v in esp._SPY_OP_HASHES.items() if k not in bc.SPY_OPS))
+    check("DISRUPT_ROCKETRY and LISTENING_POST added",
+          esp._SPY_OP_HASHES.get("DISRUPT_ROCKETRY") == -1021949976
+          and esp._SPY_OP_HASHES.get("LISTENING_POST") == -955496600)
+    lua = lq.build_spy_mission(7, "disrupt_rocketry", 54, 16)
+    check("spy_action builds the mission", "UNKNOWN_MISSION" not in lua and "-1021949976" in lua
+          and "RequestOperation(unit, -1021949976" in lua, lua[:200])
+    check("get_spies checks it", "DISRUPT_ROCKETRY=-1021949976" in lq.build_get_spies_query())
+    check("spy_action's description names it", "DISRUPT_ROCKETRY, against a city with a Spaceport"
+          in mcp._tool_manager.get_tool("spy_action").description)
+
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc
     check("dismiss_popup is the patched function", glc.dismiss_popup is ns["_dismiss_skipping"])
