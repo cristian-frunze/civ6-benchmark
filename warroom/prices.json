@@ -1,5 +1,5 @@
 {
-  "_note": "List API prices in USD per million tokens (Anthropic first-party API, checked 2026-11-06; Fable 5.1 added 2026-11-08). Cache writes: 1.25x input for the 5-minute TTL, 2x for the 1-hour TTL.",
+  "_note": "List API prices in USD per million tokens (Anthropic first-party API, checked 2026-11-06; Fable 5.1 added 2026-11-08, Fable 5.2 2026-11-10). Cache writes: 1.25x input for the 5-minute TTL, 2x for the 1-hour TTL.",
   "claude-opus-5-5": {
     "input": 4.0,
     "output": 20.0,
@@ -20,5 +20,12 @@
     "cache_write_5m": 12.5,
     "cache_write_1h": 20.0,
     "cache_read": 0.25
+  },
+  "claude-fable-5-2": {
+    "input": 8.0,
+    "output": 40.0,
+    "cache_write_5m": 10.0,
+    "cache_write_1h": 16.0,
+    "cache_read": 0.2
   }
 }

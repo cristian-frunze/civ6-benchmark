@@ -19,7 +19,8 @@ This repo holds the setup, harness glue and results for running LLM agents in re
 | 9 | Game 3's setup with **Fable 5.1** (high effort), on game 8's harness | **Science victory, turn 203** (games 3 and 7: 212 and 206), $102.47, the earliest win on this setup. It started slowest, then led the AI by 18 techs at turn 200, twice the most any Opus game led by, and finished all five space projects while the best AI had one. At 2.5 times Opus's price per output token, it cost 1.6 to 1.9 times as much ([results](results/g9-fable-science/)) |
 | 10 | Game 3 repeated on the **fixed harness**, hang fixes included (Opus 5.5, high effort): the baseline for games 8 and 9, and a measure of the fixes | **Science victory, turn 200** (games 3 and 7: 212 and 206), $58.24, 5.5 hours with no AI-turn hangs, 2nd of 8 in score. Ahead of both from turn 100 on, at about the same cost. One game cannot separate the fixes from the spread between games, but the friction they target was gone ([results](results/g10-fixed-harness/)) |
 | 11 | Game 9 repeated on the **fixed harness** (Fable 5.1, high effort), to compare Fable with game 10 on the same harness and see whether its tech lead repeats | running |
-| 12 | Game 6 repeated on the **fixed harness** (Sonnet 5.5, high effort): with games 10 and 11, all three models on one harness | queued after game 11 |
+| 12 | Game 11 with **Fable 5.2** (high effort) on the fixed harness: Fable 5.2 against Fable 5.1 on the same setup | queued after game 11 |
+| 13 | Game 6 repeated on the **fixed harness** (Sonnet 5.5, high effort): with games 10 to 12, every model on one harness | queued after game 12 |
 
 All games use the **base game** ruleset (no Rise and Fall or Gathering Storm), so there's no diplomatic victory, and results don't compare directly with CivBench, which used Gathering Storm.
 
