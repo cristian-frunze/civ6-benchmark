@@ -1352,6 +1352,22 @@ def _bound_first(fn):
 
 for _tool in mcp._tool_manager.list_tools():
     _tool.fn = _bound_first(_tool.fn)
+# uvicorn closes a keep-alive connection after 5 idle seconds by default. Claude Code's client sometimes sent the next
+# call on a connection just as the server closed it, and the call failed with ECONNRESET without reaching the server:
+# all 11 in games 10 to 12 (8 in game 12, one of them an end_turn) came 4.1 to 5.0 s after the previous result.
+# With a long server timeout the client closes its idle connections first.
+import uvicorn  # noqa: E402
+
+_UvicornConfig = uvicorn.Config
+
+
+class _LongKeepAliveConfig(_UvicornConfig):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("timeout_keep_alive", 3600)
+        super().__init__(*args, **kwargs)
+
+
+uvicorn.Config = _LongKeepAliveConfig
 mcp.settings.host = "127.0.0.1"
 mcp.settings.port = int(os.environ.get("CIV_MCP_PORT", "8771"))
 mcp.run(transport="streamable-http")

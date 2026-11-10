@@ -610,6 +610,11 @@ async def main():
     finally:
         ns["_original_execute_read"] = real_read
 
+    # 28. The HTTP server keeps idle connections an hour, not uvicorn's 5 s (ECONNRESET 4.1 to 5.0 s after a result).
+    import uvicorn
+    check("keep-alive raised", uvicorn.Config(app=None).timeout_keep_alive == 3600
+          and uvicorn.Config(app=None, timeout_keep_alive=7).timeout_keep_alive == 7)
+
     # 27. Base-game spy missions civ6-mcp leaves out: DISRUPT_ROCKETRY (game 11 answered UNKNOWN_MISSION) and
     #     LISTENING_POST. The hash rule reproduces every hash civ6-mcp hardcodes.
     import civ_mcp.lua.espionage as esp
