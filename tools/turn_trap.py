@@ -25,13 +25,14 @@ for g in sys.argv[1:]:
                 j += 1
             if j < len(rows) and (rows[j].get("turn") or 0) > tp:
                 advanced += 1
-                # from here to the end_turn that advances, did the agent move any unit?
-                k, unit_orders = j, 0
+                # on the new turn, up to the end_turn that ends it, did the agent move any unit? Count from the pause:
+                # an agent can see the new turn (get_game_overview) and play it before its next end_turn (game 12).
+                k, unit_orders = i + 1, 0
                 while k < len(rows):
                     x = rows[k]
                     res = x.get("result") or ""
                     if x.get("tool") in ("unit_action", "issue_orders", "city_attack") and not res.startswith("Error") \
-                            and "NO_MOVES" not in res:
+                            and "NO_MOVES" not in res and (x.get("turn") or 0) > tp:
                         unit_orders += 1
                     # An end_turn that reports the paused turn's own change ("Turn <tp> -> ...") ends nothing: civ6-mcp
                     # reports a turn end still in flight that way (always from game 8 on, and before that when the new

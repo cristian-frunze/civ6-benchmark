@@ -53,7 +53,7 @@ From game 8 on, `windows/civ_mcp_http.py` raises the game window when it is not 
 
 ## Diplomacy-pause trap
 
-`tools/turn_trap.py`: 63 diplomacy pauses, 8 times the game had moved to the next turn before the agent's next `end_turn`, and 1 turn ended with no unit order (game 3: 53, 16 and 3). Game 7 is the last game on the old harness. From game 8 on, `end_turn` reports the new turn instead.
+`tools/turn_trap.py`: 63 diplomacy pauses, 8 times the game had moved to the next turn before the agent's next `end_turn`, and 1 turn ended with no unit order (game 3: 53, 16 and 1). Game 7 is the last game on the old harness. From game 8 on, `end_turn` reports the new turn instead.
 
 ## Files
 

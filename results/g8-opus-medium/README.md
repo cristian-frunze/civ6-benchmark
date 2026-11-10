@@ -56,7 +56,7 @@ civ6-mcp gives up on an end turn after about 10 minutes with no turn change ("AI
 
 ## Diplomacy-pause trap
 
-`tools/turn_trap.py`: 60 diplomacy pauses, 11 times the game had moved to the next turn before the agent's next `end_turn`, and **0** turns ended with no unit order (games 1 to 7: 0 to 11 per game). This is the first game on that fix.
+`tools/turn_trap.py`: 60 diplomacy pauses, 11 times the game had moved to the next turn before the agent's next `end_turn`, and **0** turns ended with no unit order (games 1 to 7: 0 to 8 per game). This is the first game on that fix.
 
 ## Files
 
