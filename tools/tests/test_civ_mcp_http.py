@@ -63,7 +63,6 @@ class Conn:
     # is enacted after the player's ACCEPTED (an E event).
     deal_answer, deal_enacts, deal_leftover = "ACCEPTED", True, None  # leftover: None, "session" or "hidden"
     test_answer, deal_equal = "ADJUSTED", False  # deal_equal: an ADJUSTED answer kept our terms
-    enact_on_close = False  # live, during the AI turns: an accepted AI offer was enacted when the session closed
     def deal(self, lua):
         import re as _re
         self.deal_log = getattr(self, "deal_log", [])
@@ -98,13 +97,11 @@ class Conn:
                 return ["NOT_EQUAL|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
             self.deal_log.append("accept-copy")
             mark = len(self.deal_ev)
-            if self.deal_enacts and not self.enact_on_close: self.deal_ev.append("E|7|0")
+            if self.deal_enacts: self.deal_ev.append("E|7|0")
             return ["TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
         if "TERMS|" in lua:
             self.deal_log.append("incoming"); return ["TERMS|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
         if "CLOSED|" in lua:
-            if self.enact_on_close and "accept-copy" in self.deal_log and "E|7|0" not in self.deal_ev:
-                self.deal_ev.append("E|7|0")
             self.deal_log.append("close"); return [lq.SENTINEL]
         if "DEAL_REJECTED" in lua:
             self.deal_log.append("reject")
@@ -318,10 +315,13 @@ async def main():
     GAME = trade()
     out = await rtool.fn(CTX, other_player_id=7, accept=False)
     check("refuse an AI offer", out.startswith("DEAL_REJECTED|Spain"), out)
-    GAME = trade(enact_on_close=True)
+    GAME = trade(deal_enacts=False); GAME._pending_end_turn = True
     out = await rtool.fn(CTX, other_player_id=7, accept=True)
-    check("accept an AI offer enacted only when the session closed: in effect", out.startswith("DEAL_ACCEPTED|"),
-          (out, GAME.conn.deal_log))
+    check("accept during the AI turns: in effect when they go on", out.startswith("DEAL_ACCEPTED|Accepted: we give")
+          and "when they go on" in out, out)
+    GAME = trade(deal_enacts=False)
+    out = await rtool.fn(CTX, other_player_id=7, accept=True)
+    check("accept, no enactment, not during the AI turns: unclear", out.startswith("DEAL_UNCLEAR|"), out)
 
     # 31. A leader screen that comes up while end_turn waits: civ6-mcp's one InGame probe (45 s of quiet) closes it
     #     first (game 13's turn 108, live), and otherwise does civ6-mcp's own diplomacy check.

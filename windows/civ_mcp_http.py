@@ -291,12 +291,15 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         mark = int(_deal_field(lines, "MARK"))
         enacted, _ = await _deal_wait(self.conn, other_player_id, mark, _enacted_with(other_player_id))
         note = await _deal_finish(self.conn, other_player_id)
-        if not enacted:  # during the AI turns the game enacted it when the session closed (game 13, turn 108, live)
-            enacted, _ = await _deal_wait(self.conn, other_player_id, mark, _enacted_with(other_player_id), timeout=3.0)
         terms = _deal_field(lines, "TERMS")
-        result = (f"DEAL_ACCEPTED|The deal is in effect: {terms}." if enacted else
-                  f"DEAL_UNCLEAR|Accepted ({terms}), but the game did not confirm the deal.")
-        return result + note
+        if enacted:
+            return f"DEAL_ACCEPTED|The deal is in effect: {terms}." + note
+        if getattr(self, "_pending_end_turn", False):
+            # The AI turns are paused for this answer, and the game enacts the deal when they go on (game 13's turn
+            # 108, replayed live twice: DiplomacyDealEnacted came then, and Rome was allied on turn 109).
+            return (f"DEAL_ACCEPTED|Accepted: {terms}. The AI turns paused for your answer; the game puts the deal in "
+                    f"effect when they go on (end_turn)." + note)
+        return f"DEAL_UNCLEAR|Accepted ({terms}), but the game did not confirm the deal." + note
 
     _gsm.GameState.test_trade = _test_trade_waits
     _gsm.GameState.propose_trade = _propose_trade_waits
