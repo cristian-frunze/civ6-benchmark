@@ -146,6 +146,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 logging.getLogger("civ_mcp_http").warning("leader screen check failed", exc_info=True)
                 return
             if "LEADER_SCREEN|CLOSED" not in lines:
+                if "LEADER_SCREEN|SESSION" in lines:
+                    logging.getLogger("civ_mcp_http").info("Leader screen up with a diplomacy session open: left alone")
                 return
             logging.getLogger("civ_mcp_http").info("Closed a leader screen left open with no diplomacy session")
             await asyncio.sleep(1.0)
@@ -286,12 +288,15 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         err = next((ln for ln in lines if ln.startswith("ERR:")), None)
         if err:
             return "Error: " + err[4:]
-        enacted, _ = await _deal_wait(self.conn, other_player_id, int(_deal_field(lines, "MARK")),
-                                      _enacted_with(other_player_id))
+        mark = int(_deal_field(lines, "MARK"))
+        enacted, _ = await _deal_wait(self.conn, other_player_id, mark, _enacted_with(other_player_id))
+        note = await _deal_finish(self.conn, other_player_id)
+        if not enacted:  # during the AI turns the game enacted it when the session closed (game 13, turn 108, live)
+            enacted, _ = await _deal_wait(self.conn, other_player_id, mark, _enacted_with(other_player_id), timeout=3.0)
         terms = _deal_field(lines, "TERMS")
         result = (f"DEAL_ACCEPTED|The deal is in effect: {terms}." if enacted else
                   f"DEAL_UNCLEAR|Accepted ({terms}), but the game did not confirm the deal.")
-        return result + await _deal_finish(self.conn, other_player_id)
+        return result + note
 
     _gsm.GameState.test_trade = _test_trade_waits
     _gsm.GameState.propose_trade = _propose_trade_waits
@@ -1019,6 +1024,30 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return f"Turn {m[1]} -> {now}" + out[m.end():]
 
     _etm.execute_end_turn = _end_turn_reports_turn_on
+
+    # A leader screen can also come up while end_turn is already waiting for the AI turns, after the checks around the
+    # tools have run. Game 13's turn 108 hung twice that way (replayed live: Brazil was the only civ still in its turn,
+    # no session or deal was open, and the screen was up; closing it let the turn finish within seconds). civ6-mcp
+    # makes one InGame probe once the turn has been quiet for 45 s (it keeps InGame queries out of the AI turns
+    # otherwise); the leader-screen check runs first there and closes a screen with no session behind it.
+    _original_mid_turn_diplomacy = _etm._check_mid_turn_diplomacy
+
+    async def _mid_turn_leader_screen_first(gs, lua, turn_before):
+        try:
+            lines = await gs.conn.execute_write(bc.LEADER_SCREEN_LUA, timeout=10.0)
+        except Exception:
+            lines = []
+        if "LEADER_SCREEN|CLOSED" in lines:
+            logging.getLogger("civ_mcp_http").warning(
+                "End turn: closed a leader screen left open with no diplomacy session while the AI turns waited")
+            for _ in range(10):
+                await asyncio.sleep(2.0)
+                now = await _etm._get_turn_number(gs)
+                if now is not None and turn_before is not None and now > turn_before:
+                    return None, True
+        return await _original_mid_turn_diplomacy(gs, lua, turn_before)
+
+    _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first
 
     def _hang_note(fn):
         @functools.wraps(fn)

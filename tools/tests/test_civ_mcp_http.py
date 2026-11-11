@@ -5,7 +5,7 @@ network needed.
 
     cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_civ_mcp_http.py
 """
-import asyncio, os, shutil, sys, tempfile
+import asyncio, inspect as _inspect, os, shutil, sys, tempfile, types
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ["CIV_MCP_BASE_GAME"] = "1"
 # On the PC the Lua prelude sits next to the module, as here.
@@ -63,6 +63,7 @@ class Conn:
     # is enacted after the player's ACCEPTED (an E event).
     deal_answer, deal_enacts, deal_leftover = "ACCEPTED", True, None  # leftover: None, "session" or "hidden"
     test_answer, deal_equal = "ADJUSTED", False  # deal_equal: an ADJUSTED answer kept our terms
+    enact_on_close = False  # live, during the AI turns: an accepted AI offer was enacted when the session closed
     def deal(self, lua):
         import re as _re
         self.deal_log = getattr(self, "deal_log", [])
@@ -97,11 +98,13 @@ class Conn:
                 return ["NOT_EQUAL|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
             self.deal_log.append("accept-copy")
             mark = len(self.deal_ev)
-            if self.deal_enacts: self.deal_ev.append("E|7|0")
+            if self.deal_enacts and not self.enact_on_close: self.deal_ev.append("E|7|0")
             return ["TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
         if "TERMS|" in lua:
             self.deal_log.append("incoming"); return ["TERMS|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
         if "CLOSED|" in lua:
+            if self.enact_on_close and "accept-copy" in self.deal_log and "E|7|0" not in self.deal_ev:
+                self.deal_ev.append("E|7|0")
             self.deal_log.append("close"); return [lq.SENTINEL]
         if "DEAL_REJECTED" in lua:
             self.deal_log.append("reject")
@@ -315,6 +318,35 @@ async def main():
     GAME = trade()
     out = await rtool.fn(CTX, other_player_id=7, accept=False)
     check("refuse an AI offer", out.startswith("DEAL_REJECTED|Spain"), out)
+    GAME = trade(enact_on_close=True)
+    out = await rtool.fn(CTX, other_player_id=7, accept=True)
+    check("accept an AI offer enacted only when the session closed: in effect", out.startswith("DEAL_ACCEPTED|"),
+          (out, GAME.conn.deal_log))
+
+    # 31. A leader screen that comes up while end_turn waits: civ6-mcp's one InGame probe (45 s of quiet) closes it
+    #     first (game 13's turn 108, live), and otherwise does civ6-mcp's own diplomacy check.
+    etm = ns["_etm"]
+    check("civ6-mcp's end turn calls the mid-turn probe by name", _inspect.getsource(etm).count("await _check_mid_turn_diplomacy(") == 2
+          and etm._check_mid_turn_diplomacy is ns["_mid_turn_leader_screen_first"])
+    class ScreenConn:
+        def __init__(self, reply): self.reply, self.sent = reply, []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua); return [self.reply, lq.SENTINEL]
+    turns, orig_calls = iter([108, 109]), []
+    async def fake_turn(gs): return next(turns)
+    async def fake_orig(gs, lua, turn_before): orig_calls.append(turn_before); return ("Turn paused", False)
+    saved = (etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep)
+    async def no_sleep(_): return None
+    etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep = fake_turn, fake_orig, no_sleep
+    try:
+        gs = types.SimpleNamespace(conn=ScreenConn("LEADER_SCREEN|CLOSED"))
+        got = await ns["_mid_turn_leader_screen_first"](gs, "lua", 108)
+        check("screen up, no session: closed, the turn went on", got == (None, True) and not orig_calls, (got, orig_calls))
+        gs = types.SimpleNamespace(conn=ScreenConn("LEADER_SCREEN|SESSION"))
+        got = await ns["_mid_turn_leader_screen_first"](gs, "lua", 108)
+        check("a session open: civ6-mcp's own check", got == ("Turn paused", False) and orig_calls == [108], (got, orig_calls))
+    finally:
+        etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep = saved
     # Every tool's outermost wrapper binds the call log (_bound_first); the one inside it is checked.
     bound = ns["_bound_first"](stock).__code__
     for name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "send_diplomatic_action",
