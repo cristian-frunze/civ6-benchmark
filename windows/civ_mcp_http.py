@@ -254,22 +254,22 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         err = next((ln for ln in lines if ln.startswith("ERR:")), None)
         if err:
             return "Error: " + err[4:]
-        name, mark = _deal_field(lines, "CIV") or f"player {target}", int(_deal_field(lines, "MARK"))
+        name, mark, terms = _deal_field(lines, "CIV") or f"player {target}", int(_deal_field(lines, "MARK")), \
+            _deal_field(lines, "TERMS")
         answer, _ = await _deal_wait(conn, target, mark, _answer_to(target, "PROPOSED"))
-        if answer == "ACCEPTED":
-            lines = await conn.execute_write(bc.deal_accept_lua(target, copy_incoming=False))
-            if _deal_field(lines, "NOT_EQUAL") is not None:
-                answer, counter = "ADJUSTED", _deal_field(lines, "NOT_EQUAL")
-            else:
-                enacted, _ = await _deal_wait(conn, target, int(_deal_field(lines, "MARK")), _enacted_with(target))
-                terms = _deal_field(lines, "TERMS")
-                result = (f"ACCEPTED|{name} accepted, and the deal is in effect: {terms}." if enacted else
-                          f"UNCLEAR|{name} accepted ({terms}), but the game did not confirm the deal. Check "
-                          f"get_empire_resources and your gold before you propose it again.")
-                return result + await _deal_finish(conn, target)
-        elif answer in ("ADJUSTED", "PROPOSED"):
-            counter = _deal_field(await conn.execute_write(bc.deal_incoming_lua(target)), "TERMS")
-        if answer in ("ADJUSTED", "PROPOSED"):
+        counter = None
+        if answer in ("ADJUSTED", "PROPOSED"):  # its version of the deal; the same terms are ours to accept
+            lines = await conn.execute_write(bc.deal_accept_lua(target, only_if_equal=True))
+            counter = _deal_field(lines, "NOT_EQUAL")
+            if counter is None and _deal_field(lines, "MARK") is not None:
+                answer, mark = "ACCEPTED", int(_deal_field(lines, "MARK"))
+        if answer == "ACCEPTED":  # the game enacts the deal with the AI's acceptance; the player sends nothing more
+            enacted, _ = await _deal_wait(conn, target, mark, _enacted_with(target))
+            result = (f"ACCEPTED|{name} accepted, and the deal is in effect: {terms}." if enacted else
+                      f"UNCLEAR|{name} accepted ({terms}), but the game did not confirm the deal. Check "
+                      f"get_empire_resources and your gold before you propose it again.")
+            return result + await _deal_finish(conn, target)
+        if counter is not None:
             result = (f"COUNTER|{name} did not accept these terms; nothing was traded. It would accept: {counter}. "
                       f"To take that, propose those terms.")
         elif answer is None:
@@ -282,7 +282,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if not accept:
             lines = await self.conn.execute_write(_lq.build_respond_to_deal(other_player_id, False))
             return _gsm._action_result(lines) + await _deal_finish(self.conn, other_player_id)
-        lines = await self.conn.execute_write(bc.deal_accept_lua(other_player_id, copy_incoming=True))
+        lines = await self.conn.execute_write(bc.deal_accept_lua(other_player_id))
         err = next((ln for ln in lines if ln.startswith("ERR:")), None)
         if err:
             return "Error: " + err[4:]

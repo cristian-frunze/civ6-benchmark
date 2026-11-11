@@ -173,9 +173,12 @@ def deal_poll_lua(target: int, mark: int) -> str:
 
 
 def deal_propose_lua(target: int, items_lua: str) -> str:
-    """Open a deal session, build the outgoing deal and send it as PROPOSED; prints CIV|name and MARK|n."""
+    """Open a deal session, build the outgoing deal and send it as PROPOSED; prints CIV|name, TERMS|the deal as sent
+    and MARK|n. An AI that accepts it answers ACCEPTED and the game enacts the deal then, with no ACCEPTED from the
+    player (live, game 12 turn 96: the statement and DiplomacyDealEnacted came together; civ6-mcp's extra ACCEPTED
+    enacted the same deal a second time)."""
     return (
-        DEAL_LISTENER + f"local me = Game.GetLocalPlayer() local target = {target} "
+        DEAL_LISTENER + DEAL_TERMS_FN + f"local me = Game.GetLocalPlayer() local target = {target} "
         "local pDiplo = Players[me]:GetDiplomacy() "
         "if not pDiplo:HasMet(target) then print('ERR:NOT_MET|Have not met this player') print('---END---') return end "
         "if pDiplo:IsAtWarWith(target) then print('ERR:AT_WAR|Cannot trade while at war') print('---END---') return end "
@@ -185,24 +188,26 @@ def deal_propose_lua(target: int, items_lua: str) -> str:
         "local deal = DealManager.GetWorkingDeal(DealDirection.OUTGOING, me, target) "
         "if not deal then print('ERR:NO_DEAL_OBJECT|Failed to get working deal') print('---END---') return end "
         f"{items_lua} "
+        "print('TERMS|' .. benchTerms(deal, me)) "
         "print('MARK|' .. BENCH_DEALS.n) "
         "DealManager.SendWorkingDeal(DealProposalAction.PROPOSED, me, target) "
         "print('---END---')"
     )
 
 
-def deal_accept_lua(target: int, copy_incoming: bool) -> str:
-    """Accept the deal in the open session: the AI's offer (copied into ours first) or our proposal it accepted.
-    Prints TERMS|..., MARK|n, or NOT_EQUAL|incoming terms when the AI changed our proposal."""
-    check = ("DealManager.CopyIncomingToOutgoingWorkingDeal(me, target) " if copy_incoming else
-             "if not DealManager.AreWorkingDealsEqual(me, target) then "
+def deal_accept_lua(target: int, only_if_equal: bool = False) -> str:
+    """Accept the AI's deal in the open session the way the deal view does: copy it into the player's working deal,
+    then send ACCEPTED. Prints TERMS|... and MARK|n. With only_if_equal (the AI answered our proposal with ADJUSTED),
+    only when its version is the one we proposed; otherwise prints NOT_EQUAL|its terms and sends nothing. Live, game
+    12 turn 98: Greece answered ADJUSTED with the same items, and this accepted it (enacted once)."""
+    check = ("if not DealManager.AreWorkingDealsEqual(me, target) then "
              "print('NOT_EQUAL|' .. benchTerms(DealManager.GetWorkingDeal(DealDirection.INCOMING, me, target), me)) "
-             "print('---END---') return end ")
+             "print('---END---') return end ") if only_if_equal else ""
     return (
         DEAL_LISTENER + DEAL_TERMS_FN + f"local me = Game.GetLocalPlayer() local target = {target} "
         "local sid = (DiplomacyManager.FindOpenSessionID(me, target)) "
         "if not sid or sid < 0 then print('ERR:NO_SESSION|No deal session is open with this player') print('---END---') return end "
-        + check +
+        + check + "DealManager.CopyIncomingToOutgoingWorkingDeal(me, target) "
         "print('TERMS|' .. benchTerms(DealManager.GetWorkingDeal(DealDirection.OUTGOING, me, target), me)) "
         "print('MARK|' .. BENCH_DEALS.n) "
         "DealManager.SendWorkingDeal(DealProposalAction.ACCEPTED, me, target) "

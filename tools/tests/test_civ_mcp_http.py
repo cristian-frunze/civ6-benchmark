@@ -62,7 +62,7 @@ class Conn:
     # The trade protocol: the AI answers a proposal or a test in a later statement event, and a deal it accepts
     # is enacted after the player's ACCEPTED (an E event).
     deal_answer, deal_enacts, deal_leftover = "ACCEPTED", True, None  # leftover: None, "session" or "hidden"
-    test_answer = "ADJUSTED"
+    test_answer, deal_equal = "ADJUSTED", False  # deal_equal: an ADJUSTED answer kept our terms
     def deal(self, lua):
         import re as _re
         self.deal_log = getattr(self, "deal_log", [])
@@ -75,11 +75,12 @@ class Conn:
             st = {None: "nil|false|false|0", "session": "3|false|true|2", "hidden": "nil|false|true|0"}
             state = st[self.deal_leftover] if closed else "3|false|false|0"
             return evs + [f"STATE|{state}", lq.SENTINEL]
-        if "DealProposalAction.PROPOSED" in lua:
+        if "DealProposalAction.PROPOSED" in lua:  # live: an AI that accepts enacts the deal with its answer
             self.deal_log.append("propose")
             mark = len(self.deal_ev)
             if self.deal_answer: self.deal_ev.append(f"S|7|0|{self.deal_answer}|PROPOSED")
-            return ["CIV|Spain", f"MARK|{mark}", lq.SENTINEL]
+            if self.deal_answer == "ACCEPTED" and self.deal_enacts: self.deal_ev.append("E|7|0")
+            return ["CIV|Spain", "TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
         if "DealProposalAction.EQUALIZE" in lua:  # the game: its counter is read before the AI answers (stale)
             self.deal_log.append("test")
             mark = len(self.deal_ev)
@@ -91,7 +92,10 @@ class Conn:
             return ["CIV|7|Spain", "PROPOSED_ITEMS", "ITEM|US|RESOURCE|1|30|5|", "AI_COUNTER",
                     "ITEM|THEM|GOLD|100|0||", lq.SENTINEL]
         if "DealProposalAction.ACCEPTED" in lua and "TERMS|" in lua:
-            self.deal_log.append("accept-copy" if "CopyIncomingToOutgoingWorkingDeal" in lua else "accept")
+            if "AreWorkingDealsEqual" in lua and not self.deal_equal:
+                self.deal_log.append("accept-check")
+                return ["NOT_EQUAL|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
+            self.deal_log.append("accept-copy")
             mark = len(self.deal_ev)
             if self.deal_enacts: self.deal_ev.append("E|7|0")
             return ["TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
@@ -254,19 +258,22 @@ async def main():
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
     log = GAME.conn.deal_log
     check("accepted: reports the enacted deal", out.startswith("ACCEPTED|Spain accepted, and the deal is in effect: we give Coal"), out)
-    check("accepted: ACCEPTED sent only after the answer", log.index("accept") > log.index("propose") + 1
-          and log[log.index("accept") - 1] == "poll", log)
-    check("accepted: session closed after", log[-2:] == ["close", "poll"] or "close" in log[log.index("accept"):], log)
+    check("accepted: no ACCEPTED of ours (it would enact the deal again)", not any(x.startswith("accept") for x in log), log)
+    check("accepted: session closed after the answer", log.index("close", log.index("propose")) > log.index("propose") + 1, log)
     GAME = trade(deal_answer="ADJUSTED")
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
     check("counter-offer: not accepted, terms shown", out.startswith("COUNTER|Spain did not accept") and "they give 40 gold" in out
-          and "accept" not in GAME.conn.deal_log, (out, GAME.conn.deal_log))
+          and "accept-copy" not in GAME.conn.deal_log, (out, GAME.conn.deal_log))
+    GAME = trade(deal_answer="ADJUSTED", deal_equal=True)
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("ADJUSTED to the same terms: accepted once", out.startswith("ACCEPTED|Spain accepted")
+          and GAME.conn.deal_log.count("accept-copy") == 1, (out, GAME.conn.deal_log))
     GAME = trade(deal_answer="REJECTED")
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
-    check("rejected", out.startswith("REJECTED|Spain rejected") and "accept" not in GAME.conn.deal_log, out)
+    check("rejected", out.startswith("REJECTED|Spain rejected") and "accept-copy" not in GAME.conn.deal_log, out)
     GAME = trade(deal_answer=None)
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
-    check("no answer: nothing accepted", out.startswith("NO_ANSWER|") and "accept" not in GAME.conn.deal_log, out)
+    check("no answer: nothing accepted", out.startswith("NO_ANSWER|") and "accept-copy" not in GAME.conn.deal_log, out)
     GAME = trade(deal_enacts=False)
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
     check("accepted but not enacted: says so", out.startswith("UNCLEAR|"), out)
@@ -303,7 +310,7 @@ async def main():
     GAME = trade()
     out = await rtool.fn(CTX, other_player_id=7, accept=True)
     check("accept an AI offer: copied, then accepted", GAME.conn.deal_log[0] == "accept-copy" and out.startswith("DEAL_ACCEPTED|"), (GAME.conn.deal_log, out))
-    acc = ns["bc"].deal_accept_lua(7, copy_incoming=True)
+    acc = ns["bc"].deal_accept_lua(7)
     check("accept Lua copies before it sends", acc.index("CopyIncomingToOutgoingWorkingDeal") < acc.index("DealProposalAction.ACCEPTED"))
     GAME = trade()
     out = await rtool.fn(CTX, other_player_id=7, accept=False)
