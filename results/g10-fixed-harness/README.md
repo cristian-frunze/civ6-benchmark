@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Played | 2026-11-09 22:57 to 2026-11-10 04:26 CET, 5.5 hours wall clock |
+| Played | 2026-11-09 22:57 to 2026-11-10 04:26 CET, 5.5 hours wall clock, about 1 hour of it in 6 end turns the game refused over a unit (see below) |
 | Turns | 200 (median 62 s per turn) |
 | API-equivalent cost | **$58.24** at list prices (Opus 5.5: $4 / $20 per MTok in / out, $0.20 cache read, $8 cache write with the 1-hour TTL) |
 | Tokens | 323K output, 206M cache read, 1.33M cache write, 2.2K uncached input |
@@ -52,6 +52,7 @@ On the fixed harness, the same agent won 12 turns earlier than game 3 and 6 earl
 From the server log and the agent's tool results:
 
 - **No AI-turn hangs** (game 8: 18, which cost it 3.8 hours). The agent proposed no trades, which caused most of game 8's hangs. It did answer 45 AI deals and took 118 other diplomatic actions, and 27 times the harness closed a diplomacy screen those had left open.
+- **Six end turns refused over a unit, 59 minutes in all** (turns 35, 103, 106, 123, 157 and 162; found after game 13). When the turn ends, the game first moves units along their multi-turn orders. A unit can come out of that with moves left and no orders, and the game then refuses the turn end. civ6-mcp waited its full 10 minutes for a turn change and named the blocker ("End turn blocked: Units"), and one more skip ended the turn. From game 10 `skip_remaining_units` leaves units on multi-turn moves alone, which made this more common (games 1 to 9: at most 2 a game). The harness names the blocker at 45 s from game 15 on ([setup](../../docs/setup.md)).
 - **Diplomacy-pause trap** (`tools/turn_trap.py`): 55 pauses. The game had already moved to the next turn 12 times, and each time `end_turn` reported the new turn. None of those turns ended with no unit order.
 - **Auto-explore** was sent again 67 times, so scouts kept exploring from turn to turn.
 - **`skip_remaining_units`** left units with orders of their own alone in 167 calls.

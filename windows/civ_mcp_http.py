@@ -1048,6 +1048,25 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 now = await _etm._get_turn_number(gs)
                 if now is not None and turn_before is not None and now > turn_before:
                     return None, True
+        # The game refused the turn end because a unit needs orders. When a turn ends, the game first moves units
+        # along their multi-turn orders, and a unit can come out of that with moves left and nothing to do (its path
+        # blocked, or it arrived early). The units check before end_turn cannot see that yet, and civ6-mcp waited
+        # its full 10 minutes for a turn change before it named the blocker: 15 times in game 13 (about 2.5 hours),
+        # 6 in game 10, twice by game 14's turn 101. One more order or skip ended each of those turns.
+        if await _turn_active(gs) is True:
+            try:
+                ulines = await gs.conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
+            except Exception:
+                ulines = []
+            units = [ln.split("|") for ln in ulines if ln.startswith("UNIT|")]
+            if "UNITS_BLOCK" in ulines and units:
+                logging.getLogger("civ_mcp_http").warning("End turn: refused by the game, a unit needs orders")
+                listed = "\n".join(f"  {t} [id:{i}] at ({xy}), moves {m}" for _, i, t, xy, m in units)
+                return ("The turn did not end: as it ended, the game moved units along their orders, and a unit was "
+                        "left needing orders (the game's end-turn button reads \"Unit needs orders\"). Units with "
+                        "moves left:\n" + listed + "\nGive each an order (move, attack, fortify, skip) with "
+                        "unit_action, or call skip_remaining_units, then end_turn again. The turn has not ended.",
+                        False)
         return await _original_mid_turn_diplomacy(gs, lua, turn_before)
 
     _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first

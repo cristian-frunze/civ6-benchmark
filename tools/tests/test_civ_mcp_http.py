@@ -335,9 +335,12 @@ async def main():
     turns, orig_calls = iter([108, 109]), []
     async def fake_turn(gs): return next(turns)
     async def fake_orig(gs, lua, turn_before): orig_calls.append(turn_before); return ("Turn paused", False)
-    saved = (etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep)
+    saved = (etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep, ns["_turn_active"])
     async def no_sleep(_): return None
+    active = [False]
+    async def fake_active(game): return active[0]
     etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep = fake_turn, fake_orig, no_sleep
+    ns["_turn_active"] = fake_active
     try:
         gs = types.SimpleNamespace(conn=ScreenConn("LEADER_SCREEN|CLOSED"))
         got = await ns["_mid_turn_leader_screen_first"](gs, "lua", 108)
@@ -345,8 +348,21 @@ async def main():
         gs = types.SimpleNamespace(conn=ScreenConn("LEADER_SCREEN|SESSION"))
         got = await ns["_mid_turn_leader_screen_first"](gs, "lua", 108)
         check("a session open: civ6-mcp's own check", got == ("Turn paused", False) and orig_calls == [108], (got, orig_calls))
+        # The game refused the turn end over a unit that needs orders (the player's turn is active again).
+        class UnitsConn:
+            async def execute_write(self, lua, timeout=None):
+                if "LEADER_SCREEN" in lua: return ["LEADER_SCREEN|HIDDEN", lq.SENTINEL]
+                return ["UNITS_BLOCK", "UNIT|2686988|UNIT_SETTLER|37,42|1/2", lq.SENTINEL]
+        active[0] = True
+        got = await ns["_mid_turn_leader_screen_first"](types.SimpleNamespace(conn=UnitsConn()), "lua", 100)
+        check("turn end refused over a unit: named at the probe, not after 10 minutes",
+              got[1] is False and got[0].startswith("The turn did not end") and "UNIT_SETTLER [id:2686988]" in got[0]
+              and orig_calls == [108], got)
+        active[0] = False
+        got = await ns["_mid_turn_leader_screen_first"](types.SimpleNamespace(conn=UnitsConn()), "lua", 100)
+        check("AI turns still running: no units check", got == ("Turn paused", False), got)
     finally:
-        etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep = saved
+        etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep, ns["_turn_active"] = saved
     # Every tool's outermost wrapper binds the call log (_bound_first); the one inside it is checked.
     bound = ns["_bound_first"](stock).__code__
     for name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "send_diplomatic_action",
