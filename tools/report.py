@@ -45,7 +45,8 @@ LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only"
           "g11-fable-fixed": "Game 11, Fable 5.1 on the fixed harness",
           "g12-fable52-fixed": "Game 12, Fable 5.2 on the fixed harness",
           "g13-sonnet-fixed": "Game 13, Sonnet 5.5 on the fixed harness",
-          "g14-fable52-repeat": "Game 14, Fable 5.2 again, trade fixes"}
+          "g14-fable52-repeat": "Game 14, Fable 5.2 again, trade fixes",
+          "g15-fable52-deity": "Game 15, Fable 5.2 on Deity"}
 
 
 def _rows(path: Path) -> list[dict]:
@@ -154,10 +155,10 @@ font-size:12.5px;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;white-space:
 <script>
 const G = __DATA__;
 // One fixed style per game, so a color always means the same game. Repeats of game 3's setup (7, and 10 on the
-// fixed harness) share its aqua, dashed and dotted, and the Fable games share one hue (5.2 dashed); the 8-hue palette
+// fixed harness) share its aqua, dashed and dotted, the Fable games share one hue (5.2 dashed), and game 15 (Fable 5.2 on Deity) takes game 5's Deity hue; the 8-hue palette
 // never cycles.
 const STYLE = {"g1-standard":[1],"g2-baseline":[2],"g3-science":[3],"g4-domination":[4],"g5-deity-science":[5],
-  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"],"g14-fable52-repeat":[8,"8 3 2 3"]};
+  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"],"g14-fable52-repeat":[8,"8 3 2 3"],"g15-fable52-deity":[5,"8 3 2 3"]};
 const st = i => STYLE[G[i].id] || [i % 8 + 1], col = i => `var(--s${st(i)[0]})`;
 const dash = i => st(i)[1] ? ` stroke-dasharray="${st(i)[1]}"` : "";
 const fmt = (n, d=0) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
