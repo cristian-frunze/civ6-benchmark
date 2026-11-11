@@ -243,6 +243,17 @@ def mark_test_trade(lua: str) -> str:
     return DEAL_LISTENER + lua
 
 
+def inspect_test_trade(lua: str) -> str:
+    """mark_test_trade's Lua with INSPECT in place of EQUALIZE: the check the deal view sends as the player changes a
+    deal (its auto-propose), whose answer, ACCEPTED or REJECTED, decides whether it offers Accept. It enacts nothing.
+    An EQUALIZE answer that gives our terms back unchanged says nothing: on game 14's turn 107 Rome gave back Coffee
+    for 4 and for 30 gold per turn, and for 60 gold, unchanged, then refused each as a proposal. INSPECT's yes held
+    when proposed (America's Coffee at 4 gold per turn, Rome's Citrus at 3). Its no is strict: some of those proposals
+    still went through as an ADJUSTED answer with our terms (Rome's Tea at 6, one above its INSPECT limit, and
+    Spain's Truffles at 1), others were refused (Rome's Coffee at 4)."""
+    return mark_test_trade(lua).replace("DealProposalAction.EQUALIZE", "DealProposalAction.INSPECT")
+
+
 def reread_test_trade(lua: str) -> str:
     """From civ6-mcp's test_trade Lua, a call that prints the same CIV, PROPOSED_ITEMS and AI_COUNTER lines for the
     deals as they are now, without sending anything: its own read of the counter-offer comes in the same call as the

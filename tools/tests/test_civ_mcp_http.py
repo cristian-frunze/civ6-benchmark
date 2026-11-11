@@ -63,6 +63,7 @@ class Conn:
     # is enacted after the player's ACCEPTED (an E event).
     deal_answer, deal_enacts, deal_leftover = "ACCEPTED", True, None  # leftover: None, "session" or "hidden"
     test_answer, deal_equal = "ADJUSTED", False  # deal_equal: an ADJUSTED answer kept our terms
+    test_equal, inspect_answer = False, "ACCEPTED"  # test_equal: a test's answer gave our terms back unchanged
     def deal(self, lua):
         import re as _re
         self.deal_log = getattr(self, "deal_log", [])
@@ -81,6 +82,11 @@ class Conn:
             if self.deal_answer: self.deal_ev.append(f"S|7|0|{self.deal_answer}|PROPOSED")
             if self.deal_answer == "ACCEPTED" and self.deal_enacts: self.deal_ev.append("E|7|0")
             return ["CIV|Spain", "TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
+        if "DealProposalAction.INSPECT" in lua:  # the deal view's check: ACCEPTED or REJECTED, nothing enacted
+            self.deal_log.append("inspect")
+            mark = len(self.deal_ev)
+            if self.inspect_answer: self.deal_ev.append(f"S|7|0|{self.inspect_answer}|INSPECT")
+            return ["CIV|7|Spain", f"MARK|{mark}", lq.SENTINEL]
         if "DealProposalAction.EQUALIZE" in lua:  # the game: its counter is read before the AI answers (stale)
             self.deal_log.append("test")
             mark = len(self.deal_ev)
@@ -90,7 +96,7 @@ class Conn:
         if "PROPOSED_ITEMS" in lua:  # read again after the answer
             self.deal_log.append("reread")
             return ["CIV|7|Spain", "PROPOSED_ITEMS", "ITEM|US|RESOURCE|1|30|5|", "AI_COUNTER",
-                    "ITEM|THEM|GOLD|100|0||", lq.SENTINEL]
+                    "ITEM|US|RESOURCE|1|30|5|" if self.test_equal else "ITEM|THEM|GOLD|100|0||", lq.SENTINEL]
         if "DealProposalAction.ACCEPTED" in lua and "TERMS|" in lua:
             if "AreWorkingDealsEqual" in lua and not self.deal_equal:
                 self.deal_log.append("accept-check")
@@ -297,6 +303,7 @@ async def main():
     check("test: the counter-offer read after the answer", "AI counter-offer" in out and "100" in out
           and "93" not in out and log[:3] == ["test", "poll", "reread"], (out, log))
     check("test: closed after the AI answered", log.index("close") > log.index("reread"), log)
+    check("test with a counter-offer: no INSPECT check", "inspect" not in log, log)
     rr = ns["bc"].reread_test_trade(lq.build_test_trade(7, [{"type": "RESOURCE", "name": "RESOURCE_COAL", "amount": 1, "duration": 30}], []))
     check("test re-read Lua sends and closes nothing", "SendWorkingDeal" not in rr and "CloseSession" not in rr
           and "RequestSession" not in rr and "AI_COUNTER" in rr and rr.rstrip().endswith(f'print("{lq.SENTINEL}")'), rr[-200:])
@@ -305,6 +312,17 @@ async def main():
         out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
         check(f"test answered {ans}: {want}, no stale counter", f"AI response: {want}" in out and "93" not in out
               and "reread" not in GAME.conn.deal_log, out)
+    # Our terms back unchanged say nothing (game 14's turn 107, live): the AI's INSPECT check decides.
+    ins = ns["bc"].inspect_test_trade(lq.build_test_trade(7, [{"type": "RESOURCE", "name": "RESOURCE_COAL", "amount": 1, "duration": 30}], []))
+    check("check Lua: INSPECT, not EQUALIZE, after the mark", "EQUALIZE" not in ins and ins.index("MARK|") < ins.index("DealProposalAction.INSPECT"))
+    for verdict, want in (("ACCEPTED", "AI response: ACCEPTABLE"), ("REJECTED", "AI response: NOT ACCEPTABLE as-is"),
+                          (None, "AI response: NO ANSWER to its check")):
+        GAME = trade(); GAME.conn.test_equal, GAME.conn.inspect_answer = True, verdict
+        out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
+        log = GAME.conn.deal_log
+        check(f"test, terms unchanged, check {verdict}: {want.split(': ')[1]}", want in out and log.count("inspect") == 1
+              and log.index("inspect") > log.index("reread") and log[-1] == "poll" and "close" in log[log.index("inspect"):],
+              (out, log))
     # respond_to_trade: the AI's offer is copied into the player's deal before ACCEPTED, as the deal view does.
     rtool = mcp._tool_manager.get_tool("respond_to_trade")
     GAME = trade()

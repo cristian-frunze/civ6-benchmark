@@ -178,6 +178,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     from civ_mcp.narrate import narrate_test_trade  # noqa: E402
 
     _DEAL_ANSWER_S = 6.0  # the AI answered within a second in the live tests
+    _TEST_ACCEPTABLE = "AI response: ACCEPTABLE — this deal would be accepted as-is"  # civ6-mcp's narrate_test_trade
     _dlog = logging.getLogger("civ_mcp_http")
 
     def _deal_field(lines, key):
@@ -242,6 +243,23 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             _dlog.warning("No answer from player %s to a trade test", other_player_id)
             out = out.replace("AI response: REJECTED", "AI response: NO ANSWER within "
                               f"{_DEAL_ANSWER_S:.0f} s, treat it as a refusal for now")
+        elif _TEST_ACCEPTABLE in out:
+            # Our terms came back unchanged, which says nothing (bench_compat.inspect_test_trade): ask the AI's check.
+            lines = await self.conn.execute_write(bc.inspect_test_trade(lua))
+            mark, verdict = _deal_field(lines, "MARK"), None
+            if mark is not None:
+                verdict, _ = await _deal_wait(self.conn, other_player_id, int(mark),
+                                              _answer_to(other_player_id, "INSPECT"))
+            if verdict == "REJECTED":
+                out = out.replace(_TEST_ACCEPTABLE, (
+                    "AI response: NOT ACCEPTABLE as-is: the AI made no counter-offer, and its check of these terms says "
+                    "no, so a proposal may be refused. Ask for less or offer more and test again; terms it calls "
+                    "ACCEPTABLE go through when sent"))
+            elif verdict != "ACCEPTED":
+                _dlog.warning("No answer from player %s to the check of a trade test (%s)", other_player_id, verdict)
+                out = out.replace(_TEST_ACCEPTABLE, (
+                    f"AI response: NO ANSWER to its check of these terms within {_DEAL_ANSWER_S:.0f} s (it made no "
+                    "counter-offer), treat it as a refusal for now"))
         return out + await _deal_finish(self.conn, other_player_id)
 
     async def _propose_trade_waits(self, other_player_id, offer_items, request_items):
