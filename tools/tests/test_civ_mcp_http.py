@@ -632,6 +632,20 @@ async def main():
     check("get_spies checks it", "DISRUPT_ROCKETRY=-1021949976" in lq.build_get_spies_query())
     check("spy_action's description names it", "DISRUPT_ROCKETRY, against a city with a Spaceport"
           in mcp._tool_manager.get_tool("spy_action").description)
+    # 29. The mission lists name the base game's missions (game 13: get_spies still listed NEUTRALIZE_GOVERNOR and
+    #     FABRICATE_SCANDAL, which the base game lacks, and not DISRUPT_ROCKETRY).
+    import civ_mcp.narrate as nar
+    from civ_mcp.lua.models import SpyInfo
+    spies_out = nar.narrate_spies([SpyInfo(unit_id=7, unit_index=7, name="Farrah", x=54, y=16, rank=1, xp=0, moves=1,
+                                           city_name="Argos", city_owner=3, available_ops=["DISRUPT_ROCKETRY"])])
+    rules_out = spies_out
+    for rx, rep in bc.OUTPUT_RULES["get_spies"]:
+        rules_out = rx.sub(rep, rules_out)
+    check("get_spies mission list rewritten", "FABRICATE_SCANDAL" in spies_out and "FABRICATE_SCANDAL" not in rules_out
+          and "DISRUPT_ROCKETRY, LISTENING_POST" in rules_out, rules_out[-400:])
+    desc = mcp._tool_manager.get_tool("spy_action").description
+    check("spy_action mission list rewritten", "NEUTRALIZE_GOVERNOR" not in desc
+          and "RECRUIT_PARTISANS, DISRUPT_ROCKETRY, LISTENING_POST" in desc, desc[:600])
 
     # 21. The popup scan skips InvitePopup, which never hides, and puts it back afterwards.
     import civ_mcp.game_lifecycle as glc

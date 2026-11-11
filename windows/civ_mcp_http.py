@@ -111,7 +111,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     import civ_mcp.lua.espionage as _esp  # noqa: E402
 
     _esp._SPY_OP_HASHES.update(bc.SPY_OPS)  # the builders read the table at call time
-    mcp._tool_manager.get_tool("spy_action").description += bc.SPY_NOTE
+    _spy = mcp._tool_manager.get_tool("spy_action")
+    _spy.description = bc.SPY_MISSION_LIST.sub(bc.SPY_MISSIONS, _spy.description) + bc.SPY_NOTE
 
     # end_turn reads blockers from the notification list, which in the base game can miss a unit that still needs
     # orders (the end-turn button says "Unit needs orders", no notification is listed). It then sends the end turn,

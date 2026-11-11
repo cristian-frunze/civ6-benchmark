@@ -74,7 +74,14 @@ _OVERVIEW_RULES = [
     (re.compile(r" \| Favor: [^|\n]*"), ""),
     (re.compile(r"^(Era: [^|\n]+?) \| Score: .*$", re.M), r"\1"),
 ]
+# civ6-mcp's list of spy missions (get_spies output, spy_action description) names two Rise and Fall missions and
+# leaves out two the base game has (its UnitOperations data, checked on the game PC).
+SPY_MISSION_LIST = re.compile(r"COUNTERSPY, GAIN_SOURCES, SIPHON_FUNDS, STEAL_TECH_BOOST,\s+SABOTAGE_PRODUCTION, "
+                              r"GREAT_WORK_HEIST, RECRUIT_PARTISANS,\s+NEUTRALIZE_GOVERNOR, FABRICATE_SCANDAL")
+SPY_MISSIONS = ("COUNTERSPY, GAIN_SOURCES, SIPHON_FUNDS, STEAL_TECH_BOOST, SABOTAGE_PRODUCTION, GREAT_WORK_HEIST, "
+                "RECRUIT_PARTISANS, DISRUPT_ROCKETRY, LISTENING_POST")
 OUTPUT_RULES = {
+    "get_spies": [(SPY_MISSION_LIST, SPY_MISSIONS)],
     "get_game_overview": _OVERVIEW_RULES,
     "get_turn_briefing": _OVERVIEW_RULES,
     "begin_standin_turn": _OVERVIEW_RULES,
