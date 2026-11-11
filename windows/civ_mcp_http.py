@@ -171,11 +171,131 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     from civ_mcp import game_state as _gsm  # noqa: E402
     from civ_mcp import lua as _lq  # noqa: E402
 
-    async def _propose_trade_no_hide(self, other_player_id, offer_items, request_items):
-        lines = await self.conn.execute_write(_lq.build_propose_trade(other_player_id, offer_items, request_items))
-        return _gsm._action_result(lines)
+    # The trade calls wait for the AI's answer before they accept or close (bench_compat.DEAL_LISTENER has why).
+    from civ_mcp.lua.diplomacy import _lua_deal_item  # noqa: E402
+    from civ_mcp.narrate import narrate_test_trade  # noqa: E402
 
-    _gsm.GameState.propose_trade = _propose_trade_no_hide
+    _DEAL_ANSWER_S = 6.0  # the AI answered within a second in the live tests
+    _dlog = logging.getLogger("civ_mcp_http")
+
+    def _deal_field(lines, key):
+        return next((ln.split("|", 1)[1] for ln in lines if ln.startswith(key + "|")), None)
+
+    async def _deal_wait(conn, target, mark, until, timeout=_DEAL_ANSWER_S):
+        """Poll the deal events after mark until until(events) returns something, or the timeout. Returns that value
+        (None on timeout) and the last STATE fields: session, pending(me,t), pending(t,me), incoming item count."""
+        t0 = asyncio.get_running_loop().time()
+        while True:
+            lines = await conn.execute_write(bc.deal_poll_lua(target, mark))
+            events = [ln[3:].split("|") for ln in lines if ln.startswith("EV|")]
+            state = (_deal_field(lines, "STATE") or "nil|false|false|0").split("|")
+            got = until(events)
+            if got is not None or asyncio.get_running_loop().time() - t0 > timeout:
+                return got, state
+            await asyncio.sleep(0.25)
+
+    def _answer_to(target, responding_to):
+        """The AI's answer (its DealAction name) to our action, from its statements."""
+        def find(events):
+            for e in events:
+                if e[0] == "S" and e[1] == str(target) and e[4] == responding_to:
+                    return e[3]
+            return None
+        return find
+
+    def _enacted_with(target):
+        return lambda events: True if any(e[0] == "E" and str(target) in (e[1], e[2]) for e in events) else None
+
+    async def _deal_finish(conn, target):
+        """Close our deal session, then make sure the civ holds no deal toward the player: an offer it opened a
+        session for is refused the way respond_to_trade refuses one. Returns a note for the agent when one is left
+        that cannot be answered (its next turn would wait on it)."""
+        await conn.execute_write(bc.deal_close_lua(target))
+        await asyncio.sleep(0.5)
+        _, state = await _deal_wait(conn, target, 10**9, lambda ev: None, timeout=0)
+        if state[2] == "true" and state[0] not in ("nil", "-1"):
+            await conn.execute_write(_lq.build_respond_to_deal(target, False))
+            await asyncio.sleep(0.5)
+            _, state = await _deal_wait(conn, target, 10**9, lambda ev: None, timeout=0)
+        if state[2] == "true":
+            _dlog.warning("Player %s still holds a deal toward the player after the trade (session %s)", target, state[0])
+            return ("\nWarning: this civ still holds a deal toward you that the game will not show, which can stall "
+                    "the AI turns; end_turn reloads the turn if they hang.")
+        return ""
+
+    async def _test_trade_waits(self, other_player_id, offer_items, request_items):
+        lua = _lq.build_test_trade(other_player_id, offer_items, request_items)
+        lines = await self.conn.execute_write(bc.mark_test_trade(lua))
+        mark = _deal_field(lines, "MARK")
+        if mark is None:  # stopped early (not met, at war): nothing was sent
+            return narrate_test_trade(_lq.parse_test_trade_response(lines))
+        answer, _ = await _deal_wait(self.conn, other_player_id, int(mark), _answer_to(other_player_id, "EQUALIZE"))
+        if answer in ("ADJUSTED", "PROPOSED", "ACCEPTED"):  # its counter-offer is the incoming deal now
+            result = _lq.parse_test_trade_response(await self.conn.execute_write(bc.reread_test_trade(lua)))
+        else:
+            result = _lq.parse_test_trade_response(lines)
+            result.counter, result.rejected = [], True
+        out = narrate_test_trade(result)
+        if answer is None:
+            _dlog.warning("No answer from player %s to a trade test", other_player_id)
+            out = out.replace("AI response: REJECTED", "AI response: NO ANSWER within "
+                              f"{_DEAL_ANSWER_S:.0f} s, treat it as a refusal for now")
+        return out + await _deal_finish(self.conn, other_player_id)
+
+    async def _propose_trade_waits(self, other_player_id, offer_items, request_items):
+        conn, target = self.conn, other_player_id
+        _, state = await _deal_wait(conn, target, 10**9, lambda ev: None, timeout=0)
+        if state[2] == "true" and state[0] not in ("nil", "-1") and state[3] != "0":
+            return ("Error: OFFER_PENDING|This civ has an offer waiting for your answer. Read it with "
+                    "get_pending_trades and answer it with respond_to_trade before you propose a deal.")
+        await conn.execute_write(bc.deal_close_lua(target))
+        items = " ".join([_lua_deal_item("me", i) for i in offer_items] + [_lua_deal_item("target", i) for i in request_items])
+        lines = await conn.execute_write(bc.deal_propose_lua(target, items))
+        err = next((ln for ln in lines if ln.startswith("ERR:")), None)
+        if err:
+            return "Error: " + err[4:]
+        name, mark = _deal_field(lines, "CIV") or f"player {target}", int(_deal_field(lines, "MARK"))
+        answer, _ = await _deal_wait(conn, target, mark, _answer_to(target, "PROPOSED"))
+        if answer == "ACCEPTED":
+            lines = await conn.execute_write(bc.deal_accept_lua(target, copy_incoming=False))
+            if _deal_field(lines, "NOT_EQUAL") is not None:
+                answer, counter = "ADJUSTED", _deal_field(lines, "NOT_EQUAL")
+            else:
+                enacted, _ = await _deal_wait(conn, target, int(_deal_field(lines, "MARK")), _enacted_with(target))
+                terms = _deal_field(lines, "TERMS")
+                result = (f"ACCEPTED|{name} accepted, and the deal is in effect: {terms}." if enacted else
+                          f"UNCLEAR|{name} accepted ({terms}), but the game did not confirm the deal. Check "
+                          f"get_empire_resources and your gold before you propose it again.")
+                return result + await _deal_finish(conn, target)
+        elif answer in ("ADJUSTED", "PROPOSED"):
+            counter = _deal_field(await conn.execute_write(bc.deal_incoming_lua(target)), "TERMS")
+        if answer in ("ADJUSTED", "PROPOSED"):
+            result = (f"COUNTER|{name} did not accept these terms; nothing was traded. It would accept: {counter}. "
+                      f"To take that, propose those terms.")
+        elif answer is None:
+            result = f"NO_ANSWER|{name} did not answer within {_DEAL_ANSWER_S:.0f} s; nothing was traded."
+        else:
+            result = f"REJECTED|{name} rejected the deal; nothing was traded."
+        return result + await _deal_finish(conn, target)
+
+    async def _respond_to_deal_waits(self, other_player_id, accept):
+        if not accept:
+            lines = await self.conn.execute_write(_lq.build_respond_to_deal(other_player_id, False))
+            return _gsm._action_result(lines) + await _deal_finish(self.conn, other_player_id)
+        lines = await self.conn.execute_write(bc.deal_accept_lua(other_player_id, copy_incoming=True))
+        err = next((ln for ln in lines if ln.startswith("ERR:")), None)
+        if err:
+            return "Error: " + err[4:]
+        enacted, _ = await _deal_wait(self.conn, other_player_id, int(_deal_field(lines, "MARK")),
+                                      _enacted_with(other_player_id))
+        terms = _deal_field(lines, "TERMS")
+        result = (f"DEAL_ACCEPTED|The deal is in effect: {terms}." if enacted else
+                  f"DEAL_UNCLEAR|Accepted ({terms}), but the game did not confirm the deal.")
+        return result + await _deal_finish(self.conn, other_player_id)
+
+    _gsm.GameState.test_trade = _test_trade_waits
+    _gsm.GameState.propose_trade = _propose_trade_waits
+    _gsm.GameState.respond_to_deal = _respond_to_deal_waits
 
     for _name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "test_trade", "send_diplomatic_action",
                   "propose_peace", "form_alliance"):
@@ -913,6 +1033,10 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             if not hangs or not isinstance(out, str):
                 return out
             turn = hangs[0].split(":")[1]
+            if len(seen) == 1 and out.startswith("HANG:"):  # civ6-mcp could not reload (no save): nothing retried
+                logging.getLogger("civ_mcp_http").warning("Turn %s hung and was not reloaded", turn)
+                return (f"The AI turns hung after you ended turn {turn}, and the game could not be reloaded "
+                        f"automatically. Use restart_and_load with the turn's save.\n\n" + out)
             logging.getLogger("civ_mcp_http").info("Told the agent that turn %s was reloaded after a hang", turn)
             retries = max(1, len(seen) - 1)  # every end turn after the first was a retry
             times = "once" if retries == 1 else f"{retries} times"

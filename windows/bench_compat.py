@@ -118,6 +118,140 @@ SPY_NOTE = (
     "start it."
 )
 
+# Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the
+# game's DiplomacyDealView waits for it before it lets the player accept). civ6-mcp did each step in one Lua call:
+# - test_trade sent EQUALIZE and closed the session at once. The AI's late answer then stayed behind as a deal of its
+#   own, pending toward the player. With terms, it was a live offer the agent took for a test; empty (an AI that will
+#   not trade), the leader screen closes its session on sight (MakeDeal_TestValid), so it can never be answered, and
+#   that civ's next turn waits on it forever. Game 12's turn 96 hung that way on Rome; replayed from its autosave it
+#   hung again, stuck on Rome's turn with only HasPendingDeal(Rome, player) set, and nothing cleared it afterwards.
+# - propose_trade sent PROPOSED and ACCEPTED together, before any answer, and reported the incoming deal left from
+#   the last test as the "actual terms". Agents saw ACCEPTED with nothing traded and REJECTED for deals that went
+#   through (game 12, turn 120), and in the replay the same Marble deal was enacted twice.
+# - respond_to_trade accepted without copying the AI's offer into the player's working deal, as the deal view does.
+# The calls below keep the session open until the answer comes, read it from the statement events, accept only
+# terms the AI accepted, and report the deal the game enacted.
+DEAL_LISTENER = (
+    "if not BENCH_DEALS then BENCH_DEALS = {n = 0} "
+    "local function bdName(a) for k, v in pairs(DealProposalAction) do if v == a then return k end end return tostring(a) end "
+    "Events.DiplomacyStatement.Add(function(f, t, kv) local d = BENCH_DEALS d.n = d.n + 1 "
+    "d[d.n] = 'S|' .. tostring(f) .. '|' .. tostring(t) .. '|' .. bdName(kv.DealAction) .. '|' .. bdName(kv.RespondingToDealAction) end) "
+    "Events.DiplomacyDealEnacted.Add(function(a, b) local d = BENCH_DEALS d.n = d.n + 1 "
+    "d[d.n] = 'E|' .. tostring(a) .. '|' .. tostring(b) end) "
+    "end "
+)
+DEAL_TERMS_FN = (
+    "local function benchTerms(d, me) local give, get = {}, {} "
+    "if d then for it in d:Items() do "
+    "local ty, amt, dur = it:GetType(), it:GetAmount() or 0, it:GetDuration() or 0 local s = 'an item' "
+    "if ty == DealItemTypes.GOLD then s = dur > 0 and (amt .. ' gold/turn (' .. dur .. ' turns)') or (amt .. ' gold') "
+    "elseif ty == DealItemTypes.RESOURCES then local r = GameInfo.Resources[it:GetValueType()] "
+    "s = (r and Locale.Lookup(r.Name) or 'a resource') .. (dur > 0 and (' (' .. dur .. ' turns)') or '') "
+    "elseif ty == DealItemTypes.AGREEMENTS then local st = it:GetSubType() "
+    "s = (st == DealAgreementTypes.OPEN_BORDERS and 'Open Borders') or (st == DealAgreementTypes.JOINT_WAR and 'Joint War') "
+    "or (st == DealAgreementTypes.ALLIANCE and 'Alliance') or 'an agreement' if dur > 0 then s = s .. ' (' .. dur .. ' turns)' end "
+    "elseif ty == DealItemTypes.FAVOR then s = amt .. ' Diplomatic Favor' "
+    "elseif ty == DealItemTypes.CITIES then s = 'a city' "
+    "elseif ty == DealItemTypes.GREATWORK then s = 'a Great Work' end "
+    "if it:GetFromPlayerID() == me then give[#give + 1] = s else get[#get + 1] = s end end end "
+    "return 'we give ' .. (#give > 0 and table.concat(give, ', ') or 'nothing') .. '; they give ' "
+    ".. (#get > 0 and table.concat(get, ', ') or 'nothing') end "
+)
+
+
+def deal_poll_lua(target: int, mark: int) -> str:
+    """Events since mark (S|from|to|action|respondingTo, E|a|b), then STATE|session|pending(me,t)|pending(t,me)."""
+    return (
+        DEAL_LISTENER + f"local me = Game.GetLocalPlayer() local t = {target} local d = BENCH_DEALS "
+        f"for i = {mark} + 1, d.n do print('EV|' .. d[i]) end "
+        "local inn = DealManager.GetWorkingDeal(DealDirection.INCOMING, me, t) "
+        "print('STATE|' .. tostring((DiplomacyManager.FindOpenSessionID(me, t))) .. '|' "
+        ".. tostring((DealManager.HasPendingDeal(me, t))) .. '|' .. tostring((DealManager.HasPendingDeal(t, me))) .. '|' "
+        ".. tostring(inn and inn:GetItemCount() or 0)) "
+        "print('---END---')"
+    )
+
+
+def deal_propose_lua(target: int, items_lua: str) -> str:
+    """Open a deal session, build the outgoing deal and send it as PROPOSED; prints CIV|name and MARK|n."""
+    return (
+        DEAL_LISTENER + f"local me = Game.GetLocalPlayer() local target = {target} "
+        "local pDiplo = Players[me]:GetDiplomacy() "
+        "if not pDiplo:HasMet(target) then print('ERR:NOT_MET|Have not met this player') print('---END---') return end "
+        "if pDiplo:IsAtWarWith(target) then print('ERR:AT_WAR|Cannot trade while at war') print('---END---') return end "
+        "print('CIV|' .. Locale.Lookup(PlayerConfigurations[target]:GetCivilizationShortDescription())) "
+        "DiplomacyManager.RequestSession(me, target, 'MAKE_DEAL') "
+        "DealManager.ClearWorkingDeal(DealDirection.OUTGOING, me, target) "
+        "local deal = DealManager.GetWorkingDeal(DealDirection.OUTGOING, me, target) "
+        "if not deal then print('ERR:NO_DEAL_OBJECT|Failed to get working deal') print('---END---') return end "
+        f"{items_lua} "
+        "print('MARK|' .. BENCH_DEALS.n) "
+        "DealManager.SendWorkingDeal(DealProposalAction.PROPOSED, me, target) "
+        "print('---END---')"
+    )
+
+
+def deal_accept_lua(target: int, copy_incoming: bool) -> str:
+    """Accept the deal in the open session: the AI's offer (copied into ours first) or our proposal it accepted.
+    Prints TERMS|..., MARK|n, or NOT_EQUAL|incoming terms when the AI changed our proposal."""
+    check = ("DealManager.CopyIncomingToOutgoingWorkingDeal(me, target) " if copy_incoming else
+             "if not DealManager.AreWorkingDealsEqual(me, target) then "
+             "print('NOT_EQUAL|' .. benchTerms(DealManager.GetWorkingDeal(DealDirection.INCOMING, me, target), me)) "
+             "print('---END---') return end ")
+    return (
+        DEAL_LISTENER + DEAL_TERMS_FN + f"local me = Game.GetLocalPlayer() local target = {target} "
+        "local sid = (DiplomacyManager.FindOpenSessionID(me, target)) "
+        "if not sid or sid < 0 then print('ERR:NO_SESSION|No deal session is open with this player') print('---END---') return end "
+        + check +
+        "print('TERMS|' .. benchTerms(DealManager.GetWorkingDeal(DealDirection.OUTGOING, me, target), me)) "
+        "print('MARK|' .. BENCH_DEALS.n) "
+        "DealManager.SendWorkingDeal(DealProposalAction.ACCEPTED, me, target) "
+        "print('---END---')"
+    )
+
+
+def deal_incoming_lua(target: int) -> str:
+    """TERMS|the AI's side of the deal in the open session (its counter-offer)."""
+    return (DEAL_TERMS_FN + f"local me = Game.GetLocalPlayer() "
+            f"print('TERMS|' .. benchTerms(DealManager.GetWorkingDeal(DealDirection.INCOMING, me, {target}), me)) "
+            "print('---END---')")
+
+
+def deal_close_lua(target: int) -> str:
+    """Close the player's deal session with target, as the deal view's Resume Game does (OnResumeGame)."""
+    return (f"local me = Game.GetLocalPlayer() local sid = (DiplomacyManager.FindOpenSessionID(me, {target})) "
+            "if sid and sid >= 0 then DiplomacyManager.CloseSession(sid) print('CLOSED|' .. sid) end "
+            "print('---END---')")
+
+
+def mark_test_trade(lua: str) -> str:
+    """civ6-mcp's test_trade Lua, with the deal listener, a MARK before its EQUALIZE, and its closing of the session
+    removed (the session is closed once the AI has answered)."""
+    send = "DealManager.SendWorkingDeal(DealProposalAction.EQUALIZE, me, target)"
+    close = ("pcall(function()\n    local sid = DiplomacyManager.FindOpenSessionID(me, target)\n"
+             "    if sid and sid >= 0 then DiplomacyManager.CloseSession(sid) end\nend)\n")
+    # The same block also closes any open session before the request; only the one after the EQUALIZE goes.
+    assert lua.count(send) == 1 and lua.count(close) == 2 and lua.rindex(close) > lua.index(send), \
+        "civ6-mcp's test_trade Lua changed"
+    head, _, tail = lua.rpartition(close)
+    lua = (head + tail).replace(send, "print('MARK|' .. BENCH_DEALS.n) " + send)
+    return DEAL_LISTENER + lua
+
+
+def reread_test_trade(lua: str) -> str:
+    """From civ6-mcp's test_trade Lua, a call that prints the same CIV, PROPOSED_ITEMS and AI_COUNTER lines for the
+    deals as they are now, without sending anything: its own read of the counter-offer comes in the same call as the
+    EQUALIZE, before the AI has answered, so it shows the deal left from the last test or none."""
+    send = "DealManager.SendWorkingDeal(DealProposalAction.EQUALIZE, me, target)\n"
+    close = ("pcall(function()\n    local sid = DiplomacyManager.FindOpenSessionID(me, target)\n"
+             "    if sid and sid >= 0 then DiplomacyManager.CloseSession(sid) end\nend)\n")
+    items = 'print("PROPOSED_ITEMS")'
+    assert lua.count(send) == 1 and lua.count(close) == 2 and lua.count(items) == 1, "civ6-mcp's test_trade Lua changed"
+    first, last = lua.index(close), lua.rindex(close)
+    return (lua[:first] + "local deal = DealManager.GetWorkingDeal(DealDirection.OUTGOING, me, target)\n"
+            + lua[lua.index(items):last].replace(send, "") + lua[last + len(close):])
+
+
 # When civ6-mcp closes an AI-opened diplomacy session itself (DiplomacyManager.CloseSession, as in its "goodbye
 # phase" auto-close), the leader screen can stay up in its overview mode. While it is up, the AI turns never finish:
 # game 1 waited 10 minutes on turn 92, reloaded the turn, and stalled again until the screen was closed by hand. A

@@ -56,13 +56,61 @@ class Conn:
         if "UI.CanEndTurn" in lua: return ["CANNOT_END", lq.SENTINEL]
         if "UNITS_BLOCK" in lua: return [lq.SENTINEL]
         if "ACTION_ENDTURN" in lua: self.endturn_sent += 1
-        if "build_propose_trade" in lua or "SendWorkingDeal" in lua: return ["OK:ACCEPTED|Trade accepted with Spain", lq.SENTINEL]
+        if any(k in lua for k in ("BENCH_DEALS", "CLOSED|", "TERMS|", "DEAL_REJECTED", "PROPOSED_ITEMS")):
+            return self.deal(lua)
+        return [lq.SENTINEL]
+    # The trade protocol: the AI answers a proposal or a test in a later statement event, and a deal it accepts
+    # is enacted after the player's ACCEPTED (an E event).
+    deal_answer, deal_enacts, deal_leftover = "ACCEPTED", True, None  # leftover: None, "session" or "hidden"
+    test_answer = "ADJUSTED"
+    def deal(self, lua):
+        import re as _re
+        self.deal_log = getattr(self, "deal_log", [])
+        self.deal_ev = getattr(self, "deal_ev", [])
+        if "for i = " in lua and "EV|" in lua:  # poll
+            self.deal_log.append("poll")
+            mark = int(_re.search(r"for i = (\d+) \+ 1", lua).group(1))
+            evs = [f"EV|{e}" for i, e in enumerate(self.deal_ev, 1) if i > mark]
+            closed = "close" in self.deal_log
+            st = {None: "nil|false|false|0", "session": "3|false|true|2", "hidden": "nil|false|true|0"}
+            state = st[self.deal_leftover] if closed else "3|false|false|0"
+            return evs + [f"STATE|{state}", lq.SENTINEL]
+        if "DealProposalAction.PROPOSED" in lua:
+            self.deal_log.append("propose")
+            mark = len(self.deal_ev)
+            if self.deal_answer: self.deal_ev.append(f"S|7|0|{self.deal_answer}|PROPOSED")
+            return ["CIV|Spain", f"MARK|{mark}", lq.SENTINEL]
+        if "DealProposalAction.EQUALIZE" in lua:  # the game: its counter is read before the AI answers (stale)
+            self.deal_log.append("test")
+            mark = len(self.deal_ev)
+            if self.test_answer: self.deal_ev.append(f"S|7|0|{self.test_answer}|EQUALIZE")
+            return ["CIV|7|Spain", "PROPOSED_ITEMS", "ITEM|US|RESOURCE|1|30|5|", f"MARK|{mark}", "AI_COUNTER",
+                    "ITEM|THEM|GOLD|93|0||", lq.SENTINEL]
+        if "PROPOSED_ITEMS" in lua:  # read again after the answer
+            self.deal_log.append("reread")
+            return ["CIV|7|Spain", "PROPOSED_ITEMS", "ITEM|US|RESOURCE|1|30|5|", "AI_COUNTER",
+                    "ITEM|THEM|GOLD|100|0||", lq.SENTINEL]
+        if "DealProposalAction.ACCEPTED" in lua and "TERMS|" in lua:
+            self.deal_log.append("accept-copy" if "CopyIncomingToOutgoingWorkingDeal" in lua else "accept")
+            mark = len(self.deal_ev)
+            if self.deal_enacts: self.deal_ev.append("E|7|0")
+            return ["TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
+        if "TERMS|" in lua:
+            self.deal_log.append("incoming"); return ["TERMS|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
+        if "CLOSED|" in lua:
+            self.deal_log.append("close"); return [lq.SENTINEL]
+        if "DEAL_REJECTED" in lua:
+            self.deal_log.append("reject")
+            if self.deal_leftover == "session": self.deal_leftover = None
+            return ["OK:DEAL_REJECTED|Spain", lq.SENTINEL]
         return [lq.SENTINEL]
 
 from civ_mcp.game_state import GameState
 class Game:
     _build_turn_report = GameState.__dict__["_build_turn_report"]
-    propose_trade = GameState.__dict__["propose_trade"]  # the wrapper's version
+    propose_trade = GameState.__dict__["propose_trade"]  # the wrapper's versions
+    test_trade = GameState.__dict__["test_trade"]
+    respond_to_deal = GameState.__dict__["respond_to_deal"]
     def __init__(self, turn, pending_from=None, advance_on_poll=None):
         self.conn = Conn(turn, advance_on_poll)
         self._run_aborted = False
@@ -183,7 +231,7 @@ async def main():
 
     # 9. Trades: propose_trade no longer hides the diplomacy screen (that kept its engine lock), and the
     #    leader-screen check closes it after the trade.
-    check("GameState.propose_trade replaced", GameState.propose_trade is ns["_propose_trade_no_hide"])
+    check("GameState.propose_trade replaced", GameState.propose_trade is ns["_propose_trade_waits"])
     tool = mcp._tool_manager.get_tool("propose_trade")
     GAME = Game(turn=207); GAME.conn.view = "visible"
     out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
@@ -194,6 +242,72 @@ async def main():
     GAME = Game(turn=207); GAME.conn.view = "stuck"
     await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
     check("a screen that will not close: 3 attempts", GAME.conn.leader_checks == 3, GAME.conn.leader_checks)
+
+    # 30. Trades wait for the AI's answer (game 12's turn-96 hang, replayed live: a test closed before the AI
+    #     answered left Rome holding a deal it could never deliver, and its turn waited on it forever).
+    ns["_deal_wait"].__defaults__ = (0.6,)  # the no-answer case waits this long instead of 6 s
+    def trade(**conn_attrs):
+        g = Game(turn=96)
+        for k, v in conn_attrs.items(): setattr(g.conn, k, v)
+        return g
+    GAME = trade()
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    log = GAME.conn.deal_log
+    check("accepted: reports the enacted deal", out.startswith("ACCEPTED|Spain accepted, and the deal is in effect: we give Coal"), out)
+    check("accepted: ACCEPTED sent only after the answer", log.index("accept") > log.index("propose") + 1
+          and log[log.index("accept") - 1] == "poll", log)
+    check("accepted: session closed after", log[-2:] == ["close", "poll"] or "close" in log[log.index("accept"):], log)
+    GAME = trade(deal_answer="ADJUSTED")
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("counter-offer: not accepted, terms shown", out.startswith("COUNTER|Spain did not accept") and "they give 40 gold" in out
+          and "accept" not in GAME.conn.deal_log, (out, GAME.conn.deal_log))
+    GAME = trade(deal_answer="REJECTED")
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("rejected", out.startswith("REJECTED|Spain rejected") and "accept" not in GAME.conn.deal_log, out)
+    GAME = trade(deal_answer=None)
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("no answer: nothing accepted", out.startswith("NO_ANSWER|") and "accept" not in GAME.conn.deal_log, out)
+    GAME = trade(deal_enacts=False)
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("accepted but not enacted: says so", out.startswith("UNCLEAR|"), out)
+    GAME = trade(deal_leftover="session")
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("an offer the AI opens afterwards is refused", "reject" in GAME.conn.deal_log and "Warning" not in out,
+          (GAME.conn.deal_log, out))
+    GAME = trade(deal_leftover="hidden")
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("a deal that cannot be answered is named", "Warning: this civ still holds a deal" in out, out)
+    GAME = trade(); GAME.conn.deal_leftover = "session"; GAME.conn.deal_log = ["close"]  # an AI offer is waiting
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("an AI offer waiting: answer it first", out.startswith("Error: OFFER_PENDING") and "propose" not in GAME.conn.deal_log, out)
+    # The test: civ6-mcp's own Lua and report, without its immediate close; the session closes after the answer.
+    lua = ns["bc"].mark_test_trade(lq.build_test_trade(7, [{"type": "RESOURCE", "name": "RESOURCE_COAL", "amount": 1, "duration": 30}], []))
+    check("test Lua: marks before EQUALIZE, no close of its own", lua.index("MARK|") < lua.index("DealProposalAction.EQUALIZE")
+          and "CloseSession" not in lua[lua.index("DealProposalAction.EQUALIZE"):], lua[-300:])
+    GAME = trade()
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
+    log = GAME.conn.deal_log
+    check("test: the counter-offer read after the answer", "AI counter-offer" in out and "100" in out
+          and "93" not in out and log[:3] == ["test", "poll", "reread"], (out, log))
+    check("test: closed after the AI answered", log.index("close") > log.index("reread"), log)
+    rr = ns["bc"].reread_test_trade(lq.build_test_trade(7, [{"type": "RESOURCE", "name": "RESOURCE_COAL", "amount": 1, "duration": 30}], []))
+    check("test re-read Lua sends and closes nothing", "SendWorkingDeal" not in rr and "CloseSession" not in rr
+          and "RequestSession" not in rr and "AI_COUNTER" in rr and rr.rstrip().endswith(f'print("{lq.SENTINEL}")'), rr[-200:])
+    for ans, want in (("REJECTED", "REJECTED"), (None, "NO ANSWER")):
+        GAME = trade(test_answer=ans)
+        out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
+        check(f"test answered {ans}: {want}, no stale counter", f"AI response: {want}" in out and "93" not in out
+              and "reread" not in GAME.conn.deal_log, out)
+    # respond_to_trade: the AI's offer is copied into the player's deal before ACCEPTED, as the deal view does.
+    rtool = mcp._tool_manager.get_tool("respond_to_trade")
+    GAME = trade()
+    out = await rtool.fn(CTX, other_player_id=7, accept=True)
+    check("accept an AI offer: copied, then accepted", GAME.conn.deal_log[0] == "accept-copy" and out.startswith("DEAL_ACCEPTED|"), (GAME.conn.deal_log, out))
+    acc = ns["bc"].deal_accept_lua(7, copy_incoming=True)
+    check("accept Lua copies before it sends", acc.index("CopyIncomingToOutgoingWorkingDeal") < acc.index("DealProposalAction.ACCEPTED"))
+    GAME = trade()
+    out = await rtool.fn(CTX, other_player_id=7, accept=False)
+    check("refuse an AI offer", out.startswith("DEAL_REJECTED|Spain"), out)
     # Every tool's outermost wrapper binds the call log (_bound_first); the one inside it is checked.
     bound = ns["_bound_first"](stock).__code__
     for name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "send_diplomatic_action",
@@ -237,6 +351,12 @@ async def main():
     steps = ["Turn 5 -> 6"]
     out = await ns["_hang_note"](recovering)(ctx=CTX)
     check("no note without a hang", out == "Turn 5 -> 6", repr(out))
+    # civ6-mcp finds no save to reload (as in the live trade-hang replay): it returns the hang as is, nothing undone.
+    steps = ["HANG:96:0_MCP_0096|End turn requested but turn did not advance"]
+    async def no_save(ctx=None): return await GameState.end_turn(GAME)
+    out = await ns["_hang_note"](no_save)(ctx=CTX)
+    check("hang with no reload: says so, claims no reload", "could not be reloaded automatically" in out
+          and "was undone" not in out and out.endswith("did not advance"), repr(out[:200]))
 
     # 11. Move-and-attack: civ6-mcp reads the unit's tile before the order runs and always says STOPPED_SHORT. The
     #     wrapper reads the unit and the target tile again until the order has played out.
