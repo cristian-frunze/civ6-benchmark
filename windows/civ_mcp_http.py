@@ -224,6 +224,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             _dlog.warning("Player %s still holds a deal toward the player after the trade (session %s)", target, state[0])
             return ("\nWarning: this civ still holds a deal toward you that the game will not show, which can stall "
                     "the AI turns; end_turn reloads the turn if they hang.")
+        # Nothing is pending: empty the working deals, or the next statement this civ makes shows them as its offer.
+        await conn.execute_write(bc.deal_clear_lua(target))
         return ""
 
     async def _test_trade_waits(self, other_player_id, offer_items, request_items):

@@ -56,7 +56,7 @@ class Conn:
         if "UI.CanEndTurn" in lua: return ["CANNOT_END", lq.SENTINEL]
         if "UNITS_BLOCK" in lua: return [lq.SENTINEL]
         if "ACTION_ENDTURN" in lua: self.endturn_sent += 1
-        if any(k in lua for k in ("BENCH_DEALS", "CLOSED|", "TERMS|", "DEAL_REJECTED", "PROPOSED_ITEMS")):
+        if any(k in lua for k in ("BENCH_DEALS", "CLOSED|", "TERMS|", "DEAL_REJECTED", "PROPOSED_ITEMS", "CLEARED")):
             return self.deal(lua)
         return [lq.SENTINEL]
     # The trade protocol: the AI answers a proposal or a test in a later statement event, and a deal it accepts
@@ -107,6 +107,8 @@ class Conn:
             return ["TERMS|we give Coal (30 turns); they give 100 gold", f"MARK|{mark}", lq.SENTINEL]
         if "TERMS|" in lua:
             self.deal_log.append("incoming"); return ["TERMS|we give Coal (30 turns); they give 40 gold", lq.SENTINEL]
+        if "CLEARED" in lua:
+            self.deal_log.append("clear"); return ["CLEARED", lq.SENTINEL]
         if "CLOSED|" in lua:
             self.deal_log.append("close"); return [lq.SENTINEL]
         if "DEAL_REJECTED" in lua:
@@ -321,8 +323,25 @@ async def main():
         out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
         log = GAME.conn.deal_log
         check(f"test, terms unchanged, check {verdict}: {want.split(': ')[1]}", want in out and log.count("inspect") == 1
-              and log.index("inspect") > log.index("reread") and log[-1] == "poll" and "close" in log[log.index("inspect"):],
+              and log.index("inspect") > log.index("reread") and log[-2:] == ["poll", "clear"] and "close" in log[log.index("inspect"):],
               (out, log))
+    # A finished trade call empties the working deals (game 15: Egypt's refused test deal on turn 95 came back as
+    # "Deal from Egypt" with three later statements, and the agent accepted it each time), but never under a session
+    # or a deal the civ still holds.
+    GAME = trade(test_answer="REJECTED")
+    out = await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100, mode="test")
+    log = GAME.conn.deal_log
+    check("test refused: working deals emptied after the close", log[-1] == "clear" and log.index("clear") > log.index("close"), log)
+    GAME = trade(deal_answer="REJECTED")
+    await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("proposal refused: working deals emptied", GAME.conn.deal_log[-1] == "clear", GAME.conn.deal_log)
+    GAME = trade(deal_leftover="hidden")
+    await tool.fn(CTX, other_player_id=7, offer_resources="RESOURCE_COAL", request_gold=100)
+    check("a deal the civ still holds: working deals kept", "clear" not in GAME.conn.deal_log, GAME.conn.deal_log)
+    clr = ns["bc"].deal_clear_lua(7)
+    check("clear Lua: both directions, only with no session and no pending deal", clr.count("ClearWorkingDeal") == 2
+          and "DealDirection.INCOMING" in clr and "DealDirection.OUTGOING" in clr
+          and clr.index("FindOpenSessionID") < clr.index("ClearWorkingDeal") and "HasPendingDeal(t, me)" in clr, clr)
     # respond_to_trade: the AI's offer is copied into the player's deal before ACCEPTED, as the deal view does.
     rtool = mcp._tool_manager.get_tool("respond_to_trade")
     GAME = trade()

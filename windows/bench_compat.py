@@ -229,6 +229,19 @@ def deal_close_lua(target: int) -> str:
             "print('---END---')")
 
 
+def deal_clear_lua(target: int) -> str:
+    """Empty the player's two working deals with target once a trade call is over (CLEARED), unless a session is open
+    or the civ holds a deal toward the player (KEPT). civ6-mcp lists the incoming working deal with every session a
+    civ opens, statements too, and a closed session leaves it filled: in game 15 the Coffee-for-100-gold test Egypt
+    refused on turn 95 came back as 'Deal from Egypt' with its agenda complaint on turn 100, 'you settle too close'
+    on turn 106 and a denouncement on turn 114. The agent accepted it all three times, and no gold came."""
+    return (f"local me = Game.GetLocalPlayer() local t = {target} local sid = (DiplomacyManager.FindOpenSessionID(me, t)) "
+            "if (sid and sid >= 0) or DealManager.HasPendingDeal(t, me) then print('KEPT') else "
+            "DealManager.ClearWorkingDeal(DealDirection.INCOMING, me, t) "
+            "DealManager.ClearWorkingDeal(DealDirection.OUTGOING, me, t) print('CLEARED') end "
+            "print('---END---')")
+
+
 def mark_test_trade(lua: str) -> str:
     """civ6-mcp's test_trade Lua, with the deal listener, a MARK before its EQUALIZE, and its closing of the session
     removed (the session is closed once the AI has answered)."""
