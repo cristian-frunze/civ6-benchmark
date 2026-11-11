@@ -44,7 +44,8 @@ LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only"
           "g10-fixed-harness": "Game 10, game 3 on the fixed harness",
           "g11-fable-fixed": "Game 11, Fable 5.1 on the fixed harness",
           "g12-fable52-fixed": "Game 12, Fable 5.2 on the fixed harness",
-          "g13-sonnet-fixed": "Game 13, Sonnet 5.5 on the fixed harness"}
+          "g13-sonnet-fixed": "Game 13, Sonnet 5.5 on the fixed harness",
+          "g14-fable52-repeat": "Game 14, Fable 5.2 again, trade fixes"}
 
 
 def _rows(path: Path) -> list[dict]:
@@ -156,7 +157,7 @@ const G = __DATA__;
 // fixed harness) share its aqua, dashed and dotted, and the Fable games share one hue (5.2 dashed); the 8-hue palette
 // never cycles.
 const STYLE = {"g1-standard":[1],"g2-baseline":[2],"g3-science":[3],"g4-domination":[4],"g5-deity-science":[5],
-  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"]};
+  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"],"g14-fable52-repeat":[8,"8 3 2 3"]};
 const st = i => STYLE[G[i].id] || [i % 8 + 1], col = i => `var(--s${st(i)[0]})`;
 const dash = i => st(i)[1] ? ` stroke-dasharray="${st(i)[1]}"` : "";
 const fmt = (n, d=0) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
