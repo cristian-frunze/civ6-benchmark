@@ -49,7 +49,7 @@ Fable 5.2 played tall: 5 cities at turn 100 and 7 at the end, as many as game 9 
 | Output tokens / thinking characters | 468K / 304K | 323K / 215K | 602K / 365K | 564K / 387K |
 | Wall clock (median per turn) | 6.0 h of play (84 s) | 5.5 h (62 s) | 6.7 h (94 s) | 6.5 h (104 s) |
 
-Fable 5.2 was not ahead early. At turn 100 it had the lowest score of the four and the fewest cities, and its tech count matched the others. The gap opened between turns 100 and 150, when its science grew to 332 per turn, about 100 more than any other game at that turn. It spent more tokens per turn than Fable 5.1 (6.1 requests per turn against 4.0 to 4.5), and at its lower prices the whole game cost less than either Fable 5.1 game. Games 9 and 11 (the same model and setup: one won on turn 203, the other lost on turn 209) show how far one run can swing, so one game cannot rank Fable 5.2 over the others. A repeat would tell.
+Fable 5.2 was not ahead early. At turn 100 it had the lowest score of the four and the fewest cities, and its tech count matched the others. The gap opened between turns 100 and 150, when its science grew to 332 per turn, about 100 more than any other game at that turn. It spent more tokens per turn than Fable 5.1 (6.1 requests per turn against 4.0 to 4.5), and at its lower prices the whole game cost less than either Fable 5.1 game. Games 9 and 11 (the same model and setup: one won on turn 203, the other lost on turn 209) show how far one run can swing, so one game cannot rank Fable 5.2 over the others. [Game 14](../g14-fable52-repeat/) repeated this game and won on turn 168, 1st in score.
 
 ## The harness in this game
 
