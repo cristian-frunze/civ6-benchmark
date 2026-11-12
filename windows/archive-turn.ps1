@@ -38,9 +38,14 @@ $last = ''; $active = Get-Date
 while (((Get-Date) - $active).TotalMinutes -lt 15) {
     try {
         $req = Get-Content (Join-Path $bench 'archive\request.json') -Raw | ConvertFrom-Json   # re-read: the next game reuses this loop
-        $turn = (Get-Content $hb -Raw | ConvertFrom-Json).turn
+        $beat = Get-Content $hb -Raw | ConvertFrom-Json
+        $turn = $beat.turn
         $key = "$($req.game)/$turn"
-        if ("$turn" -match '^\d+$' -and $key -ne $last) {
+        # Only the requested game's heartbeat counts. Game 18 started 7 minutes after game 17, while the heartbeat
+        # still read game 17's last turn: its folder got a T0170 shot at once, tools/archive.py took that name as
+        # its watermark, and turns 1 to 169 were never synced.
+        $same = (-not $beat.run_id) -or ($beat.run_id -eq $req.game)
+        if ("$turn" -match '^\d+$' -and $key -ne $last -and $same) {
             $dir = Join-Path $bench ("archive\" + $req.game)
             New-Item -ItemType Directory -Force -Path (Join-Path $dir 'shots'), (Join-Path $dir 'saves') | Out-Null
             Save-Turn $dir ([int]$turn) $req.since
