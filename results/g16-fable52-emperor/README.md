@@ -58,7 +58,7 @@ From the server log and the agent's tool results:
 - **Trade tests**: 30 on turns 70, 80, 83, 84, 86 and 129: 5 `ACCEPTABLE`, 17 `NOT ACCEPTABLE as-is`, 6 `REJECTED` and 2 with no answer (both Brazil). It then sent 5 proposals: Open Borders to Brazil, Horses to America for 148 gold and Citrus to Germany for 163 gold were accepted, and Horses to Brazil was refused twice.
 - **Leader screens**: the harness closed a leader screen left open after a diplomacy answer 52 times, and left one alone 30 times because a diplomacy session was still open.
 - **Diplomacy-pause trap** (`tools/turn_trap.py`): 46 pauses; 25 times the game had already moved to the next turn, and 2 of those turns ended with no unit order.
-- **Moves** said "arrived with no moves left" 80 times, and no move-and-attack stopped short. **Auto-explore** was sent again 30 times, and `skip_remaining_units` left units with orders of their own alone in all 127 of its calls.
+- **Moves** said "arrived with no moves left" 80 times, and no move-and-attack stopped short. **Auto-explore** was sent again 32 times, and `skip_remaining_units` left units with orders of their own alone in all 127 of its calls.
 - **Spies**: 2 `STEAL_TECH_BOOST` missions against Greece and 2 `DISRUPT_ROCKETRY` missions against its spaceports went out; one more was refused because the spy had not reached the city yet.
 
 ## Files
