@@ -568,6 +568,138 @@ async def main():
     check("upgrade", msgs.get("Your Slinger (UNIT_SLINGER) was upgraded and has a new id (last seen at (44,44)).") == 3)
     check("cleared after the report", ns["_SPENT"] == {}, ns["_SPENT"])
 
+    # 16b. A spy that travelled has a new id: not "killed" (game 19, turns 197 and 203).
+    before = TurnSnapshot(turn=196, units={10: U(10, "Raheem", "UNIT_SPY", 39, 33), 11: U(11, "Uday", "UNIT_SPY", 39, 33),
+                                           12: U(12, "Warrior", "UNIT_WARRIOR", 40, 40)},
+                          cities={}, current_research="", current_civic="")
+    after = TurnSnapshot(turn=197, units={20: U(20, "Raheem", "UNIT_SPY", 50, 30)}, cities={}, current_research="",
+                         current_civic="")
+    msgs = {e.message: e.priority for e in GameState._diff_snapshots(before, after)}
+    check("spy listed again under its name: moved, new id",
+          msgs.get("Your spy Raheem moved from (39,33) to (50,30) and has a new id, 20.") == 2, msgs)
+    check("spy not listed: not called killed, get_spies named",
+          any(m.startswith("Your spy Uday is no longer listed") and "get_spies" in m for m in msgs)
+          and not any("Uday (UNIT_SPY) was killed" in m for m in msgs), msgs)
+    check("other units are still 'killed'", msgs.get("Your Warrior (UNIT_WARRIOR) was killed! Last seen at (40,40).") == 1)
+
+    # 16c. Spy travel: the game's reasons instead of "Allied civ cities are not valid" (game 19, 3 refusals).
+    bc = ns["bc"]
+    check("spy travel builder replaced", lq.build_spy_travel is bc.spy_travel_lua)
+    lua = lq.build_spy_travel(19, 57, 14)
+    check("spy travel: same op and params as civ6-mcp's",
+          "UNITOPERATION_SPY_TRAVEL_NEW_CITY" in lua and bc.op_hash("UNITOPERATION_SPY_TRAVEL_NEW_CITY") == -1295211657
+          and "PARAM_X0] = x" in lua and "GetUnit(me, 19)" in lua and "local x, y = 57, 14" in lua)
+    check("spy travel: refusal gives reasons, moves and the city", "res[UnitOperationResults.FAILURE_REASONS]" in lua and "GetMovesRemaining" in lua
+          and "Cities.GetPlotPurchaseCity(x, y)" in lua and "Allied civ" not in lua)
+    spy_doc = mcp._tool_manager.get_tool("spy_action").description
+    check("spy_action description: other civs' cities are targets",
+          "other civs' cities" in spy_doc and "Allied civ cities are NOT" not in spy_doc
+          and "own cities and city-states only" not in spy_doc and "queued end-of-turn" in spy_doc, spy_doc[-700:])
+    out = bc.filter_output("  Travel: spy_action(unit_id, action='travel', target_x, target_y) — send spy to own city "
+                           "or city-state", bc.OUTPUT_RULES["get_spies"])
+    check("get_spies: travel line fixed", out.endswith("send spy to a city: your own, a city-state's or another civ's"), out)
+
+    # 16d. Pillage: unit_action sends the game's own order and reads the tile back.
+    ua = mcp._tool_manager.get_tool("unit_action")
+    check("unit_action description names pillage", "pillage = pillage what is on the unit's own tile" in ua.description)
+    lua = bc.pillage_lua(7, "UNITOPERATION_PILLAGE")
+    check("pillage: the game's op on the unit's tile, reasons on refusal",
+          "UnitOperations['UNITOPERATION_PILLAGE']" in lua and "PARAM_X] = x" in lua and "res[UnitOperationResults.FAILURE_REASONS]" in lua
+          and "RequestOperation(unit, op.Hash, params)" in lua and "OK:PILLAGE_SENT" in lua)
+    check("pillage tile read: districts, buildings, improvement, road",
+          all(k in bc.pillage_tile_lua(7) for k in ("IsImprovementPillaged", "d:IsPillaged()", "IsPillaged(b.Index)",
+                                                     "IsRoutePillaged")))
+    class PillageConn:
+        def __init__(self, tiles): self.tiles, self.sent = list(tiles), []
+        async def execute_write(self, lua, timeout=None):
+            if "PILLAGE_SENT" in lua:
+                self.sent.append(lua); return ["OK:PILLAGE_SENT|50|28", lq.SENTINEL]
+            return [self.tiles.pop(0) if len(self.tiles) > 1 else self.tiles[0], lq.SENTINEL]
+    saved = GAME
+    GAME = types.SimpleNamespace(conn=PillageConn(["TILE|50|28|2|DISTRICT_SPACEPORT=intact",
+                                                    "TILE|50|28|0|DISTRICT_SPACEPORT=pillaged,ROAD=intact"]))
+    out = await ua.fn(CTX, unit_id=65543, action="pillage")
+    check("pillage: reports the tile once it reads pillaged", out.startswith("PILLAGE_SENT|pillage at (50,28)")
+          and "DISTRICT_SPACEPORT=pillaged, ROAD=intact" in out and "moves left: 0" in out
+          and "GetUnit(me, 7)" in GAME.conn.sent[0], out)
+    class RefuseConn:
+        async def execute_write(self, lua, timeout=None):
+            return ["ERR:CANNOT_PILLAGE|The game refused UNITOPERATION_PILLAGE_ROUTE at (1,2): no road. The unit has 1 moves left.",
+                    lq.SENTINEL]
+    GAME = types.SimpleNamespace(conn=RefuseConn())
+    out = await ua.fn(CTX, unit_id=7, action="pillage_route")
+    check("pillage refused: the game's reasons", out.startswith("Error: CANNOT_PILLAGE|") and "no road" in out, out)
+    GAME = saved
+    seen_actions = []
+    async def inner(ctx=None, unit_id=None, action=None, **k):
+        seen_actions.append(action); return "FORTIFIED"
+    out = await ns["_pillages"](inner)(ctx=CTX, unit_id=7, action="fortify")
+    check("other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
+
+    # 16f. A dropped end-turn request is sent again (game 19, turn 86, replayed: the turn stayed open, nothing blocked
+    #      it, and a second request ended it at once).
+    check("end-turn Lua is marked for the watcher", lq.build_end_turn().startswith(ns["_END_TURN_MARK"])
+          and "UI.RequestAction(ActionTypes.ACTION_ENDTURN)" in lq.build_end_turn())
+    class WatchConn:
+        def __init__(self, states, resend="RESENT"):
+            self.states, self.resend, self.resent, self.sent = list(states), resend, 0, []
+        async def execute_read(self, lua, timeout=None):
+            turn, active = self.states[0] if len(self.states) == 1 else self.states.pop(0)
+            if "TURN|" in lua: return [f"TURN|{turn}", lq.SENTINEL]
+            if "IsTurnActive" in lua: return [f"ACTIVE|{str(active).lower()}", lq.SENTINEL]
+            return [lq.SENTINEL]
+    saved_write = ns["_original_conn_write"]
+    async def fake_write(conn, lua, *a, **k):
+        conn.sent.append(lua)
+        if lua == ns["_RESEND_LUA"]:
+            conn.resent += 1
+            if conn.resend == "RESENT": conn.states = [(86, False)]  # the second request takes
+            return [conn.resend, lq.SENTINEL]
+        return ["OK:TURN_ENDED", lq.SENTINEL]
+    ns["_original_conn_write"] = fake_write
+    try:
+        # dropped: turn 86 stays open through both checks, then the resend ends it
+        c = WatchConn([(86, True)] * 4)
+        check("dropped request: sent again once", await ns["_resend_if_dropped"](c, 86) == 1 and c.resent == 1, c.resent)
+        # taken: the AI civs are moving (player's turn inactive)
+        c = WatchConn([(86, False)])
+        check("request taken: nothing sent", await ns["_resend_if_dropped"](c, 86) == 0 and c.sent == [])
+        # a fast turn: the number changed and turn 87 is active; never end the new turn
+        c = WatchConn([(87, True)])
+        check("next turn already open: nothing sent", await ns["_resend_if_dropped"](c, 86) == 0 and c.sent == [])
+        # a blocker holds the turn: asked once, nothing resent
+        c = WatchConn([(86, True)], resend="BLOCKED")
+        check("blocked turn: no request sent", await ns["_resend_if_dropped"](c, 86) == 0 and c.resent == 1)
+        check("resend asks the game's own end-turn checks first", "UI.CanEndTurn()" in ns["_RESEND_LUA"]
+              and "NO_ENDTURN_BLOCKING" in ns["_RESEND_LUA"])
+        # the connection wrapper reads the turn before the request, then watches
+        c = WatchConn([(86, True), (86, False)])
+        out = await ns["_write_watching_end_turn"](c, lq.build_end_turn())
+        await asyncio.gather(*list(ns["_WATCHERS"]))
+        check("end-turn write: sent once, watcher saw the AI move", out[0] == "OK:TURN_ENDED" and c.resent == 0
+              and len(c.sent) == 1, c.sent)
+        c = WatchConn([(86, True)])
+        await ns["_write_watching_end_turn"](c, "print('x')")
+        check("other writes are not watched", not ns["_WATCHERS"] and c.sent == ["print('x')"])
+    finally:
+        ns["_original_conn_write"] = saved_write
+
+    # 16e. The second hang of one turn names the save of the turn before (game 19, turn 86: 4 hangs).
+    ns["_HANGS"].clear()
+    async def hang_once(ctx=None):
+        r = await GameState.end_turn(GAME)
+        while r.startswith("HANG:"): r = await GameState.end_turn(GAME)
+        return r
+    notes = []
+    for _ in range(2):
+        steps = ["HANG:86:0_MCP_0086|x", "Cannot end turn — resolve these blockers: units"]
+        async def scripted2(self): return steps.pop(0)
+        ns["_original_gs_end_turn"] = scripted2
+        notes.append(await ns["_hang_note"](hang_once)(ctx=CTX))
+    check("first hang of a turn: no advice to go back", "load_game_save" not in notes[0], notes[0][:300])
+    check("second hang: load the turn before", 'load_game_save("0_MCP_0085"), then play turn 85 again' in notes[1]
+          and "Turn 86 has now hung 2 times" in notes[1], notes[1][:900])
+
     # 17. Unrevealed resources stay hidden in get_cities, get_builder_tasks and the wonder advisor.
     for name, lua in (("cities", lq.build_cities_query()), ("builder tasks", lq.build_builder_tasks_query()),
                       ("wonder advisor", lq.build_wonder_advisor_query(65536, "BUILDING_PYRAMIDS"))):

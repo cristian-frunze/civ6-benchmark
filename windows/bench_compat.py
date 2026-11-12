@@ -118,6 +118,134 @@ SPY_NOTE = (
     "start it."
 )
 
+# Spy travel. civ6-mcp says a spy can travel only to the player's own cities and city-states ("Allied civ cities are
+# NOT valid travel targets", in spy_action's description and get_spies), and answers every refusal with "Allied civ
+# cities are not valid; only own cities and city-states". In game 19 spies travelled to Greek and Spanish cities, and
+# none of the three refusals was about an ally: a spy bought that turn (turn 150), a spy just back from a mission, and
+# Madrid while Spain was a friend. The travel below asks the game for its reasons and says what is at the target.
+SPY_TRAVEL_DOC = (re.compile(r"Travel notes:\n(?:\s*- [^\n]*\n){3}"),
+                  "Travel notes:\n        - Targets: your own cities, city-states and other civs' cities. If the game "
+                  "refuses, the error gives its reasons and the spy's moves left.\n"
+                  "        - Travel is queued end-of-turn; spy position updates after turn ends.\n")
+OUTPUT_RULES["get_spies"].append((re.compile(r" — send spy to own city or city-state"),
+                                  " — send spy to a city: your own, a city-state's or another civ's"))
+
+
+# The reasons the game gives for refusing a unit operation. CanStartOperation(..., true) returns them keyed by
+# UnitOperationResults.FAILURE_REASONS (a hash), next to ADDITIONAL_DESCRIPTION ("Yields 125 Science" on a Spaceport),
+# not under a FailureReasons field: read that way, game 19's refused pillage said "it gave no reason" where the game
+# said "Not enough movement points left."
+_WHY_LUA = (
+    "local why = {} "
+    "if ok and type(res) == 'table' then "
+    "  local fr = (UnitOperationResults and res[UnitOperationResults.FAILURE_REASONS]) or res.FailureReasons "
+    "  if type(fr) == 'table' then for _, r in ipairs(fr) do why[#why + 1] = (string.gsub(Locale.Lookup(tostring(r)), '%.%s*$', '')) end end "
+    "end "
+)
+
+
+def spy_travel_lua(unit_index: int, x: int, y: int) -> str:
+    """civ6-mcp's spy travel (UNITOPERATION_SPY_TRAVEL_NEW_CITY), which on a refusal reports the game's failure reasons,
+    the spy's moves left and the city at the target instead of a guess."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local entry = GameInfo.Units[unit:GetType()] "
+        "if not entry or entry.UnitType ~= 'UNIT_SPY' then print('ERR:NOT_A_SPY') print('---END---') return end "
+        f"local x, y = {int(x)}, {int(y)} "
+        "local op = GameInfo.UnitOperations['UNITOPERATION_SPY_TRAVEL_NEW_CITY'] "
+        "local params = {[UnitOperationTypes.PARAM_X0] = x, [UnitOperationTypes.PARAM_Y0] = y} "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op.Hash, nil, params, true) end) "
+        "if ok and can then "
+        "  UnitManager.RequestOperation(unit, op.Hash, params) "
+        "  print('OK:SPY_TRAVEL|Spy en route to (' .. x .. ',' .. y .. '). Travel completes at end of turn.') "
+        "  print('---END---') return "
+        "end "
+        + _WHY_LUA +
+        "local at = 'there is no city there' "
+        "local city = Cities.GetPlotPurchaseCity(x, y) "
+        "if city and (city:GetX() ~= x or city:GetY() ~= y) then at = 'the tile is not a city centre (it belongs to ' "
+        "  .. Locale.Lookup(city:GetName()) .. ')' city = nil end "
+        "if city then "
+        "  local o = city:GetOwner() local cfg = PlayerConfigurations[o] "
+        "  local who = o == me and 'yours' or (Players[o]:IsMajor() and Locale.Lookup(cfg:GetCivilizationShortDescription()) "
+        "    or 'a city-state') "
+        "  at = 'the city there is ' .. Locale.Lookup(city:GetName()) .. ' (' .. who .. ')' "
+        "end "
+        "print('ERR:CANNOT_TRAVEL|The game will not send this spy to (' .. x .. ',' .. y .. ') now: ' "
+        "  .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The spy has ' "
+        "  .. unit:GetMovesRemaining() .. ' moves left (a spy with none, for example one bought or back from a "
+        "mission this turn, can travel next turn), and ' .. at .. '.') "
+        "print('---END---')"
+    )
+
+
+# No pillage order. On turn 209 of game 19 the agent declared war on Spain to pillage its three spaceports and then
+# found that civ6-mcp's unit_action had none ("the tools have no pillage action"). The game's unit panel sends
+# UNITOPERATION_PILLAGE (an improvement, a district or one of its buildings) or UNITOPERATION_PILLAGE_ROUTE (a road)
+# on the unit's own tile, and so does unit_action's pillage, then it reads the tile again.
+PILLAGE_OPS = {"pillage": "UNITOPERATION_PILLAGE", "pillage_route": "UNITOPERATION_PILLAGE_ROUTE"}
+PILLAGE_NOTE = (
+    "\n\nAlso: pillage = pillage what is on the unit's own tile (an improvement, or a district or one of its "
+    "buildings: a district's buildings go one per pillage, then the district) with the game's own pillage order; "
+    "pillage_route = pillage the road there. Military land units, at war with the tile's owner or on a tile no civ "
+    "owns. It costs 3 moves, or all of them for a unit with fewer than 3 (a Warrior or a Machine Gun must start the "
+    "turn on the tile: move there this turn, pillage the next). A pillaged district produces nothing (a Spaceport "
+    "builds no space projects) until its owner repairs it. "
+    "The result says what the game refused, or what the tile shows afterwards."
+)
+
+
+def pillage_lua(unit_index: int, op_name: str) -> str:
+    """Send the game's pillage order for the unit's tile, or report the game's reasons for refusing it."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local x, y = unit:GetX(), unit:GetY() "
+        f"local op = GameInfo.UnitOperations['{op_name}'] "
+        f"if op == nil then print('ERR:NO_OP|{op_name} is not in this game') print('---END---') return end "
+        "local params = {[UnitOperationTypes.PARAM_X] = x, [UnitOperationTypes.PARAM_Y] = y} "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op.Hash, nil, params, true) end) "
+        "if ok and can then "
+        "  UnitManager.RequestOperation(unit, op.Hash, params) "
+        "  print('OK:PILLAGE_SENT|' .. x .. '|' .. y) print('---END---') return "
+        "end "
+        + _WHY_LUA +
+        f"print('ERR:CANNOT_PILLAGE|The game refused {op_name} at (' .. x .. ',' .. y .. '): ' "
+        "  .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The unit has ' .. unit:GetMovesRemaining() "
+        "  .. ' moves left.') "
+        "print('---END---')"
+    )
+
+
+def pillage_tile_lua(unit_index: int) -> str:
+    """What is on the unit's tile, and what of it is pillaged: TILE|x|y|moves|item=state,... (one line)."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('TILE|gone') print('---END---') return end "
+        "local x, y = unit:GetX(), unit:GetY() local plot = Map.GetPlot(x, y) local t = {} "
+        "local imp = plot:GetImprovementType() "
+        "if imp >= 0 then t[#t + 1] = GameInfo.Improvements[imp].ImprovementType .. '=' .. "
+        "  (plot:IsImprovementPillaged() and 'pillaged' or 'intact') end "
+        "local o = plot:GetOwner() "
+        "if o >= 0 and Players[o] then "
+        "  for _, d in Players[o]:GetDistricts():Members() do "
+        "    if d:GetX() == x and d:GetY() == y then "
+        "      local di = GameInfo.Districts[d:GetType()] "
+        "      t[#t + 1] = di.DistrictType .. '=' .. (d:IsPillaged() and 'pillaged' or 'intact') "
+        "      local c = Cities.GetPlotPurchaseCity(x, y) "
+        "      if c then for b in GameInfo.Buildings() do "
+        "        if b.PrereqDistrict == di.DistrictType and c:GetBuildings():HasBuilding(b.Index) then "
+        "          t[#t + 1] = b.BuildingType .. '=' .. (c:GetBuildings():IsPillaged(b.Index) and 'pillaged' or 'intact') "
+        "        end end end "
+        "    end "
+        "  end "
+        "end "
+        "if plot:GetRouteType() >= 0 then t[#t + 1] = 'ROAD=' .. (plot:IsRoutePillaged() and 'pillaged' or 'intact') end "
+        "print('TILE|' .. x .. '|' .. y .. '|' .. unit:GetMovesRemaining() .. '|' .. table.concat(t, ',')) "
+        "print('---END---')"
+    )
+
 # Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the
 # game's DiplomacyDealView waits for it before it lets the player accept). civ6-mcp did each step in one Lua call:
 # - test_trade sent EQUALIZE and closed the session at once. The AI's late answer then stayed behind as a deal of its

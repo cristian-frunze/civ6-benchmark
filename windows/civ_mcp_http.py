@@ -113,6 +113,10 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _esp._SPY_OP_HASHES.update(bc.SPY_OPS)  # the builders read the table at call time
     _spy = mcp._tool_manager.get_tool("spy_action")
     _spy.description = bc.SPY_MISSION_LIST.sub(bc.SPY_MISSIONS, _spy.description) + bc.SPY_NOTE
+    _spy.description = bc.SPY_TRAVEL_DOC[0].sub(lambda m: bc.SPY_TRAVEL_DOC[1], _spy.description)
+    import civ_mcp.lua as _lqs  # noqa: E402
+
+    _lqs.build_spy_travel = bc.spy_travel_lua  # GameState.spy_travel looks it up at call time
 
     # end_turn reads blockers from the notification list, which in the base game can miss a unit that still needs
     # orders (the end-turn button says "Unit needs orders", no notification is listed). It then sends the end turn,
@@ -954,6 +958,55 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 return False
         return True
 
+    # A request dropped inside one end_turn. Game 19's turn 86 "hung" four times, 10 minutes each, and every time
+    # civ6-mcp reloaded the turn and ended it again. Replayed from turn 85's save: civ6-mcp closed three wonder popups,
+    # sent ACTION_ENDTURN, and 90 s later the player's turn was still active, with nothing blocking it
+    # (NO_ENDTURN_BLOCKING, UI.CanEndTurn true) and no AI civ moving; civ6-mcp only polls the turn number, for 10
+    # minutes. A second request then ended the turn at once. Here each request is watched: if 8 s later the turn number
+    # is the one read before the request and the player's turn is still active (checked twice, 3 s apart), the request
+    # is sent again when nothing blocks it, up to 3 times. While the AI civs move the player's turn is inactive, so the
+    # watcher stops at its first check and sends nothing.
+    _original_build_end_turn = _lq.build_end_turn
+    _END_TURN_MARK = "local __bench_end_turn = true "
+    _RESEND_LUA = (
+        "local me = Game.GetLocalPlayer() "
+        "if UI.CanEndTurn() and NotificationManager.GetFirstEndTurnBlocking(me) == EndTurnBlockingTypes.NO_ENDTURN_BLOCKING "
+        "then UI.RequestAction(ActionTypes.ACTION_ENDTURN) print('RESENT') else print('BLOCKED') end print('---END---')"
+    )
+    _lq.build_end_turn = lambda: _END_TURN_MARK + _original_build_end_turn()
+    _original_conn_write = GameConnection.execute_write
+    _WATCHERS: set = set()
+
+    async def _resend_if_dropped(conn, start) -> int:
+        game, sent = types.SimpleNamespace(conn=conn), 0
+        for _ in range(3):
+            await asyncio.sleep(8)
+            for i in range(2):
+                if i:
+                    await asyncio.sleep(3)
+                if await _turn_number(game) != start or await _turn_active(game) is not True:
+                    return sent
+            lines = await _original_conn_write(conn, _RESEND_LUA, timeout=10.0)
+            if "RESENT" not in lines:
+                return sent
+            sent += 1
+            logging.getLogger("civ_mcp_http").warning(
+                "End turn: the request did not take (turn %s still open, nothing blocking it): sent it again", start)
+        return sent
+
+    async def _write_watching_end_turn(self, lua_code, *args, **kwargs):
+        if not (isinstance(lua_code, str) and lua_code.startswith(_END_TURN_MARK)):
+            return await _original_conn_write(self, lua_code, *args, **kwargs)
+        start = await _turn_number(types.SimpleNamespace(conn=self))  # before the request: the player's turn
+        out = await _original_conn_write(self, lua_code, *args, **kwargs)
+        if start is not None:
+            task = asyncio.ensure_future(_resend_if_dropped(self, start))
+            _WATCHERS.add(task)
+            task.add_done_callback(_WATCHERS.discard)
+        return out
+
+    GameConnection.execute_write = _write_watching_end_turn
+
     # When the AI turns hang, civ6-mcp reloads the save made at the start of the turn and ends the turn again,
     # without telling the agent. Everything the agent did in that turn is gone (game 8, turn 209: the trades and the
     # research choice were undone and the agent did not know why research was empty again). Name it.
@@ -1091,6 +1144,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first
 
+    _HANGS: dict[str, int] = {}  # turn -> hangs so far
+
     def _hang_note(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -1119,6 +1174,16 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             else:
                 note += (f"The result of ending it again is below. While turn {turn} is open, give your orders "
                          f"again (get_turn_briefing shows the turn) before you call end_turn.")
+            # Game 19's turn 86 hung four times from its own save, with other research and production each time,
+            # about 45 minutes in all; it ended at once after the agent loaded turn 85's save and played turn 85
+            # with a few other orders. From the second hang of a turn, say so.
+            _HANGS[turn] = _HANGS.get(turn, 0) + len(hangs)
+            if _HANGS[turn] >= 2 and turn.isdigit() and int(turn) > 1:
+                note += (f" Turn {turn} has now hung {_HANGS[turn]} times. In an earlier game a turn that hung again "
+                         "after its reload kept hanging from its own save, though the orders in it changed each "
+                         "time, and got past at once when the save from the start of the turn before was loaded and "
+                         "that turn was played with a few different orders. If this turn hangs again, do that: "
+                         f"load_game_save(\"0_MCP_{int(turn) - 1:04d}\"), then play turn {int(turn) - 1} again.")
             return note + "\n\n" + out
 
         return wrapper
@@ -1311,6 +1376,26 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                         events[i] = _lq.TurnEvent(priority=3, category=e.category, message=(
                             f"Your {ub.name} ({ub.unit_type}) {reason} (last seen at ({ub.x},{ub.y}))."))
                         break
+            # A spy gets a new id when it travels, so the report called a spy that left a city "killed" (game 19:
+            # Raheem on turn 197 and Uday on turn 203, both "last seen" in the agent's own Isin; the agent wrote that
+            # Raheem had been killed arriving in Madrid, and later found him there). A spy listed again under its
+            # name has moved; one not listed may be travelling or dead, and get_spies says which.
+            for uid, ub in before.units.items():
+                if ub.unit_type != "UNIT_SPY" or uid in after.units:
+                    continue
+                killed = f"Your {ub.name} ({ub.unit_type}) was killed! Last seen at ({ub.x},{ub.y})."
+                now = next((u for u in after.units.values() if u.unit_type == "UNIT_SPY" and u.name == ub.name), None)
+                if now is not None:
+                    msg = (f"Your spy {ub.name} moved from ({ub.x},{ub.y}) to ({now.x},{now.y}) and has a new id, "
+                           f"{now.unit_id}.")
+                else:
+                    msg = (f"Your spy {ub.name} is no longer listed among your units (last seen at ({ub.x},{ub.y})). "
+                           "A spy gets a new id when it travels, so this alone does not mean it was killed: "
+                           "get_spies lists the spies you have.")
+                for i, e in enumerate(events):
+                    if e.message == killed:
+                        events[i] = _lq.TurnEvent(priority=2, category=e.category, message=msg)
+                        break
         except Exception:
             logging.getLogger("civ_mcp_http").warning("rewording spent units failed", exc_info=True)
         _SPENT.clear()
@@ -1322,6 +1407,45 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _tool = mcp._tool_manager.get_tool("upgrade_unit")
     if _tool is not None:
         _tool.fn = _records_spent(_tool.fn, action="upgrade")
+
+    # unit_action had no pillage (bench_compat.PILLAGE_NOTE has why). pillage and pillage_route send the game's own
+    # order on the unit's tile, then read the tile back once the order has played out.
+    def _pillages(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            action = str(kwargs.get("action") or "").lower()
+            if action not in bc.PILLAGE_OPS:
+                return await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+
+            async def run():
+                conn = srv._get_game(ctx).conn
+                sent = _gsm._action_result(await conn.execute_write(bc.pillage_lua(uid % 65536, bc.PILLAGE_OPS[action]),
+                                                                   timeout=10.0))
+                if not sent.startswith("PILLAGE_SENT"):
+                    return sent
+                tile = ""
+                for _ in range(6):  # the order runs a frame or more later
+                    await asyncio.sleep(0.5)
+                    tile = next((ln for ln in await conn.execute_write(bc.pillage_tile_lua(uid % 65536), timeout=10.0)
+                                 if ln.startswith("TILE|")), "")
+                    if "=pillaged" in tile:
+                        break
+                p = tile.split("|")
+                if len(p) < 5:
+                    return f"PILLAGE_SENT|{action} ordered; the unit's tile could not be read back."
+                x, y, moves, items = p[1], p[2], p[3], p[4]
+                return (f"PILLAGE_SENT|{action} at ({x},{y}). The tile now: {items.replace(',', ', ') or 'nothing to pillage'}"
+                        f" (moves left: {moves}). If nothing reads pillaged, the order has not played out or did not take.")
+
+            return await srv._logged(ctx, "unit_action", {"unit_id": uid, "action": action}, run)
+
+        return wrapper
+
+    _tool = mcp._tool_manager.get_tool("unit_action")
+    _tool.fn = _pillages(_tool.fn)
+    _tool.description += bc.PILLAGE_NOTE
 
     def _clears_answered(fn):
         @functools.wraps(fn)

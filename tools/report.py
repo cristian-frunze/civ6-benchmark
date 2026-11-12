@@ -49,7 +49,8 @@ LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only"
           "g15-fable52-deity": "Game 15, Fable 5.2 on Deity",
           "g16-fable52-emperor": "Game 16, Fable 5.2 on Emperor",
           "g17-fable52-king": "Game 17, Fable 5.2 on King",
-          "g18-fable52-emperor-repeat": "Game 18, Fable 5.2 on Emperor again"}
+          "g18-fable52-emperor-repeat": "Game 18, Fable 5.2 on Emperor again",
+          "g19-opus-king": "Game 19, Opus 5.5 on King"}
 
 
 def _rows(path: Path) -> list[dict]:
@@ -161,7 +162,7 @@ const G = __DATA__;
 // fixed harness) share its aqua, dashed and dotted, the Fable games share one hue (5.2 dashed), and games 15 to 18 (Fable 5.2 on Deity, dash-dot, Emperor, dotted, King, dashed, and Emperor again, long dashes) take game 5's Deity hue; the 8-hue palette
 // never cycles.
 const STYLE = {"g1-standard":[1],"g2-baseline":[2],"g3-science":[3],"g4-domination":[4],"g5-deity-science":[5],
-  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"],"g14-fable52-repeat":[8,"8 3 2 3"],"g15-fable52-deity":[5,"8 3 2 3"],"g16-fable52-emperor":[5,"1.5 3"],"g17-fable52-king":[5,"6 4"],"g18-fable52-emperor-repeat":[5,"12 3"]};
+  "g6-sonnet-science":[6],"g7-science-repeat":[3,"6 4"],"g8-opus-medium":[7],"g9-fable-science":[8],"g10-fixed-harness":[3,"1.5 3"],"g11-fable-fixed":[8,"1.5 3"],"g12-fable52-fixed":[8,"6 4"],"g13-sonnet-fixed":[6,"1.5 3"],"g14-fable52-repeat":[8,"8 3 2 3"],"g15-fable52-deity":[5,"8 3 2 3"],"g16-fable52-emperor":[5,"1.5 3"],"g17-fable52-king":[5,"6 4"],"g18-fable52-emperor-repeat":[5,"12 3"],"g19-opus-king":[3,"12 3"]};
 const st = i => STYLE[G[i].id] || [i % 8 + 1], col = i => `var(--s${st(i)[0]})`;
 const dash = i => st(i)[1] ? ` stroke-dasharray="${st(i)[1]}"` : "";
 const fmt = (n, d=0) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
