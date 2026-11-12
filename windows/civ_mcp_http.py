@@ -349,12 +349,29 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             f"  print('ME|' .. u:GetX() .. '|' .. u:GetY() .. '|' .. Map.GetPlotDistance(u:GetX(), u:GetY(), {int(tx)}, "
             f"{int(ty)}) .. '|' .. (u:GetMaxDamage() - u:GetDamage()) .. '|' .. u:GetMovesRemaining()) "
             "end "
-            f"local us = Map.GetUnitsAt({int(tx)}, {int(ty)}) "
+            f"local us = Map.GetUnitsAt({int(tx)}, {int(ty)}) local any = false "
             "if us then for o in us:Units() do if o:GetOwner() ~= me then "
-            "  local e = GameInfo.Units[o:GetType()] "
+            "  local e = GameInfo.Units[o:GetType()] any = true "
             "  print('FOE|' .. (e and e.UnitType or '?') .. '|' .. (o:GetMaxDamage() - o:GetDamage()) .. '|' "
             "    .. (e and e.Combat or 0)) "
             "end end end "
+            # no unit: an enemy city centre or Encampment (bench_compat.attack_lua), its hit points, strength -1
+            f"local pl = Map.GetPlot({int(tx)}, {int(ty)}) local ow = pl and pl:GetOwner() or -1 "
+            "if not any and ow >= 0 and ow ~= me and Players[ow] and pl:GetDistrictType() >= 0 then "
+            "  for _, d in Players[ow]:GetDistricts():Members() do "
+            f"    if d:GetX() == {int(tx)} and d:GetY() == {int(ty)} then "
+            "      local function hp(k) local a, m = pcall(function() return d:GetMaxDamage(k) end) "
+            "        local b, g = pcall(function() return d:GetDamage(k) end) return ((a and m) or 0) - ((b and g) or 0) end "
+            "      local ok, gm = pcall(function() return d:GetMaxDamage(DefenseTypes.DISTRICT_GARRISON) end) "
+            "      if ok and gm and gm > 0 then "
+            f"        local c = Cities.GetPlotPurchaseCity({int(tx)}, {int(ty)}) "
+            "        print('FOE|' .. GameInfo.Districts[d:GetType()].DistrictType .. (c and (' of ' .. "
+            "          Locale.Lookup(c:GetName())) or '') .. '|' .. (hp(DefenseTypes.DISTRICT_GARRISON) "
+            "          + hp(DefenseTypes.DISTRICT_OUTER)) .. '|-1') "
+            "      end "
+            "    end "
+            "  end "
+            "end "
             "print('---END---')"
         )
 
@@ -397,11 +414,13 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         moves = f"moves left: {ame[4]}"
         if _attack_resolved(before, after):
             killed = bfoe and (afoe is None or afoe[0] != bfoe[0])
-            gone = "killed" if bfoe and bfoe[2] > 0 else "captured"
+            gone = "killed" if bfoe and bfoe[2] > 0 else ("taken" if bfoe and bfoe[2] < 0 else "captured")
             enemy = f"enemy HP:{bfoe[1]} -> {gone}" if killed else (f"enemy HP:{bfoe[1]} -> {afoe[1]}" if bfoe else "")
             where = f"advanced into ({tx},{ty})" if ame[2] == 0 else f"attacked from {here}"
+            rule = ("\n  A city falls to a melee unit's attack once its hit points are at 0 (walls take the damage "
+                    "first); ranged units cannot take it." if bfoe and bfoe[2] < 0 and not killed else "")
             return (f"MELEE_ATTACK|target:{foe} at ({tx},{ty})|moved from {start} and {where}|{enemy}"
-                    f"|your HP:{bme[3]} -> {ame[3]}|{moves}")
+                    f"|your HP:{bme[3]} -> {ame[3]}|{moves}" + rule)
         if (ame[0], ame[1]) == (bme[0], bme[1]):
             return (f"Error: NOT_MOVED|The move-and-attack order was sent, but after {waited:.0f} seconds the unit is "
                     f"still at {start} and no combat has happened. Check get_units before you order it again.")
@@ -542,7 +561,26 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             "if row.UnitType == uInfo.UnitType then gpClass = row.GreatPersonClassType break end end end\n"))
 
     _lq.build_gp_advisor_query = _gp_advisor_class
-    _original_attack_unit = _gsm.GameState.attack_unit
+
+    # An attack on a city with no unit in it (bench_compat.attack_lua has why): the attack Lua takes the city centre or
+    # Encampment as the target, and the report says what the district shows afterwards instead of civ6-mcp's "killed".
+    # It sits under _attack_unit_settled, which retries and re-reads the attack.
+    _lq.build_attack_unit = bc.attack_lua(_lq.build_attack_unit)  # GameState.attack_unit looks it up at call time
+    _lq.build_make_trade_route = bc.trade_route_lua(_lq.build_make_trade_route)  # the refusal's reasons
+    _vendor_attack_unit = _gsm.GameState.attack_unit
+
+    async def _attack_unit_districts(self, unit_index, target_x, target_y):
+        out = await _vendor_attack_unit(self, unit_index, target_x, target_y)
+        if "|target:DISTRICT_" not in out:
+            return out
+        await asyncio.sleep(0.5)
+        try:
+            lines = await self.conn.execute_write(bc.district_state_lua(target_x, target_y), timeout=10.0)
+        except Exception:
+            lines = []
+        return bc.city_attack_report(out, next((ln for ln in lines if ln.startswith("DEF|")), ""))
+
+    _original_attack_unit = _attack_unit_districts
 
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
         before = await _attack_state(self, unit_index, target_x, target_y)
@@ -969,13 +1007,22 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _original_build_end_turn = _lq.build_end_turn
     _END_TURN_MARK = "local __bench_end_turn = true "
     _RESEND_LUA = (
-        "local me = Game.GetLocalPlayer() "
-        "if UI.CanEndTurn() and NotificationManager.GetFirstEndTurnBlocking(me) == EndTurnBlockingTypes.NO_ENDTURN_BLOCKING "
-        "then UI.RequestAction(ActionTypes.ACTION_ENDTURN) print('RESENT') else print('BLOCKED') end print('---END---')"
+        "local me = Game.GetLocalPlayer() local b = NotificationManager.GetFirstEndTurnBlocking(me) "
+        "if UI.CanEndTurn() and b == EndTurnBlockingTypes.NO_ENDTURN_BLOCKING "
+        "then UI.RequestAction(ActionTypes.ACTION_ENDTURN) print('RESENT') "
+        "elseif b == EndTurnBlockingTypes.ENDTURN_BLOCKING_UNITS then print('BLOCKED|UNITS') "
+        "else print('BLOCKED') end print('---END---')"
     )
     _lq.build_end_turn = lambda: _END_TURN_MARK + _original_build_end_turn()
     _original_conn_write = GameConnection.execute_write
     _WATCHERS: set = set()
+    _REFUSAL = types.SimpleNamespace(event=None)
+
+    def _refusal_event() -> asyncio.Event:
+        """Set by the watcher when the game refused the end turn over a unit; see _EndTurnAsyncio."""
+        if _REFUSAL.event is None:
+            _REFUSAL.event = asyncio.Event()
+        return _REFUSAL.event
 
     async def _resend_if_dropped(conn, start) -> int:
         game, sent = types.SimpleNamespace(conn=conn), 0
@@ -987,6 +1034,10 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 if await _turn_number(game) != start or await _turn_active(game) is not True:
                     return sent
             lines = await _original_conn_write(conn, _RESEND_LUA, timeout=10.0)
+            if "BLOCKED|UNITS" in lines:
+                logging.getLogger("civ_mcp_http").info("End turn: the game refused it, a unit needs orders (turn %s)",
+                                                       start)
+                _refusal_event().set()
             if "RESENT" not in lines:
                 return sent
             sent += 1
@@ -998,6 +1049,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if not (isinstance(lua_code, str) and lua_code.startswith(_END_TURN_MARK)):
             return await _original_conn_write(self, lua_code, *args, **kwargs)
         start = await _turn_number(types.SimpleNamespace(conn=self))  # before the request: the player's turn
+        _refusal_event().clear()
         out = await _original_conn_write(self, lua_code, *args, **kwargs)
         if start is not None:
             task = asyncio.ensure_future(_resend_if_dropped(self, start))
@@ -1109,6 +1161,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _original_mid_turn_diplomacy = _etm._check_mid_turn_diplomacy
 
     async def _mid_turn_leader_screen_first(gs, lua, turn_before):
+        _refusal_event().clear()
         try:
             lines = await gs.conn.execute_write(bc.LEADER_SCREEN_LUA, timeout=10.0)
         except Exception:
@@ -1143,6 +1196,25 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return await _original_mid_turn_diplomacy(gs, lua, turn_before)
 
     _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first
+
+    # civ6-mcp makes that probe only after its polls have waited 54 s, so a turn the game refused over a unit took
+    # about 70 s to report: 8 times in game 20 (about 9 minutes), once in game 19. The watcher above sees the refusal
+    # 11 s after the request (turn unchanged, the player's turn active, ENDTURN_BLOCKING_UNITS). end_turn.py's waits
+    # between turn polls (its asyncio.sleep calls over 2 s) then end at once, so its polls run on to the probe, which
+    # checks the units again and reports them. The probe clears the flag, and every new request clears it too.
+    class _EndTurnAsyncio:
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+        @staticmethod
+        async def sleep(delay, result=None):
+            if delay <= 2.0:
+                return await asyncio.sleep(delay, result)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(_refusal_event().wait(), timeout=delay)
+            return result
+
+    _etm.asyncio = _EndTurnAsyncio()
 
     _HANGS: dict[str, int] = {}  # turn -> hangs so far
 
@@ -1445,7 +1517,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool = mcp._tool_manager.get_tool("unit_action")
     _tool.fn = _pillages(_tool.fn)
-    _tool.description += bc.PILLAGE_NOTE
+    _tool.description += bc.PILLAGE_NOTE + bc.CITY_ATTACK_NOTE
 
     def _clears_answered(fn):
         @functools.wraps(fn)

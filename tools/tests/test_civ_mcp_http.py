@@ -167,6 +167,8 @@ async def main():
     import civ_mcp.end_turn as et
     et.asyncio.sleep = (lambda real: (lambda s: real(0)))(asyncio.sleep)  # no real waits
     ns["asyncio"].sleep = et.asyncio.sleep
+    check("attack chain: settled, then the district attack, then civ6-mcp's",
+          GameState.attack_unit is ns["_attack_unit_settled"] and ns["_original_attack_unit"] is ns["_attack_unit_districts"])
 
     # 1. The trap, unfixed: civ6-mcp's own end_turn reports turn 84's unit blocker as if 83 were still open.
     GAME = Game(turn=84, pending_from=83)
@@ -636,6 +638,62 @@ async def main():
     out = await ns["_pillages"](inner)(ctx=CTX, unit_id=7, action="fortify")
     check("other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
 
+    # 16h. A refused trade route gives the game's reasons (game 20, turn 146: one Trader refused everywhere).
+    lua = lq.build_make_trade_route(18, 35, 17)
+    i = lua.index("ERR:CANNOT_START_ROUTE")
+    check("trade route: refusal gives reasons and the Trader's city", "res[UnitOperationResults.FAILURE_REASONS]" in lua
+          and "The game will not start this route to (35,17)" in lua and "returned false" not in lua
+          and "CityManager.GetCityAt(unit:GetX(), unit:GetY())" in lua and lua.count("UnitManager.RequestOperation") == 1
+          and "ERR:CAPACITY_FULL" in lua)
+
+    # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
+    lua = lq.build_attack_unit(13, 42, 35)
+    check("attack builder replaced", lq.build_attack_unit.__qualname__.startswith("attack_lua"))
+    check("attack: city centre or Encampment taken as the target", "DISTRICT_GARRISON" in lua
+          and "Players[owner]:GetDistricts():Members()" in lua and "enemyName = di.DistrictType" in lua
+          and lua.index("DISTRICT_GARRISON") < lua.index("No hostile unit or city at (42,35)")
+          and lua.index("No hostile unit or city at") < lua.index("IsAtWarWith(enemyOwner)"))
+    check("attack: an undefended district says pillage", "has no defences to attack" in lua and "unit_action pillage" in lua)
+    check("attack: unchanged when civ6-mcp's text moves", bc.attack_lua(lambda u, x, y: "print('x')")(1, 2, 3) == "print('x')")
+    rep = bc.city_attack_report("MELEE_ATTACK|target:DISTRICT_CITY_CENTER of Salvador at (42,35)|enemy HP:200 -> 200/200|"
+                                "your HP:100 -> 100 CS:30|damage dealt:200 (killed)\n  Post-combat: Target eliminated",
+                                "DEF|3|false|156/200|0/0")
+    check("city attack report: hit points read after, no 'killed'", "enemy HP:200 -> 156/200" in rep and "killed" not in rep
+          and "Target eliminated" not in rep and "garrison 156/200, walls 0/0" in rep, rep)
+    rep = bc.city_attack_report("MELEE_ATTACK|target:DISTRICT_CITY_CENTER of Salvador at (42,35)|enemy HP:20 -> 20/200|"
+                                "your HP:90 -> 90 CS:30|damage dealt:20 (killed)\n  Post-combat: Target eliminated",
+                                "DEF|0|true|0/200|0/0")
+    check("city attack report: a taken city", "the city is yours" in rep and "enemy HP:20 -> taken" in rep, rep)
+    class DefConn:
+        def __init__(self): self.sent = []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            return ["DEF|3|false|120/200|0/0", lq.SENTINEL] if lua.startswith("local me") and "DEF|" in lua else [lq.SENTINEL]
+    saved_atk = ns["_vendor_attack_unit"]
+    async def fake_atk(self, u, x, y):
+        return "MELEE_ATTACK|target:DISTRICT_CITY_CENTER of Salvador at (42,35)|enemy HP:156 -> 156/200|damage dealt:156 (killed)\n  Post-combat: Target eliminated"
+    ns["_vendor_attack_unit"] = fake_atk
+    try:
+        g = types.SimpleNamespace(conn=DefConn())
+        rep = await ns["_attack_unit_districts"](g, 13, 42, 35)
+        check("attack_unit: district target read back", "enemy HP:156 -> 120/200" in rep and "garrison 120/200" in rep, rep)
+        async def unit_atk(self, u, x, y): return "MELEE_ATTACK|target:UNIT_WARRIOR at (1,2)|enemy HP:100 -> KILLED"
+        ns["_vendor_attack_unit"] = unit_atk
+        g = types.SimpleNamespace(conn=DefConn())
+        rep = await ns["_attack_unit_districts"](g, 13, 1, 2)
+        check("attack_unit: unit targets unchanged", rep.endswith("KILLED") and g.conn.sent == [], rep)
+    finally:
+        ns["_vendor_attack_unit"] = saved_atk
+
+    before = ((41, 36, 1, 100, 4), ("DISTRICT_CITY_CENTER of Salvador", 200, -1))
+    rep = ns["_attack_report"](before, ((41, 35, 1, 77, 0), ("DISTRICT_CITY_CENTER of Salvador", 156, -1)), 42, 35, 1.0)
+    check("move-and-attack on a city: its hit points and the rule", "target:DISTRICT_CITY_CENTER of Salvador" in rep
+          and "enemy HP:200 -> 156" in rep and "falls to a melee unit's attack" in rep, rep)
+    rep = ns["_attack_report"](before, ((42, 35, 0, 70, 0), None), 42, 35, 1.0)
+    check("move-and-attack on a city: taken", "enemy HP:200 -> taken" in rep and "advanced into (42,35)" in rep, rep)
+    sl = ns["_attack_state_lua"](13, 42, 35)
+    check("move-and-attack reads a city with no unit", "if not any and ow >= 0" in sl and "'|-1'" in sl)
+
     # 16f. A dropped end-turn request is sent again (game 19, turn 86, replayed: the turn stayed open, nothing blocked
     #      it, and a second request ended it at once).
     check("end-turn Lua is marked for the watcher", lq.build_end_turn().startswith(ns["_END_TURN_MARK"])
@@ -672,6 +730,38 @@ async def main():
         check("blocked turn: no request sent", await ns["_resend_if_dropped"](c, 86) == 0 and c.resent == 1)
         check("resend asks the game's own end-turn checks first", "UI.CanEndTurn()" in ns["_RESEND_LUA"]
               and "NO_ENDTURN_BLOCKING" in ns["_RESEND_LUA"])
+        # a unit holds the turn (game 20: 8 refusals, ~70 s each): flagged, and end_turn.py's poll waits end at once
+        ev = ns["_refusal_event"]()
+        ev.clear()
+        c = WatchConn([(86, True)], resend="BLOCKED|UNITS")
+        check("units refusal: flagged, nothing resent", await ns["_resend_if_dropped"](c, 86) == 0 and c.resent == 1
+              and ev.is_set())
+        check("resend Lua names a units refusal", "ENDTURN_BLOCKING_UNITS then print('BLOCKED|UNITS')" in ns["_RESEND_LUA"])
+        clock = type(ns["_etm"].asyncio)
+        check("end_turn.py uses the clock", isinstance(ns["_etm"].asyncio, clock) and clock.__name__ == "_EndTurnAsyncio")
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        r = await clock.sleep(30.0, "x")
+        check("flagged: a 30 s poll wait ends at once", loop.time() - t0 < 0.5 and r == "x", loop.time() - t0)
+        c = WatchConn([(86, True), (86, False)])
+        await ns["_write_watching_end_turn"](c, lq.build_end_turn())
+        await asyncio.gather(*list(ns["_WATCHERS"]))
+        check("a new end-turn request clears the flag", not ev.is_set())
+        t0 = loop.time()
+        await clock.sleep(2.2)
+        check("not flagged: the poll wait runs its time", loop.time() - t0 >= 2.1, loop.time() - t0)
+        ev.set()
+        class NoScreen:
+            async def execute_write(self, lua, timeout=None): return [lq.SENTINEL]
+        saved_active, saved_orig = ns["_turn_active"], ns["_original_mid_turn_diplomacy"]
+        async def inactive(game): return False
+        async def orig(gs, lua, tb): return None, False
+        ns["_turn_active"], ns["_original_mid_turn_diplomacy"] = inactive, orig
+        try:
+            await ns["_mid_turn_leader_screen_first"](types.SimpleNamespace(conn=NoScreen()), "", 86)
+        finally:
+            ns["_turn_active"], ns["_original_mid_turn_diplomacy"] = saved_active, saved_orig
+        check("the probe clears the flag", not ev.is_set())
         # the connection wrapper reads the turn before the request, then watches
         c = WatchConn([(86, True), (86, False)])
         out = await ns["_write_watching_end_turn"](c, lq.build_end_turn())

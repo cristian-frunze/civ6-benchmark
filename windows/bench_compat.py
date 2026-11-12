@@ -246,6 +246,146 @@ def pillage_tile_lua(unit_index: int) -> str:
         "print('---END---')"
     )
 
+# Trade routes. civ6-mcp answers a refused route with "CanStartOperation returned false for destination (x,y)". In
+# game 20 (turn 146) one Trader got that for every destination it tried, and the agent left it idle. Replayed, the game
+# refused it with no reason (its own route screen makes the same CanStartOperation call), while another Trader in the
+# same city could start the same routes: the refused one's last route came from Kish, which Spain took that turn, and
+# it ran routes again later. The refusal now gives the game's reasons, where the Trader stands (a route starts from
+# the city the Trader is in) and, when its last route's city is gone, that.
+_ROUTE_REFUSED = 'print("ERR:CANNOT_START_ROUTE|CanStartOperation returned false for destination ('
+_BAIL_END = 'print("---END---"); return'
+
+
+def trade_route_lua(original):
+    """civ6-mcp's trade route builder, whose refusal gives the game's reasons and the Trader's position."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        i = lua.find(_ROUTE_REFUSED)
+        j = lua.find(_BAIL_END, i) if i >= 0 else -1
+        if i < 0 or j < 0:
+            return lua  # civ6-mcp changed: its own message, unchanged
+        x, y = int(target_x), int(target_y)
+        why = (
+            "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, opHash, nil, tParams, true) end) "
+            + _WHY_LUA +
+            "local here = CityManager.GetCityAt(unit:GetX(), unit:GetY()) "
+            "local lost = '' "
+            "pcall(function() local o = unit:GetTrade():GetLastOriginTradeCityComponentID() "
+            "  if o and o.player == me and CityManager.GetCity(o.player, o.id) == nil then lost = ' Its last route came '"
+            "    .. 'from a city you no longer hold, and the game refuses such a Trader everywhere on that turn (game 20: '"
+            "    .. 'it started a route again on a later turn).' end end) "
+            f"print('ERR:CANNOT_START_ROUTE|The game will not start this route to ({x},{y}): ' "
+            "  .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The Trader is at (' .. unit:GetX() "
+            "  .. ',' .. unit:GetY() .. ')' .. (here and (' in ' .. Locale.Lookup(here:GetName()) .. '.') or ', not in a "
+            "city: a route starts from the city the Trader is in, so move it or teleport it to one first.') .. lost) "
+            "print('---END---') return"
+        )
+        return lua[:i] + why + lua[j + len(_BAIL_END):]
+    return build
+
+
+# Attacks on cities. civ6-mcp's attack looks for an enemy unit on the target tile and answers NO_ENEMY when there is
+# none, so a city with no unit in it could not be attacked at all. In game 20 the agent declared war on Brazil (turn 57)
+# to take Salvador da Bahia, a city with no walls and no unit, and every attack on it got "No hostile unit at (42,35)".
+# It wrote "Conquest blocked by tooling", pillaged a few tiles and made peace ten turns later. The game attacks the
+# tile: replayed from turn 58's save, a War-Cart's attack on Salvador took its garrison from 200 to 156. With no unit on
+# the tile, the attack now takes an enemy city centre or Encampment there (a district with garrison hit points) as its
+# target and goes on as civ6-mcp's attack does, with the district's hit points as the target's.
+_NO_ENEMY_ANCHOR = 'if enemy == nil then\n    print("ERR:NO_ENEMY|No hostile unit at'
+
+
+def _district_target_lua(x: int, y: int) -> str:
+    x, y = int(x), int(y)
+    return (
+        "if enemy == nil then\n"
+        f"    local plot = Map.GetPlot({x}, {y})\n"
+        "    local owner = plot and plot:GetOwner() or -1\n"
+        "    if owner >= 0 and owner ~= me and Players[owner] and plot:GetDistrictType() >= 0 then\n"
+        "        local dd = nil\n"
+        f"        for _, d in Players[owner]:GetDistricts():Members() do if d:GetX() == {x} and d:GetY() == {y} then dd = d end end\n"
+        "        local di = dd and GameInfo.Districts[dd:GetType()]\n"
+        "        local function hp(f, k) local ok, v = pcall(f, k) return (ok and v) or 0 end\n"
+        "        local function total(f) return hp(f, DefenseTypes.DISTRICT_GARRISON) + hp(f, DefenseTypes.DISTRICT_OUTER) end\n"
+        "        if dd and hp(function(k) return dd:GetMaxDamage(k) end, DefenseTypes.DISTRICT_GARRISON) > 0 then\n"
+        "            enemy = {\n"
+        "                GetOwner = function() return owner end,\n"
+        "                GetMaxDamage = function() return total(function(k) return dd:GetMaxDamage(k) end) end,\n"
+        "                GetDamage = function() return total(function(k) return dd:GetDamage(k) end) end,\n"
+        "            }\n"
+        f"            local c = Cities.GetPlotPurchaseCity({x}, {y})\n"
+        "            enemyName = di.DistrictType .. (c and (' of ' .. Locale.Lookup(c:GetName())) or '')\n"
+        "        elseif di then\n"
+        f"            print('ERR:NO_ENEMY|No unit at ({x},{y}), and its ' .. di.DistrictType .. ' has no defences to attack '\n"
+        "              .. '(only a city centre or an Encampment has). A military unit on that tile can pillage it '\n"
+        "              .. '(unit_action pillage).') print('---END---') return\n"
+        "        end\n"
+        "    end\n"
+        "end\n"
+    )
+
+
+def attack_lua(original):
+    """civ6-mcp's attack builder, which also takes an enemy city centre or Encampment with no unit on it."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        if lua.count(_NO_ENEMY_ANCHOR) != 1:
+            return lua  # civ6-mcp changed: its own attack, unchanged
+        return lua.replace(_NO_ENEMY_ANCHOR, _district_target_lua(target_x, target_y)
+                           + _NO_ENEMY_ANCHOR.replace("No hostile unit at", "No hostile unit or city at"))
+    return build
+
+
+def district_state_lua(x: int, y: int) -> str:
+    """The district at (x, y) after an attack: DEF|owner|is it the player's|garrison hp/max|walls hp/max (one line)."""
+    x, y = int(x), int(y)
+    return (
+        f"local me = Game.GetLocalPlayer() local o = Map.GetPlot({x}, {y}):GetOwner() local out = 'DEF|' .. o .. '|' .. "
+        "tostring(o == me) "
+        "if o >= 0 and Players[o] then for _, d in Players[o]:GetDistricts():Members() do "
+        f"  if d:GetX() == {x} and d:GetY() == {y} then "
+        "    local function hp(k) local ok1, m = pcall(function() return d:GetMaxDamage(k) end) "
+        "      local ok2, g = pcall(function() return d:GetDamage(k) end) m = (ok1 and m) or 0 "
+        "      return (m - ((ok2 and g) or 0)) .. '/' .. m end "
+        "    out = out .. '|' .. hp(DefenseTypes.DISTRICT_GARRISON) .. '|' .. hp(DefenseTypes.DISTRICT_OUTER) "
+        "  end end end "
+        "print(out) print('---END---')"
+    )
+
+
+CITY_ATTACK_NOTE = (
+    "\n\nAlso: attack takes an enemy city centre or Encampment with no unit in it as its target too (melee or "
+    "ranged, at war with its owner). A city falls to a melee unit's attack once its garrison is at 0 (walls take the "
+    "damage first); ranged units cannot take it."
+)
+
+
+# civ6-mcp's report after an attack counts the units left on the target tile, and with none it says the target was
+# killed: a city with no unit read "damage dealt:200 (killed) ... Target eliminated" after one hit.
+_KILLED_RE = re.compile(r"\|damage dealt:\d+ \(killed\)")
+
+
+def city_attack_report(out: str, def_line: str) -> str:
+    """Replace civ6-mcp's "killed" for a district target with what the district shows after the attack."""
+    out = _KILLED_RE.sub("", out)
+    p = def_line.split("|")
+    if len(p) >= 3 and p[2] == "true":
+        now = "you hold the tile now: the city is yours (answer the keep or raze choice with city_action if asked)."
+    elif len(p) >= 5:
+        now = (f"garrison {p[3]}, walls {p[4]}. A city falls to a melee unit's attack once its garrison is at 0 "
+               f"(walls take the damage first); ranged units cannot take it.")
+    else:
+        now = "the district could not be read back."
+    if len(p) >= 3 and p[2] == "true":  # a taken city's hit points start again for its new owner
+        out = re.sub(r"enemy HP:(\d+) -> \d+/\d+", lambda m: f"enemy HP:{m[1]} -> taken", out)
+    elif len(p) >= 5:  # civ6-mcp read the hit points in the frame of the attack, before it played out
+        try:
+            (gh, gm), (wh, wm) = (map(int, p[3].split("/")), map(int, p[4].split("/")))
+            out = re.sub(r"enemy HP:(\d+) -> \d+/\d+", lambda m: f"enemy HP:{m[1]} -> {gh + wh}/{gm + wm}", out)
+        except ValueError:
+            pass
+    return re.sub(r"\n  Post-combat: [^\n]*", "", out) + "\n  Post-combat: " + now
+
+
 # Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the
 # game's DiplomacyDealView waits for it before it lets the player accept). civ6-mcp did each step in one Lua call:
 # - test_trade sent EQUALIZE and closed the session at once. The AI's late answer then stayed behind as a deal of its
