@@ -513,6 +513,130 @@ def escape_note(lines: list[str]) -> str:
             "comes back to you, and a caught one is gone. It may not show in get_spies while it travels.")
 
 
+# No going back (civ_mcp_http._no_going_back has why): saves are named for their turn (0_MCP_0200, AutoSave_0200).
+NO_GOING_BACK_NOTE = (
+    "\n\nIn this benchmark a game does not go back: a save from a turn earlier than the highest turn the game has "
+    "reached is refused. Reload only to recover a game that hung or crashed, from a save of the current turn."
+)
+_SAVE_TURN_RE = re.compile(r"_(\d{3,4})$")
+_LISTED_SAVE_RE = re.compile(r"^\s*(\d+)\.\s+(\S+)", re.M)
+
+
+def save_turn(name: str | None) -> int | None:
+    m = _SAVE_TURN_RE.search(name or "")
+    return int(m[1]) if m else None
+
+
+def save_at_index(listing: str, index: int) -> str | None:
+    """The save name at a 1-based index of civ6-mcp's list_saves text ("  9. 0_MCP_0200")."""
+    return next((n for i, n in _LISTED_SAVE_RE.findall(listing or "") if int(i) == index), None)
+
+
+def turn_in_result(out: str) -> int | None:
+    """The game turn a result shows: end_turn's "Turn 222 -> 223", or an overview's leading "Turn 204 |"."""
+    moves = [int(b) for _, b in re.findall(r"Turn (\d+) -> (\d+)", out[:2000])]
+    if moves:
+        return max(moves)
+    m = re.match(r"\s*Turn (\d+) \|", out)
+    return int(m[1]) if m else None
+
+
+def earlier_turn_refusal(name: str | None, top: int) -> str:
+    """The refusal for loading a save older than the highest turn reached, or "" when the load may go ahead."""
+    if top <= 1 or name is None:  # no turn played yet, or the most recent autosave (no name given)
+        return ""
+    turn = save_turn(name)
+    if turn is not None and turn >= top:
+        return ""
+    what = f"is from turn {turn}" if turn is not None else "is not a save of a turn of this game"
+    return (f"Error: EARLIER_TURN|{name} {what}, and this game has reached turn {top}. In this benchmark a game does "
+            f"not go back: play on from turn {top}. Reload only a game that hung or crashed, from a save of turn "
+            f"{top} (AutoSave_{top:04d}, or 0_MCP_{top:04d} once that turn has ended).")
+
+
+# Government changes. civ6-mcp's change_government called the game's RequestChangeGovernment with none of the checks
+# of the game's Government screen (GovernmentScreen.lua, IsAbleToChangeGovernment and OnGovernmentSelected): a change
+# only on a turn a civic was completed, once that turn, none during Anarchy, and a confirmation when the change brings
+# Anarchy. Going back to a government the player has had before does: "Having tried X before, the people are wary of a
+# return to this government", at least 3 turns with no gold, science, culture or faith (Civilopedia, Anarchy). Its
+# description even said a switch after unlocking a new tier is free. In game 22 Sonnet switched to Communism (turn 201),
+# back to Classical Republic (turn 203), read GOVERNMENT_CHANGED, found its yields at 0, took that for a bug and loaded
+# its turn-200 save. GetAnarchyTurns(government) is read only outside Anarchy: called during Anarchy it closed the game.
+_GOV_NAME_RE = re.compile(r"^[A-Z0-9_]+$")
+
+NO_FREE_SWITCH_NOTE = (
+    "\n\nThe game allows a government change only on a turn you complete a civic, once that turn, and none during "
+    "Anarchy. Going back to a government you have had before brings at least 3 turns of Anarchy: no government, no "
+    "gold, science, culture or faith, and policies with no effect. This tool warns before such a switch; calling it "
+    "again with the same government on the same turn confirms it. A government you have never had brings none.")
+
+
+def gov_state_lua(gov_type: str) -> str:
+    """One GOVSTATE| line: turn|current|anarchy|anarchyEnd|civicDone|changeMade|canAtAll|anarchyTurns|usable|name|civic."""
+    gov = gov_type if _GOV_NAME_RE.match(gov_type or "") else ""
+    return (
+        "local me = Game.GetLocalPlayer() local c = Players[me]:GetCulture() "
+        f"local row = GameInfo.Governments['{gov}'] "
+        "local an = c:IsInAnarchy() local turns = -1 "
+        "local usable = row ~= nil and c:IsGovernmentUnlocked(row.Index) and row.Index ~= c:GetCurrentGovernment() "
+        "if usable and not an then turns = c:GetAnarchyTurns(row.Index) end "
+        "local civ = c:GetProgressingCivic() local civName = '' "
+        "if civ and civ >= 0 and GameInfo.Civics[civ] then civName = Locale.Lookup(GameInfo.Civics[civ].Name) end "
+        "print('GOVSTATE|' .. Game.GetCurrentGameTurn() .. '|' .. c:GetCurrentGovernment() .. '|' .. tostring(an) "
+        "  .. '|' .. c:GetAnarchyEndTurn() .. '|' .. tostring(c:CivicCompletedThisTurn()) .. '|' "
+        "  .. tostring(c:GovernmentChangeMade()) .. '|' .. tostring(c:CanChangeGovernmentAtAll()) .. '|' .. turns "
+        "  .. '|' .. tostring(usable) .. '|' .. (row and Locale.Lookup(row.Name) or '') .. '|' .. civName) "
+        "print('---END---')"
+    )
+
+
+def parse_gov_state(lines) -> dict | None:
+    for ln in lines or []:
+        if ln.startswith("GOVSTATE|"):
+            p = ln.split("|", 11)
+            if len(p) < 12:
+                return None
+            try:
+                return {"turn": int(p[1]), "current": int(p[2]), "anarchy": p[3] == "true", "anarchy_end": int(p[4]),
+                        "civic_done": p[5] == "true", "change_made": p[6] == "true", "can_at_all": p[7] == "true",
+                        "anarchy_turns": int(p[8]), "usable": p[9] == "true", "name": p[10], "civic": p[11]}
+            except ValueError:
+                return None
+    return None
+
+
+def gov_change_refusal(st: dict | None, gov: str, confirmed: bool) -> str:
+    """Why the game's Government screen would not make this change now, or "" when it would (or the state is unknown)."""
+    if not st:
+        return ""
+    if st["anarchy"]:
+        return (f"Error: IN_ANARCHY|Your civilization is in Anarchy until turn {st['anarchy_end']}: no government, and "
+                "no gold, science, culture or faith. The game allows no government change until it ends.")
+    if not st["usable"]:
+        return ""  # not unlocked, already current or unknown: civ6-mcp says which
+    if not st["can_at_all"] or st["change_made"] or not st["civic_done"]:
+        why = ("You already changed government this turn. " if st["change_made"] else
+               "No civic was completed this turn. " if st["can_at_all"] else "")
+        nxt = (f" The next chance is the turn your current civic, {st['civic']}, completes." if st["civic"] else
+               " No civic is in progress: choose one with set_research (category civic).")
+        return (f"Error: GOV_CHANGE_NOT_NOW|{why}The game allows a government change only on a turn you complete a "
+                f"civic, once that turn (its Government screen offers none otherwise).{nxt if not st['change_made'] else ''}")
+    if st["anarchy_turns"] > 0 and not confirmed:
+        name = st["name"] or gov
+        return (f"Error: ANARCHY_WARNING|You have had {name} before, and going back to it brings {st['anarchy_turns']} "
+                f"turns of Anarchy: no government, no gold, science, culture or faith, policies with no effect, and no "
+                f"government change until it ends. A government you have never had brings none. To switch anyway, "
+                f"call change_government with {gov} again this turn.")
+    return ""
+
+
+def gov_after_note(st: dict | None) -> str:
+    if st and st["anarchy"]:
+        return (f". ANARCHY until turn {st['anarchy_end']}: no government, and no gold, science, culture or faith "
+                "until then.")
+    return ""
+
+
 # Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the
 # game's DiplomacyDealView waits for it before it lets the player accept). civ6-mcp did each step in one Lua call:
 # - test_trade sent EQUALIZE and closed the session at once. The AI's late answer then stayed behind as a deal of its

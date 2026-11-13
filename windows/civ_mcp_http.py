@@ -581,6 +581,35 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return re.sub(r" \(verified remaining: -?\d+\)$", "", out) if "to give" in out else out
 
     _gsm.GameState.send_envoy = _send_envoy_count
+
+    # Government changes, checked as the game's Government screen checks them (bench_compat.gov_change_refusal has
+    # why): refused outside a civic turn, a second time in a turn and during Anarchy; a switch that brings Anarchy is
+    # made only when the agent asks for it twice on the same turn, and the result says when Anarchy ends.
+    _vendor_change_government = _gsm.GameState.change_government
+    _anarchy_warned: dict = {}  # government -> the turn the agent was warned about its Anarchy
+
+    async def _gov_state(self, gov):
+        try:
+            return bc.parse_gov_state(await self.conn.execute_write(bc.gov_state_lua(gov), timeout=10.0))
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("reading the government state failed", exc_info=True)
+            return None
+
+    async def _change_government_checked(self, government_type):
+        gov = str(government_type or "").strip().upper()
+        st = await _gov_state(self, gov)
+        refusal = bc.gov_change_refusal(st, gov, st is not None and _anarchy_warned.get(gov) == st["turn"])
+        if refusal:
+            if refusal.startswith("Error: ANARCHY_WARNING"):
+                _anarchy_warned[gov] = st["turn"]
+            return refusal
+        out = await _vendor_change_government(self, government_type)
+        if "GOVERNMENT_CHANGED" not in out:
+            return out
+        await asyncio.sleep(0.5)
+        return out + bc.gov_after_note(await _gov_state(self, gov))
+
+    _gsm.GameState.change_government = _change_government_checked
     _vendor_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_districts(self, unit_index, target_x, target_y):
@@ -1769,6 +1798,74 @@ async def issue_orders(ctx: Context, orders: str) -> str:
 if os.environ.get("CIV_MCP_DISABLE_LUA"):
     mcp._tool_manager.remove_tool("run_lua")
 
+# No going back. Game 22, turn 204: Sonnet switched government twice (turns 201 and 203), the second switch left its
+# science, culture and gold income at 0 (Anarchy), and it loaded its own turn-200 save and played turns 200 to 204
+# again. The load tools are there to recover a game that hung or crashed, so a save from a turn earlier than the
+# highest turn this run has reached is refused (bench_compat.earlier_turn_refusal). The highest turn is kept per run
+# id in ~/.civ6-mcp/top_turn.json, from end_turn and overview results (_bound_first), so it outlives a server restart.
+_TOP_TURN_PATH = os.path.join(os.path.expanduser("~"), ".civ6-mcp", "top_turn.json")
+
+
+def _top_turn() -> int:
+    try:
+        with open(_TOP_TURN_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return int(d.get("turn") or 0) if d.get("run_id") == srv.heartbeat._run_id else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def _note_turn(out) -> None:
+    turn = bc.turn_in_result(out) if isinstance(out, str) else None
+    if turn is None or turn <= _top_turn():
+        return
+    try:
+        os.makedirs(os.path.dirname(_TOP_TURN_PATH), exist_ok=True)
+        tmp = _TOP_TURN_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"run_id": srv.heartbeat._run_id, "turn": turn}, f)
+        os.replace(tmp, _TOP_TURN_PATH)
+    except OSError:
+        logging.getLogger("civ_mcp_http").warning("could not record the top turn", exc_info=True)
+
+
+def _no_going_back(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        name = kwargs.get("save_name")
+        if "save_index" in kwargs:  # load_save: the name behind the index of the last list_saves
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            try:
+                listing = await srv._get_game(ctx).list_saves()
+                name = bc.save_at_index(listing, int(kwargs["save_index"]))
+            except Exception:
+                name = None
+            if name is None:
+                return ("Error: UNKNOWN_SAVE|Could not tell which save that index is. Load it by name with "
+                        "load_game_save.")
+        refusal = bc.earlier_turn_refusal(name, _top_turn())
+        if refusal:
+            logging.getLogger("civ_mcp_http").info("Refused loading %s: the game has reached turn %s", name,
+                                                   _top_turn())
+            return refusal
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
+
+for _name in ("load_game_save", "restart_and_load", "load_save", "load_save_from_menu"):
+    _tool = mcp._tool_manager.get_tool(_name)
+    if _tool is not None:
+        _tool.fn = _no_going_back(_tool.fn)
+        _tool.description = (_tool.description or "") + bc.NO_GOING_BACK_NOTE
+
+# change_government's own description said "First switch after unlocking a new tier is free (no anarchy)"; the game's
+# rules, which the tool now checks (_change_government_checked), replace it.
+_tool = mcp._tool_manager.get_tool("change_government")
+if _tool is not None:
+    _tool.description = re.sub(r"\s*First switch after\s+unlocking a new tier is free \(no anarchy\)\.", "",
+                               _tool.description or "") + bc.NO_FREE_SWITCH_NOTE
+
 # civ6-mcp binds its call log, diary and heartbeat to the game only inside get_game_overview. An agent resumed
 # after a server restart can play for turns from end_turn results alone, and until it asks for the overview every
 # record waits in memory, untagged by turn (game 1, turns 101-105). Bind on the first call of any tool instead.
@@ -1803,7 +1900,9 @@ def _bound_first(fn):
                 await _bind_game(ctx)
             except Exception:  # never block the call itself
                 _log.warning("binding the call log failed", exc_info=True)
-        return await fn(*args, **kwargs)
+        out = await fn(*args, **kwargs)
+        _note_turn(out)  # the highest turn reached, for _no_going_back
+        return out
 
     return wrapper
 

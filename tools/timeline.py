@@ -254,10 +254,22 @@ def build(run_dir: Path) -> dict:
                 t["reflections"] = reflections(e["input"])
         elif k == "tool_result" and e["is_error"]:
             t["tool_errors"] += 1
+    # Seconds per turn add up each unbroken stretch of the turn's events, so a turn the agent played twice (it loaded an
+    # earlier save) counts both passes, not the span from the first pass's start to the second pass's end.
+    spent: dict[int, float] = {}
+    run_turn, run_start, prev_ts = None, 0.0, 0.0
+    for e in events:
+        if e["turn"] != run_turn:
+            if run_turn is not None:
+                spent[run_turn] = spent.get(run_turn, 0.0) + prev_ts - run_start
+            run_turn, run_start = e["turn"], e["ts"]
+        prev_ts = e["ts"]
+    if run_turn is not None:
+        spent[run_turn] = spent.get(run_turn, 0.0) + prev_ts - run_start
     rows = []
     for n in sorted(per):
         t = per[n]
-        t["seconds"] = round(t["end"] - t["start"], 1)
+        t["seconds"] = round(spent[n], 1)
         t["usd"] = round(t["usd"], 4)
         if n in diary:
             t["diary"] = {k: diary[n].get(k) for k in DIARY_KEYS}

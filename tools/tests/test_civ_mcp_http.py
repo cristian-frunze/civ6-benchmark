@@ -731,6 +731,114 @@ async def main():
     check("end_turn: escape note after the report", out.startswith("Turn 132 -> 133 | Score: 233\n\nSpy escape: Your spy "
           "Sherzi") and out2 == "Turn 133 -> 134 | Score: 234", repr(out))
 
+    # 16m. No going back (game 22, turn 204: Sonnet loaded its turn-200 save after a government switch left it in Anarchy).
+    bcx = ns["bc"]
+    check("save turn from the name", bcx.save_turn("0_MCP_0200") == 200 and bcx.save_turn("AutoSave_0023") == 23
+          and bcx.save_turn("BENCH_PANGAEA_ONLINE_T1") is None)
+    check("result turn: end_turn and overview", bcx.turn_in_result("Turn 222 -> 223 | Score: 471") == 223
+          and bcx.turn_in_result("Turn 204 | Sumeria (Gilgamesh) | Score: 442") == 204
+          and bcx.turn_in_result("Turn 132 ended while you answered the AI civ ...\n\nTurn 132 -> 133 | Score") == 133
+          and bcx.turn_in_result("MOVING_TO|40,32") is None)
+    check("earlier save refused", bcx.earlier_turn_refusal("0_MCP_0200", 204).startswith("Error: EARLIER_TURN|0_MCP_0200 "
+          "is from turn 200, and this game has reached turn 204.") and "AutoSave_0204" in bcx.earlier_turn_refusal("0_MCP_0200", 204))
+    check("current-turn saves allowed", bcx.earlier_turn_refusal("AutoSave_0204", 204) == ""
+          and bcx.earlier_turn_refusal("0_MCP_0204", 204) == "" and bcx.earlier_turn_refusal(None, 204) == "")
+    check("before the first turn anything loads", bcx.earlier_turn_refusal("AutoSave_0001", 1) == ""
+          and bcx.earlier_turn_refusal("BENCH_PANGAEA_ONLINE_T1", 0) == "")
+    check("a named save mid-game refused", "is not a save of a turn of this game" in
+          bcx.earlier_turn_refusal("BENCH_PANGAEA_ONLINE_T1", 50))
+    check("list_saves index resolved", bcx.save_at_index("Available saves (filesystem scan, sorted by date):\n"
+          "  1. 0_MCP_0204\n  2. AutoSave_0204\n  9. 0_MCP_0200\n", 9) == "0_MCP_0200"
+          and bcx.save_at_index("  1. 0_MCP_0204\n", 3) is None)
+    _saved_path, _saved_run = ns["_TOP_TURN_PATH"], ns["srv"].heartbeat._run_id
+    _tmpdir = tempfile.mkdtemp()
+    ns["_TOP_TURN_PATH"] = os.path.join(_tmpdir, "top_turn.json")
+    ns["srv"].heartbeat._run_id = "g99-test"
+    try:
+        ns["_note_turn"]("Turn 203 -> 204 | Score: 442")
+        ns["_note_turn"]("Turn 200 | Sumeria")  # a lower turn never lowers it
+        loads = []
+        async def fake_load(ctx=None, save_name=None): loads.append(save_name); return "Loaded " + save_name
+        guarded = ns["_no_going_back"](fake_load)
+        out1 = await guarded(ctx=None, save_name="0_MCP_0200")
+        out2 = await guarded(ctx=None, save_name="AutoSave_0204")
+        check("guard: refuses turn 200 at turn 204, loads turn 204", out1.startswith("Error: EARLIER_TURN|")
+              and out2 == "Loaded AutoSave_0204" and loads == ["AutoSave_0204"] and ns["_top_turn"]() == 204, (out1, loads))
+        ns["srv"].heartbeat._run_id = "g100-next"
+        check("guard: a new run starts from 0", ns["_top_turn"]() == 0)
+    finally:
+        ns["_TOP_TURN_PATH"], ns["srv"].heartbeat._run_id = _saved_path, _saved_run
+        shutil.rmtree(_tmpdir, ignore_errors=True)
+    for _n in ("load_game_save", "restart_and_load", "load_save", "load_save_from_menu"):
+        _t = mcp._tool_manager.get_tool(_n)
+        check(f"{_n}: guarded and described", _t.fn.__wrapped__.__code__ is ns["_no_going_back"](stock).__code__
+              and "does not go back" in _t.description, _n)
+
+    # 16n. Government changes checked as the game's Government screen does (game 22, turn 203: back to Classical
+    # Republic, Anarchy, and the agent took it for a bug).
+    st = bcx.parse_gov_state(["junk", "GOVSTATE|203|8|false|-1|true|false|true|3|true|Classical Republic|Professional Sports"])
+    check("gov state parsed", st == {"turn": 203, "current": 8, "anarchy": False, "anarchy_end": -1, "civic_done": True,
+          "change_made": False, "can_at_all": True, "anarchy_turns": 3, "usable": True, "name": "Classical Republic",
+          "civic": "Professional Sports"}, st)
+    check("gov state: missing or short is None", bcx.parse_gov_state(["OK"]) is None
+          and bcx.parse_gov_state(["GOVSTATE|1|2"]) is None)
+    warn = bcx.gov_change_refusal(st, "GOVERNMENT_CLASSICAL_REPUBLIC", False)
+    check("back to a government had before: warned first", warn.startswith("Error: ANARCHY_WARNING|You have had "
+          "Classical Republic before") and "3 turns of Anarchy" in warn and "again this turn" in warn, warn)
+    check("confirmed on the same turn: allowed", bcx.gov_change_refusal(st, "GOVERNMENT_CLASSICAL_REPUBLIC", True) == "")
+    new = dict(st, anarchy_turns=0)
+    check("a government never had: allowed", bcx.gov_change_refusal(new, "GOVERNMENT_COMMUNISM", False) == "")
+    no_civic = bcx.gov_change_refusal(dict(new, civic_done=False), "GOVERNMENT_COMMUNISM", True)
+    check("no civic this turn: refused, next chance named", no_civic.startswith("Error: GOV_CHANGE_NOT_NOW|No civic was "
+          "completed this turn.") and "Professional Sports, completes" in no_civic, no_civic)
+    check("no civic in progress: says pick one", "choose one with set_research" in
+          bcx.gov_change_refusal(dict(new, civic_done=False, civic=""), "GOVERNMENT_COMMUNISM", False))
+    twice = bcx.gov_change_refusal(dict(new, change_made=True), "GOVERNMENT_COMMUNISM", False)
+    check("second change in a turn: refused", twice.startswith("Error: GOV_CHANGE_NOT_NOW|You already changed "
+          "government this turn.") and "next chance" not in twice, twice)
+    anarchy = dict(new, anarchy=True, anarchy_end=206, current=-1)
+    check("during Anarchy: refused with its end", bcx.gov_change_refusal(anarchy, "GOVERNMENT_COMMUNISM", True)
+          .startswith("Error: IN_ANARCHY|Your civilization is in Anarchy until turn 206"))
+    check("unknown state: civ6-mcp decides", bcx.gov_change_refusal(None, "GOVERNMENT_X", False) == "")
+    check("not unlocked or current: civ6-mcp says which", bcx.gov_change_refusal(dict(new, usable=False, civic_done=False),
+          "GOVERNMENT_AUTOCRACY", False) == "")
+    check("no change at all now: the rule alone", bcx.gov_change_refusal(dict(new, can_at_all=False), "GOVERNMENT_COMMUNISM",
+          False).startswith("Error: GOV_CHANGE_NOT_NOW|The game allows a government change only on a turn"))
+    check("after note: Anarchy and its end", bcx.gov_after_note(anarchy).startswith(". ANARCHY until turn 206")
+          and bcx.gov_after_note(new) == "" and bcx.gov_after_note(None) == "")
+    lua = bcx.gov_state_lua("GOVERNMENT_COMMUNISM")
+    check("state Lua: anarchy turns read only outside Anarchy", "if usable and not an then" in lua
+          and "GetAnarchyTurns(row.Index)" in lua and "GameInfo.Governments['GOVERNMENT_COMMUNISM']" in lua)
+    check("state Lua: a bad name is not pasted in", "Governments['']" in bcx.gov_state_lua("X'] os.exit() --"))
+    calls, warned_turn = [], {"t": 203}
+
+    class FakeConn:
+        async def execute_write(self, lua, timeout=None):
+            calls.append("state" if "GOVSTATE" in lua else "other")
+            return [f"GOVSTATE|{warned_turn['t']}|3|false|-1|true|false|true|3|true|Classical Republic|Space Race"]
+
+    class FakeGame:
+        conn = FakeConn()
+
+    _vendor = ns["_vendor_change_government"]
+    changed = []
+    async def fake_vendor(self, g): changed.append(g); return "GOVERNMENT_CHANGED|" + g + "|Classical Republic"
+    ns["_vendor_change_government"] = fake_vendor
+    try:
+        r1 = await GameState.change_government(FakeGame(), "GOVERNMENT_CLASSICAL_REPUBLIC")
+        r2 = await GameState.change_government(FakeGame(), "government_classical_republic")
+        warned_turn["t"] = 204
+        ns["_anarchy_warned"].clear()
+        r3 = await GameState.change_government(FakeGame(), "GOVERNMENT_CLASSICAL_REPUBLIC")
+    finally:
+        ns["_vendor_change_government"] = _vendor
+    check("change_government: warns, then switches on the second call", r1.startswith("Error: ANARCHY_WARNING|")
+          and r2.startswith("GOVERNMENT_CHANGED|") and changed == ["government_classical_republic"]
+          and r3.startswith("Error: ANARCHY_WARNING|"), (r1, r2, r3, changed))
+    _t = mcp._tool_manager.get_tool("change_government")
+    check("change_government: description says the game's rules", "First switch after" not in _t.description
+          and "at least 3 turns of Anarchy" in _t.description, _t.description)
+
     # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
     lua = lq.build_attack_unit(13, 42, 35)
     check("attack builder replaced", lq.build_attack_unit.__qualname__.startswith("attack_lua"))
