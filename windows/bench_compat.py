@@ -284,6 +284,98 @@ def trade_route_lua(original):
     return build
 
 
+
+# A city's attack list named units it could not attack. get_cities lists "CAN ATTACK" targets for a city with walls:
+# every unit within 3 tiles that is not the player's, at war or not, seen or not, civilians included, though a city
+# strikes at range 2. In game 20 it listed a Builder (turn 77) and Brazilian units while at peace with Brazil (turn 172).
+# civ6-mcp's own city attack checks the game's target list (CityManager.GetCommandTargets with RANGE_ATTACK: range,
+# line of sight, and empty once the city has fired), so the list now comes from it too, keeping units of civs at war
+# with the player and barbarians, and no civilians. The game's list alone is not enough: on game 20's turn-173 save it
+# still held a Brazilian Machine Gun 2 tiles from Shuruppak, with Brazil at peace.
+_CITY_TARGETS_START = "    local cityTargets = {}\n"
+_CITY_TARGETS_END = "    local pillDistricts = {}\n"
+_CITY_TARGETS_LUA = """    local cityTargets = {}
+    if wallMax > 0 then
+        local okT, tg = pcall(function() return CityManager.GetCommandTargets(c, CityCommandTypes.RANGE_ATTACK) end)
+        if okT and type(tg) == "table" then
+            local W = Map.GetGridSize()
+            local dip = Players[me]:GetDiplomacy()
+            local function hostile(o)
+                local ok, war = pcall(function() return dip:IsAtWarWith(o) end)
+                local okB, barb = pcall(function() return Players[o]:IsBarbarian() end)
+                return (ok and war) or (okB and barb)
+            end
+            local seen = {}
+            for _, tbl in pairs(tg) do if type(tbl) == "table" then for _, idx in ipairs(tbl) do
+                if type(idx) == "number" and not seen[idx] then
+                    seen[idx] = true
+                    local tx, ty = idx % W, math.floor(idx / W)
+                    local pu = Map.GetUnitsAt(tx, ty)
+                    if pu then for other in pu:Units() do
+                        local eInfo = GameInfo.Units[other:GetType()]
+                        if other:GetOwner() ~= me and hostile(other:GetOwner())
+                                and not (eInfo and eInfo.FormationClass == "FORMATION_CLASS_CIVILIAN") then
+                            local eName = eInfo and eInfo.UnitType or "UNKNOWN"
+                            local eHP = other:GetMaxDamage() - other:GetDamage()
+                            table.insert(cityTargets, eName .. "@" .. tx .. "," .. ty .. "(" .. eHP .. "hp)")
+                        end
+                    end end
+                end
+            end end end
+        end
+    end
+"""
+
+
+def city_targets_lua(original):
+    """civ6-mcp's cities query, whose CAN ATTACK list is the game's own target list for the city's ranged strike."""
+    def build(*args, **kwargs) -> str:
+        lua = original(*args, **kwargs)
+        i = lua.find(_CITY_TARGETS_START)
+        j = lua.find(_CITY_TARGETS_END, i) if i >= 0 else -1
+        if i < 0 or j < 0 or lua.count(_CITY_TARGETS_START) != 1:
+            return lua  # civ6-mcp changed: its own list, unchanged
+        return lua[:i] + _CITY_TARGETS_LUA + lua[j:]
+    return build
+
+
+# Envoys: one per call, and the result did not say more were left. In game 20 the agent sent an envoy, ended the turn,
+# was refused over envoys still to give, and sent a second (turns 152 and 173). civ6-mcp re-reads the count afterwards,
+# but the request is asynchronous and that re-read never made it into the result. The count before the request, less
+# this one, is what is left.
+_ENVOY_REQUEST = "UI.RequestPlayerOperation(me, PlayerOperations.GIVE_INFLUENCE_TOKEN, params)"
+_ENVOY_SENT = 'print("OK:ENVOY_SENT|" .. name)'
+
+
+def send_envoy_lua(original):
+    """civ6-mcp's send_envoy, whose result says how many envoys are still to give."""
+    def build(city_state_player_id: int) -> str:
+        lua = original(city_state_player_id)
+        if lua.count(_ENVOY_REQUEST) != 1 or lua.count(_ENVOY_SENT) != 1:
+            return lua  # civ6-mcp changed: its own result, unchanged
+        lua = lua.replace(_ENVOY_REQUEST, "local __left = pInfluence:GetTokensToGive() - 1\n" + _ENVOY_REQUEST)
+        return lua.replace(_ENVOY_SENT, (
+            'print("OK:ENVOY_SENT|" .. name .. (__left > 0 and (". " .. __left .. " more envoy" .. '
+            '(__left > 1 and "s" or "") .. " to give this turn: send them before end_turn") or ". No envoys left to give"))'))
+    return build
+
+
+# Settle sites on another civ's land. Both settle scans (get_settle_advisor around a Settler, get_global_settle_advisor
+# over the map) skip water, mountains and tiles within 3 of a city, but not tiles another civ owns, where the game
+# will not found a city. In game 20 the global advisor kept offering (36,36) inside Spain's borders (turn 182).
+_SETTLE_TILE = "and not cPlot:IsWater() and not cPlot:IsMountain() then"
+
+
+def settle_owned_lua(original):
+    """A civ6-mcp settle scan that leaves out tiles another civ owns."""
+    def build(*args, **kwargs) -> str:
+        lua = original(*args, **kwargs)
+        if lua.count(_SETTLE_TILE) != 1:
+            return lua  # civ6-mcp changed: its own scan, unchanged
+        return lua.replace(_SETTLE_TILE, "and not cPlot:IsWater() and not cPlot:IsMountain() "
+                                         "and (cPlot:GetOwner() == -1 or cPlot:GetOwner() == me) then")
+    return build
+
 # Attacks on cities. civ6-mcp's attack looks for an enemy unit on the target tile and answers NO_ENEMY when there is
 # none, so a city with no unit in it could not be attacked at all. In game 20 the agent declared war on Brazil (turn 57)
 # to take Salvador da Bahia, a city with no walls and no unit, and every attack on it got "No hostile unit at (42,35)".
@@ -384,6 +476,41 @@ def city_attack_report(out: str, def_line: str) -> str:
         except ValueError:
             pass
     return re.sub(r"\n  Post-combat: [^\n]*", "", out) + "\n  Post-combat: " + now
+
+
+# A melee attack the game did not carry out. In game 21 the agent noted six times that melee attacks into hills,
+# forest or across a river "fail silently" (turns 40, 41, 62, 66, 80, 95). Moved next to the target with moves left,
+# the result said "It can attack again this turn", and the attack from there came back as MELEE_ATTACK with civ6-mcp's
+# estimate ("est damage dealt:~100 ... Post-combat: ~0/100 (estimate)") while the target's HP had not changed: the
+# game had refused it. civ6-mcp falls back to its estimate whenever its read 0.5 s after the attack shows no change.
+SHORT_OF_MOVES = ("most likely too few for the target's tile (hills, forest, marsh or a river crossing cost more), "
+                  "so another attack this turn will probably fail too. Attack next turn, when the unit has all its "
+                  "moves, or with another unit.")
+_EST_MELEE_RE = re.compile(r"^MELEE_ATTACK\|[^\n]*\|est damage dealt:~\d+", re.M)
+
+
+def melee_estimated(out: str) -> bool:
+    """True when civ6-mcp's melee result is its estimate: its own read showed no change to the target."""
+    return bool(_EST_MELEE_RE.search(out))
+
+
+# A spy's discovered mission. The game asks its owner to pick an escape route, and civ6-mcp picks one by itself
+# while it ends the turn (end_turn.py: the fastest district the city has), but only logs it ("Auto-resolved spy
+# escape: OK:ESCAPE_ROUTE|Sherzi escaping via DISTRICT_CITY_CENTER"). In game 21 the agent saw the prompt it could
+# not answer ("The Choose Escape Route notification can't be handled via the tools"), then no spy, twice.
+def escape_note(lines: list[str]) -> str:
+    """The end_turn note for the escape routes civ6-mcp picked during the turn end."""
+    notes = []
+    for ln in lines:
+        m = re.search(r"OK:ESCAPE_ROUTE\|(.+?) escaping via (DISTRICT_\w+)", ln)
+        if m:
+            where = m[2].removeprefix("DISTRICT_").replace("_", " ").title()
+            notes.append(f"Your spy {m[1]} was discovered on its mission, and the game asked for an escape route: "
+                         f"the harness chose the {where}, the fastest the city offers.")
+    if not notes:
+        return ""
+    return ("Spy escape: " + " ".join(notes) + " Whether the spy gets away is the game's roll: a spy that escapes "
+            "comes back to you, and a caught one is gone. It may not show in get_spies while it travels.")
 
 
 # Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the

@@ -424,8 +424,9 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if (ame[0], ame[1]) == (bme[0], bme[1]):
             return (f"Error: NOT_MOVED|The move-and-attack order was sent, but after {waited:.0f} seconds the unit is "
                     f"still at {start} and no combat has happened. Check get_units before you order it again.")
-        if ame[2] == 1:
-            then = "It can attack again this turn." if ame[4] > 0 else "It has no moves left to attack this turn."
+        if ame[2] == 1:  # the game stops a move-and-attack next to the target when the unit cannot go on
+            then = (f"The game stopped it there with {ame[4]} moves left, " + bc.SHORT_OF_MOVES if ame[4] > 0
+                    else "It has no moves left to attack this turn.")
             return (f"MOVED_ADJACENT|Unit moved from {start} to {here}, next to {foe} at ({tx},{ty}), and did not "
                     f"attack ({moves}). {then}")
         return (f"Error: STOPPED_SHORT|Unit moved from {start} to {here} but could not reach {foe} at ({tx},{ty}): "
@@ -567,6 +568,19 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # It sits under _attack_unit_settled, which retries and re-reads the attack.
     _lq.build_attack_unit = bc.attack_lua(_lq.build_attack_unit)  # GameState.attack_unit looks it up at call time
     _lq.build_make_trade_route = bc.trade_route_lua(_lq.build_make_trade_route)  # the refusal's reasons
+    _lq.build_cities_query = bc.city_targets_lua(_lq.build_cities_query)  # the game's own attack targets
+    _lq.build_send_envoy = bc.send_envoy_lua(_lq.build_send_envoy)  # says how many envoys are left
+    for _name in ("build_settle_advisor_query", "build_global_settle_scan"):  # no sites on another civ's land
+        setattr(_lq, _name, bc.settle_owned_lua(getattr(_lq, _name)))
+    _vendor_send_envoy = _gsm.GameState.send_envoy
+
+    async def _send_envoy_count(self, city_state_player_id):
+        out = await _vendor_send_envoy(self, city_state_player_id)
+        # civ6-mcp re-reads the count 0.1 s after the request, which may not have landed yet; the count the result
+        # already gives (bench_compat.send_envoy_lua) is the one to keep.
+        return re.sub(r" \(verified remaining: -?\d+\)$", "", out) if "to give" in out else out
+
+    _gsm.GameState.send_envoy = _send_envoy_count
     _vendor_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_districts(self, unit_index, target_x, target_y):
@@ -590,7 +604,10 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             result = await _original_attack_unit(self, unit_index, target_x, target_y)
             logging.getLogger("civ_mcp_http").info("Ranged attack refused once; the retry 1 s later gave: %s",
                                                    result.strip().splitlines()[-1][:160])
-        if "STOPPED_SHORT|" not in result or before is None or before[0] == "gone":
+        if before is None or before[0] == "gone":
+            return result
+        estimated = bc.melee_estimated(result)  # an adjacent attack civ6-mcp could not see land (bench_compat)
+        if "STOPPED_SHORT|" not in result and not estimated:
             return result
         after, waited = None, 0.0
         while waited < 6.0:
@@ -601,8 +618,34 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 break
         if after is None:
             return result
+        if estimated:
+            logging.getLogger("civ_mcp_http").info("Adjacent attack re-read after %.1f s: %s -> %s", waited, before,
+                                                   after)
+            if not _attack_resolved(before, after) and after[0][4] != before[0][4]:
+                return result  # its moves are spent but no hit points changed yet: keep civ6-mcp's estimate
+            i = _EST_START.search(result).start()
+            return result[:i] + _adjacent_report(before, after, target_x, target_y, waited)
         logging.getLogger("civ_mcp_http").info("Move-and-attack re-read after %.1f s: %s -> %s", waited, before, after)
         return result.split("Error: STOPPED_SHORT|", 1)[0] + _attack_report(before, after, target_x, target_y, waited)
+
+    _EST_START = re.compile(r"^MELEE_ATTACK\|", re.M)
+
+    def _adjacent_report(before, after, tx, ty, waited) -> str:
+        """What an attack from next to the target did, read back once it has played out."""
+        (bme, bfoe), (ame, afoe) = before, after
+        foe = bfoe[0] if bfoe else "the target"
+        start = f"({bme[0]},{bme[1]})"
+        if ame == "gone":
+            return (f"MELEE_ATTACK|target:{foe} at ({tx},{ty})|Your unit attacked from {start} and no longer exists: "
+                    "it died in the attack.")
+        if _attack_resolved(before, after):
+            report = _attack_report(before, after, tx, ty, waited)
+            return report.replace(f"|moved from {start} and attacked from {start}|", f"|attacked from {start}|") \
+                .replace(f"|moved from {start} and advanced into", "|advanced into")
+        hp = f" still has {bfoe[1]} HP," if bfoe else " is untouched,"
+        return (f"Error: NOT_ATTACKED|The game did not carry out the attack: after {waited:.0f} seconds {foe} at "
+                f"({tx},{ty}){hp} and your unit at {start} still has its {bme[4]} moves left, "
+                + bc.SHORT_OF_MOVES + " Check get_units before you order it again.")
 
     _gsm.GameState.attack_unit = _attack_unit_settled
 
@@ -1399,8 +1442,31 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
         return wrapper
 
+    # A discovered spy (game 21, turns 132 and 156): civ6-mcp picks its escape route itself while the turn ends and
+    # only logs the pick, so the agent saw a prompt it could not answer and then no spy. end_turn now says so
+    # (bench_compat.escape_note).
+    _ESCAPES: list[str] = []
+
+    class _EscapeLog(logging.Filter):
+        def filter(self, record):
+            if isinstance(record.msg, str) and record.msg.startswith("Auto-resolved spy escape"):
+                _ESCAPES.append(record.getMessage())
+            return True
+
+    logging.getLogger("civ_mcp.end_turn").addFilter(_EscapeLog())
+
+    def _reports_escapes(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            _ESCAPES.clear()
+            out = await fn(*args, **kwargs)
+            note = bc.escape_note(_ESCAPES) if isinstance(out, str) else ""
+            return out + "\n\n" + note if note else out
+
+        return wrapper
+
     _tool = mcp._tool_manager.get_tool("end_turn")
-    _tool.fn = _names_promotions(_explores_again(_hang_note(_units_first(_tool.fn))))
+    _tool.fn = _reports_escapes(_names_promotions(_explores_again(_hang_note(_units_first(_tool.fn)))))
     _tool = mcp._tool_manager.get_tool("unit_action")
     _tool.fn = _tracks_explorers(_tool.fn)
 

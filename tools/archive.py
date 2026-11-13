@@ -26,6 +26,7 @@ windows/archive-turn.ps1 (the Civ6Archive task: screenshot and saves, started on
 from __future__ import annotations
 
 import argparse
+import re
 import base64
 import hashlib
 import json
@@ -90,11 +91,18 @@ class Archiver:
         which goes on stdin, a few KB for the whole game: Windows OpenSSH stalls on stdin past about 8 KB.
         """
         have, after = {}, {}
+        now = self.heartbeat_turn()
         for key in ("civ6mcp", "shots", "saves"):
             files = sorted(p for p in (self.out / key).iterdir() if p.is_file())
             if key in ("shots", "saves") and files:
-                after[key] = files[-1].name
-                files = files[-1:]
+                # The watermark is the newest file up to the turn the game is on. A file from a later turn is a
+                # leftover: game 21 started with a test save of game 20's turn 146 still loaded, so the first
+                # heartbeat (already game 21's run id) said turn 146, its folder got a T0146 shot, and with that
+                # name as the watermark turns 1 to 145 were never synced. Leftovers are listed by name as well.
+                upto = [p for p in files if not now or _turn_of(p.name) <= now]
+                if upto:
+                    after[key] = upto[-1].name
+                files = upto[-1:] + [p for p in files if p not in upto]
             for p in files:
                 size = p.stat().st_size
                 have[f"{key}/{p.name}"] = {"size": size, "tail": tail_hash(p, size) if size else ""}
@@ -176,6 +184,12 @@ class Archiver:
             self.log(f"turn {self.heartbeat_turn()}: {total} file updates, {t} transcripts")
         if total or t or not (self.out / "turns.jsonl").exists():
             timeline.build(self.run)  # timeline.jsonl, turns.jsonl, timeline.md
+
+
+def _turn_of(name: str) -> int:
+    """The turn in a shot or save name (T0042.jpg, 0_MCP_0042.Civ6Save); 0 when there is none."""
+    m = re.search(r"(\d+)$", name.rsplit(".", 1)[0])
+    return int(m.group(1)) if m else 0
 
 
 def main() -> None:

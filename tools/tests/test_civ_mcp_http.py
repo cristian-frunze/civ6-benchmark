@@ -5,7 +5,7 @@ network needed.
 
     cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_civ_mcp_http.py
 """
-import asyncio, inspect as _inspect, os, shutil, sys, tempfile, types
+import asyncio, inspect as _inspect, logging, os, shutil, sys, tempfile, types
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ["CIV_MCP_BASE_GAME"] = "1"
 # On the PC the Lua prelude sits next to the module, as here.
@@ -420,8 +420,10 @@ async def main():
     chain, f = [], tool.fn
     while f is not None:
         chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
-    want = [bound] + [ns[w](stock).__code__ for w in ("_names_promotions", "_explores_again", "_hang_note", "_units_first")]
-    check("end_turn tool: promotions named, explore, hang note, then the units/pending wrapper", chain[:5] == want)
+    want = [bound] + [ns[w](stock).__code__ for w in ("_reports_escapes", "_names_promotions", "_explores_again",
+                                                       "_hang_note", "_units_first")]
+    check("end_turn tool: spy escapes, promotions named, explore, hang note, then the units/pending wrapper",
+          chain[:6] == want)
     import inspect
     src_et = inspect.getsource(tool.fn.__wrapped__.__wrapped__.__wrapped__)
     check("civ6-mcp's end_turn tool calls gs.end_turn for the first try and the retry",
@@ -484,7 +486,7 @@ async def main():
                "it died in the attack."),
         ("moved next to it, no attack", [START, ["ME|43|44|1|100|1", "FOE|UNIT_WARRIOR|41|20"]], 13,
          EST + "MOVED_ADJACENT|Unit moved from (42,43) to (43,44), next to UNIT_WARRIOR at (43,45), and did not attack "
-               "(moves left: 1). It can attack again this turn."),
+               "(moves left: 1). The game stopped it there with 1 moves left, " + ns["bc"].SHORT_OF_MOVES),
         ("really stopped short", [START, ["ME|44|44|2|100|0", "FOE|UNIT_WARRIOR|41|20"]], 13,
          EST + "Error: STOPPED_SHORT|Unit moved from (42,43) to (44,44) but could not reach UNIT_WARRIOR at (43,45): 2 "
                "tiles away, moves left: 0. No attack happened."),
@@ -502,6 +504,34 @@ async def main():
     out = await attack(g, 9, 43, 45)
     check("adjacent attack passes through, one read", out == EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|enemy "
           "HP:41 -> 41/100" and g.conn.reads == 1, f"{g.conn.reads} reads: {out!r}")
+    # 11b. An adjacent attack civ6-mcp reported from its estimate (game 21, turn 40: "est damage dealt:~100" while the
+    #      target kept its 100 HP, after a move-and-attack stopped next to it with 1 move left).
+    async def adjacent_est(self, ui, tx, ty):
+        return (EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|enemy HP:41 -> 41/100|your HP:100 -> 100 CS:30"
+                "|est damage dealt:~41\n  Post-combat: ~0/41 (estimate — verify with get_units)")
+    NEXT = ["ME|43|44|1|100|1", "FOE|UNIT_WARRIOR|41|20"]
+    adj_cases = [
+        ("refused: says so", [NEXT], 13,
+         EST + "Error: NOT_ATTACKED|The game did not carry out the attack: after 6 seconds UNIT_WARRIOR at (43,45) still "
+               "has 41 HP, and your unit at (43,44) still has its 1 moves left, " + ns["bc"].SHORT_OF_MOVES
+               + " Check get_units before you order it again."),
+        ("landed late: real numbers", [NEXT, NEXT, ["ME|43|44|1|81|0", "FOE|UNIT_WARRIOR|9|20"]], 3,
+         EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|attacked from (43,44)|enemy HP:41 -> 9|your HP:100 -> 81"
+               "|moves left: 0"),
+        ("killed and advanced", [NEXT, ["ME|43|45|0|95|0"]], 2,
+         EST + "MELEE_ATTACK|target:UNIT_WARRIOR at (43,45)|advanced into (43,45)|enemy HP:41 -> killed|your HP:100 -> "
+               "95|moves left: 0"),
+        ("moves spent, hit points not read yet: estimate kept", [NEXT, ["ME|43|44|1|100|0", "FOE|UNIT_WARRIOR|41|20"]],
+         13, None),
+    ]
+    ns["_original_attack_unit"] = adjacent_est
+    for name, states, reads, want in adj_cases:
+        g = AttackGame(states)
+        out = await attack(g, 9, 43, 45)
+        want = want or await adjacent_est(None, 9, 43, 45)
+        check(f"adjacent attack: {name}", out == want and g.conn.reads == reads, f"{g.conn.reads} reads: {out!r}")
+    check("estimate detection", ns["bc"].melee_estimated(await adjacent_est(None, 9, 43, 45))
+          and not ns["bc"].melee_estimated(await adjacent(None, 9, 43, 45)))
     class Failing:
         async def execute_write(self, lua, timeout=None): raise TimeoutError
     ns["_original_attack_unit"] = stopped_short
@@ -645,6 +675,61 @@ async def main():
           and "The game will not start this route to (35,17)" in lua and "returned false" not in lua
           and "CityManager.GetCityAt(unit:GetX(), unit:GetY())" in lua and lua.count("UnitManager.RequestOperation") == 1
           and "ERR:CAPACITY_FULL" in lua)
+
+    # 16i. A city's CAN ATTACK list is the game's own target list (game 20: a Builder on turn 77, units of a civ at
+    # peace on turn 172).
+    lua = lq.build_cities_query()
+    check("city attack list: the game's own targets",
+          "CityManager.GetCommandTargets(c, CityCommandTypes.RANGE_ATTACK)" in lua
+          and "if wallMax > 0 then\n        local cx, cy = c:GetX(), c:GetY()" not in lua
+          and lua.count("local cityTargets = {}") == 1 and lua.count("local pillDistricts = {}") == 1
+          and "table.concat(cityTargets" in lua and "__benchRes(plot)" in lua
+          and "dip:IsAtWarWith(o)" in lua and "FORMATION_CLASS_CIVILIAN" in lua)
+
+    # 16j. send_envoy says how many envoys are left (game 20, turns 152 and 173: an end turn refused over the second).
+    lua = lq.build_send_envoy(15)
+    check("send_envoy: counts envoys before the request",
+          lua.index("local __left = pInfluence:GetTokensToGive() - 1") < lua.index("UI.RequestPlayerOperation")
+          and "to give this turn: send them before end_turn" in lua and lua.count("OK:ENVOY_SENT") == 1)
+
+    class _Envoy:
+        conn = None
+    async def vendor_envoy(self, pid):
+        return f"OK:ENVOY_SENT|Mohenjo-Daro. 1 more envoy to give this turn: send them before end_turn (verified remaining: 2)"
+    ns_vendor = ns["_vendor_send_envoy"]
+    ns["_vendor_send_envoy"] = vendor_envoy
+    try:
+        out = await ns["_send_envoy_count"](_Envoy(), 15)
+    finally:
+        ns["_vendor_send_envoy"] = ns_vendor
+    check("send_envoy: the stale re-read is dropped", out.endswith("send them before end_turn"), out)
+
+    # 16k. Settle scans leave out tiles another civ owns (game 20, turn 182: a site inside Spain's borders).
+    for name, lua in (("settle advisor", lq.build_settle_advisor_query(5)), ("global settle scan", lq.build_global_settle_scan())):
+        check(f"{name}: no sites on another civ's land",
+              lua.count("(cPlot:GetOwner() == -1 or cPlot:GetOwner() == me) then") == 1 and "local me = " in lua)
+
+    # 16l. end_turn passes on the escape route civ6-mcp picked for a discovered spy (game 21, turns 132 and 156).
+    note = ns["bc"].escape_note(["Auto-resolved spy escape: OK:ESCAPE_ROUTE|Sherzi escaping via DISTRICT_CITY_CENTER",
+                                 "Auto-resolved spy escape: OK:ESCAPE_ROUTE|Hakim escaping via DISTRICT_COMMERCIAL_HUB"])
+    check("escape note: names each spy and route", note.startswith("Spy escape: Your spy Sherzi was discovered")
+          and "chose the City Center" in note and "Hakim" in note and "chose the Commercial Hub" in note
+          and "game's roll" in note, note)
+    check("escape note: nothing without a pick", ns["bc"].escape_note(["Auto-resolved spy escape: ERR:NO_CITY"]) == "")
+    async def ending_turn(*a, **k):
+        logging.getLogger("civ_mcp.end_turn").info("Auto-resolved spy escape: %s",
+                                                   "OK:ESCAPE_ROUTE|Sherzi escaping via DISTRICT_CITY_CENTER")
+        return "Turn 132 -> 133 | Score: 233"
+    async def quiet_turn(*a, **k): return "Turn 133 -> 134 | Score: 234"
+    _lvl = logging.getLogger("civ_mcp.end_turn").level
+    logging.getLogger("civ_mcp.end_turn").setLevel(logging.INFO)
+    try:
+        out = await ns["_reports_escapes"](ending_turn)()
+        out2 = await ns["_reports_escapes"](quiet_turn)()
+    finally:
+        logging.getLogger("civ_mcp.end_turn").setLevel(_lvl)
+    check("end_turn: escape note after the report", out.startswith("Turn 132 -> 133 | Score: 233\n\nSpy escape: Your spy "
+          "Sherzi") and out2 == "Turn 133 -> 134 | Score: 234", repr(out))
 
     # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
     lua = lq.build_attack_unit(13, 42, 35)
