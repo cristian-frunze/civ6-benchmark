@@ -1,6 +1,9 @@
 # Click physical screen points in the desktop session (any window). Set $Points before this body, e.g.
 #   $Points = @(@(1077,767), @(1547,1225))   (one point: @(,@(x,y)), or PowerShell flattens it)
 # Brings the window under each point to the front first (ALT tap releases Windows' foreground lock).
+# Each click starts 40 px away: the game takes a click only on a button it saw the mouse move onto, so a click with
+# the cursor already on the spot (left there by the last click, as BEGIN GAME sits at the same point in every new
+# game) is ignored.
 Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
 public class CA {
@@ -31,7 +34,7 @@ foreach ($pt in $Points) {
   [CA]::keybd_event(0x12, 0, 0, [IntPtr]::Zero); [CA]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
   [CA]::SetForegroundWindow($h) | Out-Null
   Start-Sleep -Milliseconds 300
-  [CA]::Mouse($pt[0], $pt[1], 0x0001); Start-Sleep -Milliseconds 200
+  [CA]::Mouse($pt[0] + 40, $pt[1] + 40, 0x0001); Start-Sleep -Milliseconds 200
   [CA]::Mouse($pt[0], $pt[1], 0x0001); Start-Sleep -Milliseconds 120
   [CA]::Mouse($pt[0], $pt[1], 0x0002); Start-Sleep -Milliseconds 80
   [CA]::Mouse($pt[0], $pt[1], 0x0004); Start-Sleep -Milliseconds 500
