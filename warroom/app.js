@@ -401,12 +401,13 @@
       const a = isNum(c.agent) ? agents[c.agent] : null;
       const style = a ? ` style="--rowc:${mix(c.color, 16)};--rowc2:${mix(c.color, 55)}"` : "";
       const tag = a ? ` <span class="tag" style="color:${c.color}">${esc(a.name)}</span>` : "";
-      h += `<tr class="${a ? "is-agent" : ""}"${style}>` +
-        `<td class="rank">${c.rank}</td>` +
+      const out = isNum(c.out);
+      h += `<tr class="${a ? "is-agent" : ""}${out ? " is-out" : ""}"${style}>` +
+        `<td class="rank">${out ? "-" : c.rank}</td>` +
         `<td class="l civcell"><div class="civ"><span class="chip" style="background:${c.color}"></span><span class="nm">${esc(c.civ)}</span>` +
         `<span class="ldr">${esc(c.leader || "")}</span>${tag}</div></td>` +
         `<td class="score">${spark(c.history.turn, c.history.score, c.color, 46, 14)}${num(c.score)}</td>` +
-        `<td>${num(c.cities)}</td><td class="dim">${num(c.science)}</td><td class="dim">${num(c.culture)}</td>` +
+        `<td${out ? ` title="Out of the game on turn ${c.out}"` : ""}>${out ? `out T${c.out}` : num(c.cities)}</td><td class="dim">${num(c.science)}</td><td class="dim">${num(c.culture)}</td>` +
         `<td class="${isNum(c.gold_per_turn) && c.gold_per_turn < 0 ? "neg" : "dim"}">${num(c.gold_per_turn, true)}</td>` +
         `<td class="dim h-mil">${num(c.military)}</td></tr>`;
     }

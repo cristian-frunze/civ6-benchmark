@@ -130,6 +130,7 @@ h1 { margin: 2px 0 0; font: 600 23px/1.05 var(--f-cond); letter-spacing: 0.01em;
 .board .tag { font-weight: 700; font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; padding: 1px 5px 0; border: 1px solid currentColor; line-height: 14px; }
 .board tr.is-agent td { background: linear-gradient(90deg, var(--rowc), transparent 70%); }
 .board tr.is-agent .nm { text-shadow: 0 0 14px var(--rowc2); }
+.board tr.is-out td { opacity: .45; }
 .board td.score { font-size: 17px; font-weight: 700; color: var(--ink); }
 .board td.score svg { vertical-align: -2px; margin-right: 7px; }
 .board td.dim { color: var(--ink-2); }

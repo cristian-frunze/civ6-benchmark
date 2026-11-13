@@ -844,10 +844,14 @@ def build_civs(rows: dict[tuple[int, int], dict], map_players: list[dict], agent
         elif pid < 62:
             majors.add(pid)
     civ_names = {p["pid"]: p.get("civ") for p in map_players if isinstance(p.get("pid"), int)}
+    # civ6-mcp writes a diary row for every living civ each turn, so a civ whose rows stopped more than a turn before
+    # the newest is out of the game (game 24 showed four eliminated civs with their last row, 1 city, to the end).
+    newest = max((turn for turn, _ in rows), default=None)
     civs = []
     for i, pid in enumerate(sorted(majors)):
         hist = sorted(by_pid.get(pid, []), key=lambda r: r["turn"])
         last = hist[-1] if hist else {}
+        out = last["turn"] + 1 if hist and newest is not None and last["turn"] < newest - 1 else None
         pts = downsample([(r["turn"], num(r.get("score")), num(r.get("science")), num(r.get("culture"))) for r in hist])
         civs.append({
             "pid": pid,
@@ -857,7 +861,8 @@ def build_civs(rows: dict[tuple[int, int], dict], map_players: list[dict], agent
             "agent": agent_pids.get(pid),
             "turn": last.get("turn"),
             "score": num(last.get("score")),
-            "cities": num(last.get("cities")),
+            "cities": 0 if out else num(last.get("cities")),
+            "out": out,
             "pop": num(last.get("pop")),
             "science": num(last.get("science")),
             "culture": num(last.get("culture")),
@@ -872,7 +877,7 @@ def build_civs(rows: dict[tuple[int, int], dict], map_players: list[dict], agent
                 "science": [p[2] for p in pts], "culture": [p[3] for p in pts],
             },
         })
-    civs.sort(key=lambda c: (-(c["score"] or -1), c["pid"]))
+    civs.sort(key=lambda c: (c["out"] is not None, -(c["score"] or -1), c["pid"]))
     for rank, c in enumerate(civs, 1):
         c["rank"] = rank
     return civs, city_states
