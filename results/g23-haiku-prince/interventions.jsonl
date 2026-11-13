@@ -1,0 +1,1 @@
+{"ts": "2026-11-13T09:44:46+00:00", "turn": 83, "what": "stopped the run on turn 83 at the user's request (only Opus 5.5 from now on): SIGTERM to run_game.py, then to its claude -p session", "effect": "game ended unfinished; saves 0_MCP_0079 to 0_MCP_0083 and the archive kept, so it can be resumed"}
