@@ -8,13 +8,13 @@ civ6-mcp announced the end as a "Score victory". It was a Science victory: a Sco
 |---|---|
 | Played | 2026-11-08 13:45 to 19:05 CET, 5.3 hours wall clock |
 | Turns | 223 (median 54 s per turn) |
-| API-equivalent cost | **$58.70** at list prices (Sonnet 5.5: $2 / $10 per MTok in / out, $0.20 cache read, $4 cache write with the 1-hour TTL) |
+| API-equivalent cost | **$33.77** at list prices (Sonnet 5.5: $2 / $10 per MTok in / out, $0.10 cache read, $4 cache write with the 1-hour TTL) |
 | Tokens | 359K output, 249M cache read, 1.31M cache write, 2.6K uncached input |
 | API requests | 1,294 (about 5.8 per turn) |
 | Tool calls | 1,998, of which 7 returned errors |
 | Claude Code sessions | 1: the whole game in one conversation, with no usage limits or interventions |
 
-Sonnet's tokens cost half of Opus's, but its cache reads cost the same ($0.20 per MTok), and they are 85% of the bill ($49.85). It made 16% more requests than Opus in game 3 over a game 5% longer, so the two cost about the same.
+Sonnet's tokens cost half of Opus's, cache reads included ($0.10 per MTok to Opus's $0.20), and cache reads are 74% of the bill ($24.92). It made 16% more requests than Opus in game 3 over a game 5% longer, so it cost 60% as much ($33.77 to $56.43).
 
 ## Final standings (turn 223)
 
@@ -41,7 +41,7 @@ Sonnet's tokens cost half of Opus's, but its cache reads cost the same ($0.20 pe
 | Tech lead over the best AI at turn 200 | +6 | +7 |
 | Space projects done (turn reached) | 2 (183), 3 (201), 4 (205), 5 (212) | 1 (185), 2 (197), 3 (208), 4 (217), 5 (223) |
 | Final score and rank | 400, 8th of 8 | 433, 3rd of 8 |
-| Cost | $56.43 | $58.70 |
+| Cost | $56.43 | $33.77 |
 | Requests per turn | 5.2 | 5.8 |
 | Wall clock | 4.6 h | 5.3 h |
 
@@ -71,3 +71,5 @@ It cost Sonnet about 6 of 223 turns and Opus 0 to 8 per game. (The first count r
 - [`turns.jsonl`](turns.jsonl): one row per turn with seconds, API requests, tokens, API-equivalent dollars, tool calls and errors, and the agent's five reflections.
 - `diary.jsonl.gz` and `diary_cities.jsonl.gz`: civ6-mcp's per-turn rows for every civ and for the agent's cities.
 - [`shots/`](shots/): the screens at the start of turns 50, 130 and 200 and at the end (game window on top, war room below).
+
+*Costs corrected on 2026-11-13: they were first priced with Sonnet 5.5's cache reads at $0.20 per MTok, the Sonnet 5 price. Sonnet 5.5's is $0.10 (0.05x input, as for Opus 5.5).*

@@ -762,6 +762,8 @@ def usage_totals(transcripts: list[Transcript], prices: dict) -> dict:
         tot["cache_write_1h"] += c1
         p = price_for(prices, model)
         if p:
+            lp = p.get("long_prompt")  # Haiku 5.5: a prompt over the threshold pays the long_prompt card
+            p = lp if lp and i + cr + c5 + c1 > lp.get("over", 0) else p
             usd += (i * p.get("input", 0) + o * p.get("output", 0) + cr * p.get("cache_read", 0)
                     + c5 * p.get("cache_write_5m", 0) + c1 * p.get("cache_write_1h", 0)) / 1e6
         else:

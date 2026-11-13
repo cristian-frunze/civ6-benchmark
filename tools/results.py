@@ -111,7 +111,11 @@ def main() -> None:
           + (f" ({paused:.2f} h of pauses left out)" if paused else "") + f", median {statistics.median(secs):.0f} s/turn")
     print(f"usd {S('usd'):.2f}; requests {S('requests')}; tool calls {S('tool_calls')} ({S('tool_errors')} errors)")
     print(f"tokens: output {S('output'):,}, cache read {S('cache_read'):,}, cache write {S('cache_write'):,}, input {S('input'):,}")
-    print("cost split: " + ", ".join(f"{k} ${S(k) * p / 1e6:.2f}" for k, p in price(run).items()))
+    raw = {k: S(k) * p / 1e6 for k, p in price(run).items()}
+    if S("long_requests"):  # two rate cards (Haiku 5.5): the base-card split, scaled to the real total
+        print(f"long-prompt requests {S('long_requests')} of {S('requests')}, priced on the long-prompt card")
+        raw = {k: v * S("usd") / sum(raw.values()) for k, v in raw.items()}
+    print("cost split: " + ", ".join(f"{k} ${v:.2f}" for k, v in raw.items()))
     last = turns[-1]["turn"]
     for lo in range(1, last + 1, 50):
         hi = min(lo + 49, last)

@@ -1,5 +1,5 @@
 {
-  "_note": "List API prices in USD per million tokens (Anthropic first-party API, checked 2026-11-06; Fable 5.1 added 2026-11-08, Fable 5.2 2026-11-10). Cache writes: 1.25x input for the 5-minute TTL, 2x for the 1-hour TTL.",
+  "_note": "List API prices in USD per million tokens (Anthropic first-party API, checked 2026-11-06; Fable 5.1 added 2026-11-08, Fable 5.2 2026-11-10). Cache writes: 1.25x input for the 5-minute TTL, 2x for the 1-hour TTL. 2026-11-13: Sonnet 5.5 cache reads corrected from $0.20 (the Sonnet 5 price) to $0.10, 0.05x input as on the pricing page; Haiku 5.5 added. Haiku 5.5 has two rate cards: a request whose prompt (input, cache reads and cache writes) is over long_prompt.over tokens pays the long_prompt prices for the whole request.",
   "claude-opus-5-5": {
     "input": 4.0,
     "output": 20.0,
@@ -12,7 +12,7 @@
     "output": 10.0,
     "cache_write_5m": 2.5,
     "cache_write_1h": 4.0,
-    "cache_read": 0.2
+    "cache_read": 0.1
   },
   "claude-fable-5-1": {
     "input": 10.0,
@@ -27,5 +27,20 @@
     "cache_write_5m": 10.0,
     "cache_write_1h": 16.0,
     "cache_read": 0.2
+  },
+  "claude-haiku-5-5": {
+    "input": 0.1,
+    "output": 0.5,
+    "cache_write_5m": 0.125,
+    "cache_write_1h": 0.2,
+    "cache_read": 0.01,
+    "long_prompt": {
+      "over": 100000,
+      "input": 0.5,
+      "output": 2.5,
+      "cache_write_5m": 0.625,
+      "cache_write_1h": 1.0,
+      "cache_read": 0.05
+    }
   }
 }

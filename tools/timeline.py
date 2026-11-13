@@ -72,13 +72,36 @@ def prices() -> dict:
         return {}
 
 
+def card(p: dict, prompt: int) -> dict:
+    """The rate card for one request: Haiku 5.5 bills a request whose prompt (input, cache reads and cache writes)
+    is over long_prompt["over"] tokens at its long_prompt prices, the whole request."""
+    lp = p.get("long_prompt")
+    return lp if lp and prompt > lp.get("over", 0) else p
+
+
+def _card_for(model: str, table: dict) -> dict | None:
+    return table.get(model) or next((table[k] for k in sorted(table, key=len, reverse=True) if model.startswith(k)), None)
+
+
+def _prompt(u: dict) -> int:
+    return ((u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+            + (u.get("cache_creation_input_tokens") or 0))
+
+
+def long_prompt(model: str, u: dict, table: dict) -> bool:
+    """True when the request is priced on its model's long-prompt card."""
+    p = _card_for(model, table)
+    return bool(p and p.get("long_prompt") and card(p, _prompt(u)) is p["long_prompt"])
+
+
 def usd(model: str, u: dict, table: dict) -> float | None:
-    p = table.get(model) or next((table[k] for k in sorted(table, key=len, reverse=True) if model.startswith(k)), None)
+    p = _card_for(model, table)
     if not p:
         return None
     cc = u.get("cache_creation") or {}
     cw1 = cc.get("ephemeral_1h_input_tokens") or 0
     cw5 = cc.get("ephemeral_5m_input_tokens") if cc else (u.get("cache_creation_input_tokens") or 0)
+    p = card(p, _prompt(u))
     return ((u.get("input_tokens") or 0) * p.get("input", 0) + (u.get("output_tokens") or 0) * p.get("output", 0)
             + (u.get("cache_read_input_tokens") or 0) * p.get("cache_read", 0)
             + (cw5 or 0) * p.get("cache_write_5m", 0) + cw1 * p.get("cache_write_1h", 0)) / 1e6
@@ -110,7 +133,8 @@ def transcript_events(path: Path, session: str, table: dict, rows_seen: set) -> 
             u = msg["usage"]
             out.append(base | {"kind": "usage", "model": msg.get("model"), "input": u.get("input_tokens") or 0,
                                "output": u.get("output_tokens") or 0, "cache_read": u.get("cache_read_input_tokens") or 0,
-                               "cache_write": u.get("cache_creation_input_tokens") or 0, "usd": usd(msg.get("model") or "", u, table)})
+                               "cache_write": u.get("cache_creation_input_tokens") or 0, "usd": usd(msg.get("model") or "", u, table),
+                               "long": long_prompt(msg.get("model") or "", u, table)})
         for b in content:
             kind = b.get("type")
             if kind == "thinking" and b.get("thinking"):
@@ -220,6 +244,8 @@ def build(run_dir: Path) -> dict:
             for f in ("input", "output", "cache_read", "cache_write"):
                 t[f] += e[f]
             t["usd"] += e["usd"] or 0
+            if e.get("long"):  # priced on a long-prompt rate card (Haiku 5.5 over 100K tokens)
+                t["long_requests"] = t.get("long_requests", 0) + 1
         elif k == "thinking":
             t["thinking_chars"] += len(e["text"])
         elif k == "tool_call":

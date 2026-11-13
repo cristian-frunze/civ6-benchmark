@@ -6,13 +6,13 @@
 |---|---|
 | Played | 2026-11-10 18:02 to 2026-11-11 02:07 CET, 8.1 hours wall clock: about 25 minutes of it in two AI-turn hangs and 2.5 hours in 15 end turns the game refused over a unit (see below) |
 | Turns | 219 (median 75 s per turn) |
-| API-equivalent cost | **$62.17** at list prices (Sonnet 5.5: $2 / $10 per MTok in / out, $0.20 cache read, $4 cache write with the 1-hour TTL) |
+| API-equivalent cost | **$36.01** at list prices (Sonnet 5.5: $2 / $10 per MTok in / out, $0.10 cache read, $4 cache write with the 1-hour TTL) |
 | Tokens | 412K output, 262M cache read, 1.43M cache write, 2.7K uncached input |
 | API requests | 1,339 (about 6.1 per turn) |
 | Tool calls | 2,165, of which 1 returned an error (`ECONNRESET`, see game 12) |
 | Claude Code sessions | 1, with no usage limits and no interventions; it compacted its context 4 times |
 
-Cache reads are 84% of the bill ($52.32). Output was $4.12 and cache writes $5.72.
+Cache reads are 73% of the bill ($26.16). Output was $4.12 and cache writes $5.72.
 
 ## Final standings (turn 219)
 
@@ -41,8 +41,8 @@ Greece started first: its projects came on turns 164, 177 and 195, while Sumeria
 | Tech lead over the best AI at turns 100 / 150 / 200 | +1 / +7 / +6 | -4 / -5 / +2 | -1 / +13 / won at 170 | -9 / -9 / +11 |
 | First space project | 161 | 175 | 151 | 187 |
 | Final score and rank | 446, 2nd of 8 | 548, 2nd of 8 | 417, 2nd of 8 | 513, 2nd of 8 |
-| Cost | $58.24 | $106.37 | $91.67 | $62.17 |
-| Cost per turn | $0.291 | $0.509 | $0.539 | $0.284 |
+| Cost | $58.24 | $106.37 | $91.67 | $36.01 |
+| Cost per turn | $0.291 | $0.509 | $0.539 | $0.164 |
 | Requests per turn | 5.5 | 4.0 | 6.1 | 6.1 |
 | Wall clock (median per turn) | 5.5 h (62 s) | 6.7 h (94 s) | 6.5 h (104 s) | 8.1 h (75 s) |
 
@@ -61,7 +61,7 @@ Games 11 and 12 ran on the same harness. Game 10 ran one fix earlier, without th
 | Space projects done (turn reached) | 1 (185), 2 (197), 3 (208), 4 (217), 5 (223) | 1 (187), 2 and 3 (206), 4 (218), 5 (219) |
 | Best AI's space projects | 1 | 3 (Greece) |
 | Final score and rank | 433, 3rd of 8 | 513, 2nd of 8 |
-| Cost | $58.70 | $62.17 |
+| Cost | $33.77 | $36.01 |
 | Requests per turn | 5.8 | 6.1 |
 | Output tokens / thinking characters | 359K / 246K | 412K / 285K |
 | Wall clock (median per turn) | 5.3 h (54 s) | 8.1 h (75 s) |
@@ -83,3 +83,5 @@ From the server log and the agent's tool results:
 - [`turns.jsonl`](turns.jsonl): one row per turn with seconds, API requests, tokens, API-equivalent dollars, tool calls and errors, and the agent's five reflections. The last row (turn 220) is the agent's closing summary after the victory.
 - `diary.jsonl.gz` and `diary_cities.jsonl.gz`: civ6-mcp's per-turn rows for every civ and for the agent's cities.
 - [`shots/`](shots/): the screens at the start of turns 50, 130, 200 and 219 (game window on top, war room below).
+
+*Costs corrected on 2026-11-13: they were first priced with Sonnet 5.5's cache reads at $0.20 per MTok, the Sonnet 5 price. Sonnet 5.5's is $0.10 (0.05x input, as for Opus 5.5).*

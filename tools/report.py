@@ -33,6 +33,16 @@ def play_hours(turns) -> tuple[float, float]:
     return (max(t["end"] for t in rows) - rows[0]["start"] - paused) / 3600, paused / 3600
 
 
+def split(model: str, S) -> dict:
+    """Dollars by token kind. A model with a long-prompt card (Haiku 5.5) has its per-kind split at the base card
+    scaled to the game's real total, which priced each request on its own card."""
+    raw = {k: S(k) * p / 1e6 for k, p in price(model).items()}
+    if (PRICES.get(model) or {}).get("long_prompt") and sum(raw.values()):
+        f = S("usd") / sum(raw.values())
+        raw = {k: v * f for k, v in raw.items()}
+    return {k: round(v, 2) for k, v in raw.items()}
+
+
 def price(model: str) -> dict:
     """$/MTok for the game's model, with 1-hour cache writes as the runners use them."""
     p = PRICES.get(model) or PRICES["claude-opus-5-5"]
@@ -113,7 +123,7 @@ def load(gid: str, src: Path) -> dict:
         "median_s": round(statistics.median(secs)) if secs else 0, "wall_h": round(wall, 1),
         "requests": S("requests"), "tool_calls": S("tool_calls"), "tool_errors": S("tool_errors"),
         "output": S("output"), "cache_read": S("cache_read"), "cache_write": S("cache_write"), "input": S("input"),
-        "split": {k: round(S(k) * p / 1e6, 2) for k, p in price(model).items()},
+        "split": split(model, S),
         "cost": cost_series, "lead": lead_series, "sci": sci_series, "standings": standings,
         "agent": " ".join(w.capitalize() for w in (model or "claude-opus-5-5").split("-")[1:2])
                  + " " + ".".join((model or "claude-opus-5-5").split("-")[2:4]),
