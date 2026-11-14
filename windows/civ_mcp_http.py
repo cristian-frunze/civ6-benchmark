@@ -1641,6 +1641,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                     if e.message == killed:
                         events[i] = _lq.TurnEvent(priority=2, category=e.category, message=msg)
                         break
+            # A production change the game made when a tech obsoleted the unit (bench_compat.production_switch).
+            new_types = {u.unit_type for uid, u in after.units.items() if uid not in before.units}
+            for i, e in enumerate(events):
+                msg = bc.production_switch(e.message, new_types)
+                if msg is not None:
+                    events[i] = _lq.TurnEvent(priority=e.priority, category=e.category, message=msg)
         except Exception:
             logging.getLogger("civ_mcp_http").warning("rewording spent units failed", exc_info=True)
         _SPENT.clear()

@@ -614,6 +614,34 @@ async def main():
           and not any("Uday (UNIT_SPY) was killed" in m for m in msgs), msgs)
     check("other units are still 'killed'", msgs.get("Your Warrior (UNIT_WARRIOR) was killed! Last seen at (40,40).") == 1)
 
+    # 16b2. Production the game switched when a tech obsoleted the unit is not "finished" (game 27, turn 159).
+    from civ_mcp.lua.models import CitySnapshot
+    bc_mod = ns["bc"]
+    def C(cid, name, building):
+        return CitySnapshot(city_id=cid, name=name, population=5, currently_building=building)
+    before = TurnSnapshot(turn=158, units={}, current_research="", current_civic="",
+                          cities={1: C(1, "Rouen", "UNIT_CROSSBOWMAN"), 2: C(2, "Rheims", "UNIT_ARCHER"),
+                                  4: C(4, "Lyon", "UNIT_BUILDER")})
+    after = TurnSnapshot(turn=159, units={}, current_research="", current_civic="",
+                         cities={1: C(1, "Rouen", "UNIT_FIELD_CANNON"), 2: C(2, "Rheims", "UNIT_FIELD_CANNON"),
+                                 4: C(4, "Lyon", "UNIT_WARRIOR")})
+    msgs = {e.message: e.priority for e in GameState._diff_snapshots(before, after)}
+    check("obsolete unit: a switch, not a completion", msgs.get(
+        "Rouen did not finish UNIT_CROSSBOWMAN: a new tech made it obsolete, and the game switched the city's production "
+        "to UNIT_FIELD_CANNON, which replaces it.") == 2 and not any(m.startswith("Rouen finished") for m in msgs), msgs)
+    check("obsolete unit two steps up the line", any(m.startswith("Rheims did not finish UNIT_ARCHER") for m in msgs), msgs)
+    check("unrelated change: still a completion", "Lyon finished building UNIT_BUILDER. Now: UNIT_WARRIOR." in msgs, msgs)
+    check("production_switch: a unit of the old type appeared, so it was built",
+          bc_mod.production_switch("Paris finished building UNIT_CROSSBOWMAN. Now: UNIT_FIELD_CANNON.",
+                                   {"UNIT_CROSSBOWMAN"}) is None
+          and bc_mod.production_switch("Paris finished building UNIT_PIKEMAN. Now: UNIT_FIELD_CANNON.") is None)
+    out = bc_mod.filter_output("Gold: 844 (+25/turn) | Income: 149 | Maintenance: -124 (units: 34) | Science: 124.1",
+                               bc_mod.OUTPUT_RULES["get_game_overview"])
+    check("overview maintenance: the 34 is gold, not units (game 27, turn 189)",
+          "Maintenance: -124 gold for buildings, districts and units (units at list price: 34 gold, before policy "
+          "discounts) | Science" in out and bc_mod.OUTPUT_RULES["get_turn_briefing"] is bc_mod.OUTPUT_RULES["get_game_overview"],
+          out)
+
     # 16c. Spy travel: the game's reasons instead of "Allied civ cities are not valid" (game 19, 3 refusals).
     bc = ns["bc"]
     check("spy travel builder replaced", lq.build_spy_travel is bc.spy_travel_lua)

@@ -98,6 +98,12 @@ RULES = [
 _OVERVIEW_RULES = [
     (re.compile(r" \| Favor: [^|\n]*"), ""),
     (re.compile(r"^(Era: [^|\n]+?) \| Score: .*$", re.M), r"\1"),
+    # civ6-mcp printed "Maintenance: -124 (units: 34)" beside "Units: 19". The 124 is the game's total upkeep
+    # (GetTotalMaintenance: buildings, districts and units) and the 34 is gold, the units' list-price upkeep before
+    # policy discounts. Game 27 (turn 189) read it as 34 units charged against 19 owned, "phantom units draining 124
+    # gold per turn", and said so in its closing summary.
+    (re.compile(r"Maintenance: -(\d+) \(units: (\d+)\)"),
+     r"Maintenance: -\1 gold for buildings, districts and units (units at list price: \2 gold, before policy discounts)"),
 ]
 # civ6-mcp's list of spy missions (get_spies output, spy_action description) names two Rise and Fall missions and
 # leaves out two the base game has (its UnitOperations data, checked on the game PC).
@@ -281,6 +287,61 @@ def pillage_tile_lua(unit_index: int) -> str:
         "print('TILE|' .. x .. '|' .. y .. '|' .. unit:GetMovesRemaining() .. '|' .. table.concat(t, ',')) "
         "print('---END---')"
     )
+
+
+# A tech can make a unit a city is building obsolete; the game then switches the city to the unit that replaces it.
+# civ6-mcp's turn report calls every change of production a completion: game 27 (turn 159) read "Rouen finished
+# building UNIT_CROSSBOWMAN. Now: UNIT_FIELD_CANNON" the turn Ballistics came in, and looked for crossbows that were
+# never built. The game's upgrade lines (UnitUpgrades in the game's data, expansions left out) tell the two apart.
+UNIT_UPGRADES = {
+    "UNIT_AMERICAN_ROUGH_RIDER": "UNIT_TANK", "UNIT_ANTIAIR_GUN": "UNIT_MOBILE_SAM", "UNIT_ARABIAN_MAMLUK": "UNIT_TANK",
+    "UNIT_ARCHER": "UNIT_CROSSBOWMAN", "UNIT_ARTILLERY": "UNIT_ROCKET_ARTILLERY", "UNIT_AT_CREW": "UNIT_MODERN_AT",
+    "UNIT_AZTEC_EAGLE_WARRIOR": "UNIT_SWORDSMAN", "UNIT_BATTERING_RAM": "UNIT_MEDIC",
+    "UNIT_BATTLESHIP": "UNIT_MISSILE_CRUISER", "UNIT_BIPLANE": "UNIT_FIGHTER", "UNIT_BOMBARD": "UNIT_ARTILLERY",
+    "UNIT_BOMBER": "UNIT_JET_BOMBER", "UNIT_BRAZILIAN_MINAS_GERAES": "UNIT_MISSILE_CRUISER",
+    "UNIT_CARAVEL": "UNIT_IRONCLAD", "UNIT_CATAPULT": "UNIT_TREBUCHET", "UNIT_CAVALRY": "UNIT_HELICOPTER",
+    "UNIT_CROSSBOWMAN": "UNIT_FIELD_CANNON", "UNIT_EGYPTIAN_CHARIOT_ARCHER": "UNIT_CROSSBOWMAN",
+    "UNIT_ENGLISH_REDCOAT": "UNIT_INFANTRY", "UNIT_ENGLISH_SEADOG": "UNIT_SUBMARINE",
+    "UNIT_FIELD_CANNON": "UNIT_MACHINE_GUN", "UNIT_FIGHTER": "UNIT_JET_FIGHTER",
+    "UNIT_FRENCH_GARDE_IMPERIALE": "UNIT_INFANTRY", "UNIT_FRIGATE": "UNIT_BATTLESHIP", "UNIT_GALLEY": "UNIT_CARAVEL",
+    "UNIT_GERMAN_UBOAT": "UNIT_NUCLEAR_SUBMARINE", "UNIT_GREEK_HOPLITE": "UNIT_PIKEMAN",
+    "UNIT_HEAVY_CHARIOT": "UNIT_KNIGHT", "UNIT_HORSEMAN": "UNIT_CAVALRY", "UNIT_INDIAN_VARU": "UNIT_TANK",
+    "UNIT_INFANTRY": "UNIT_MECHANIZED_INFANTRY", "UNIT_IRONCLAD": "UNIT_DESTROYER",
+    "UNIT_JAPANESE_SAMURAI": "UNIT_MUSKETMAN", "UNIT_KNIGHT": "UNIT_TANK", "UNIT_KONGO_SHIELD_BEARER": "UNIT_MAN_AT_ARMS",
+    "UNIT_LINE_INFANTRY": "UNIT_INFANTRY", "UNIT_MACEDONIAN_HETAIROI": "UNIT_KNIGHT",
+    "UNIT_MACEDONIAN_HYPASPIST": "UNIT_MAN_AT_ARMS", "UNIT_MAN_AT_ARMS": "UNIT_MUSKETMAN",
+    "UNIT_MUSKETMAN": "UNIT_LINE_INFANTRY", "UNIT_NORWEGIAN_BERSERKER": "UNIT_MUSKETMAN",
+    "UNIT_NORWEGIAN_LONGSHIP": "UNIT_CARAVEL", "UNIT_NUBIAN_PITATI": "UNIT_CROSSBOWMAN",
+    "UNIT_PERSIAN_IMMORTAL": "UNIT_MAN_AT_ARMS", "UNIT_PIKEMAN": "UNIT_AT_CREW", "UNIT_POLISH_HUSSAR": "UNIT_TANK",
+    "UNIT_PRIVATEER": "UNIT_SUBMARINE", "UNIT_QUADRIREME": "UNIT_FRIGATE", "UNIT_ROMAN_LEGION": "UNIT_MAN_AT_ARMS",
+    "UNIT_RUSSIAN_COSSACK": "UNIT_HELICOPTER", "UNIT_SCOUT": "UNIT_RANGER", "UNIT_SCYTHIAN_HORSE_ARCHER": "UNIT_CROSSBOWMAN",
+    "UNIT_SIEGE_TOWER": "UNIT_MEDIC", "UNIT_SLINGER": "UNIT_ARCHER", "UNIT_SPANISH_CONQUISTADOR": "UNIT_LINE_INFANTRY",
+    "UNIT_SPEARMAN": "UNIT_PIKEMAN", "UNIT_SUBMARINE": "UNIT_NUCLEAR_SUBMARINE", "UNIT_SUMERIAN_WAR_CART": "UNIT_KNIGHT",
+    "UNIT_SWORDSMAN": "UNIT_MAN_AT_ARMS", "UNIT_TANK": "UNIT_MODERN_ARMOR", "UNIT_TREBUCHET": "UNIT_BOMBARD",
+    "UNIT_WARRIOR": "UNIT_SWORDSMAN",
+}
+_FINISHED = re.compile(r"^(.+) finished building (UNIT_\w+)\. Now: (UNIT_\w+)\.$")
+
+
+def production_switch(message: str, new_types: set[str] = frozenset()) -> str | None:
+    """For civ6-mcp's "<city> finished building <unit>. Now: <unit>." when the new unit is on the old one's upgrade
+    line and no unit of the old type appeared this turn (new_types): the words for a switch the game made. None
+    otherwise."""
+    m = _FINISHED.match(message)
+    if not m:
+        return None
+    city, old, new = m.groups()
+    if old in new_types:
+        return None
+    u = old
+    for _ in range(8):
+        u = UNIT_UPGRADES.get(u)
+        if u is None:
+            return None
+        if u == new:
+            return (f"{city} did not finish {old}: a new tech made it obsolete, and the game switched the city's "
+                    f"production to {new}, which replaces it.")
+    return None
 
 
 # Excavation. civ6-mcp had no order for an Archaeologist: in game 26 (turn 127) the agent's unit_action "excavate"
