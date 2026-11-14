@@ -671,6 +671,79 @@ async def main():
     out = await ns["_pillages"](inner)(ctx=CTX, unit_id=7, action="fortify")
     check("other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
 
+    # 16d2. Excavation (game 26, turn 127: "Unknown action 'excavate'"): the game's order, then the artifact pick.
+    check("unit_action description names excavate", "excavate = an Archaeologist digs up" in ua.description
+          and "3 different civs" in ua.description)
+    check("artifact blocker names excavate", "action='excavate'" in lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_ARTIFACT"])
+    lua = bc.excavate_lua(7)
+    check("excavate: the game's op on the unit's tile, reasons on refusal",
+          "UnitOperations['UNITOPERATION_EXCAVATE']" in lua and "PARAM_X] = x" in lua
+          and "res[UnitOperationResults.FAILURE_REASONS]" in lua and "OK:EXCAVATE_SENT" in lua
+          and "local pick = ''" in lua and "GetNextExtractingArchaeologist()" in lua)
+    lua = bc.excavate_lua(7, "Mohenjo-Daro'")
+    check("excavate pick: the popup's player operation, quote stripped",
+          "local pick = 'mohenjo-daro'" in lua and "PlayerOperations.CHOOSE_ARTIFACT_PLAYER" in lua
+          and "PARAM_PLAYER_ONE] = id" in lua and "local pend, single = nil, true" in lua)
+    check("artifact state: held artifact and museums", all(k in bc.artifact_state_lua() for k in (
+        "print('ART|none')", "BUILDING_MUSEUM_ARTIFACT", "GetGreatWorkDataFromIndex", "IsGreatWorkBuildingThemed")))
+    rep = bc.artifact_report(["ART|3|15|Mohenjo-Daro|Ancient Era|63|Barbarians|Classical Era",
+                              "MUS|Toulouse|0|3|false|"], 65543)
+    check("artifact report: both sides with eras and the call",
+          "a battle fought here in the Ancient Era, between Mohenjo-Daro and Barbarians" in rep and "either way" in rep
+          and "unit_action(unit_id=65543, action='excavate', improvement='Mohenjo-Daro')" in rep
+          and "Toulouse 0 of 3 (empty)" in rep, rep)
+    rep = bc.artifact_report(["ART|none", "MUS|Toulouse|3|3|true|Egypt:Ancient Era,Rome:Ancient Era,Greece:Ancient Era"], 7)
+    check("artifact report: museums with themed", "Toulouse 3 of 3 (Egypt / Ancient Era, Rome / Ancient Era, "
+          "Greece / Ancient Era; themed)" in rep, rep)
+    check("artifact report: no museum", "no Archaeological Museum" in bc.artifact_report(["ART|none"], 7))
+    out = bc.filter_output("  (60,27): ANTIQUITY_SITE — build UNKNOWN [city: Toulouse] — nearest builder id:1, 2 tiles",
+                           bc.OUTPUT_RULES["get_builder_tasks"])
+    check("builder tasks: an antiquity site is an Archaeologist's",
+          "ANTIQUITY_SITE — not builder work: an Archaeologist excavates it (unit_action excavate) [city" in out, out)
+
+    class DigConn:
+        """The game in replay: the order, then a held artifact with two sides, then the pick clears it."""
+        def __init__(self, single=False):
+            self.sent, self.pending, self.single = [], False, single
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            art = ("ART|1|15|Mohenjo-Daro|Ancient Era||||" if self.single
+                   else "ART|3|15|Mohenjo-Daro|Ancient Era|63|Barbarians|Classical Era")
+            if "UNITOPERATION_EXCAVATE" in lua and "local pick = ''" in lua:
+                if self.pending:
+                    return [art, "OK:ARTIFACT_WAITING", lq.SENTINEL]
+                self.pending = True
+                return ["ART|none", "OK:EXCAVATE_SENT|60|27", lq.SENTINEL]
+            if "UNITOPERATION_EXCAVATE" in lua:
+                if "local pick = 'nope'" in lua:
+                    return [art, "ERR:NO_SUCH_CHOICE|nope", lq.SENTINEL]
+                self.pending = False
+                return [art, "OK:ARTIFACT_CHOSEN|Mohenjo-Daro", lq.SENTINEL]
+            if self.pending:
+                return [art, "MUS|Toulouse|0|3|false|", lq.SENTINEL]
+            return ["ART|none", "MUS|Toulouse|1|3|false|Mohenjo-Daro:Ancient Era", lq.SENTINEL]
+    GAME = types.SimpleNamespace(conn=DigConn())
+    out = await ua.fn(CTX, unit_id=65543, action="excavate")
+    check("excavate: lists the two sides to pick from", out.startswith("EXCAVATED|(60,27): the site is gone")
+          and "improvement='Barbarians'" in out and "GetUnit(me, 7)" in GAME.conn.sent[0], out)
+    out = await ua.fn(CTX, unit_id=65543, action="excavate")
+    check("excavate again: the artifact still waits", out.startswith("ARTIFACT_WAITING|"), out)
+    out = await ua.fn(CTX, unit_id=65543, action="excavate", improvement="nope")
+    check("excavate: an unknown pick lists the choices", out.startswith("Error: NO_SUCH_CHOICE|'nope'")
+          and "improvement='Mohenjo-Daro'" in out, out)
+    out = await ua.fn(CTX, unit_id=65543, action="excavate", improvement="Mohenjo")
+    check("excavate pick: kept, with the museum", out.startswith("ARTIFACT_KEPT|The artifact is credited to Mohenjo-Daro.")
+          and "Toulouse 1 of 3 (Mohenjo-Daro / Ancient Era)" in out, out)
+    GAME = types.SimpleNamespace(conn=DigConn(single=True))
+    out = await ua.fn(CTX, unit_id=65543, action="excavate")
+    check("excavate: a one-civ artifact is confirmed at once",
+          out.startswith("EXCAVATED|(60,27)") and "artifact from Mohenjo-Daro (Ancient Era) is yours" in out
+          and "Toulouse 1 of 3" in out and any("local pick = '15'" in s for s in GAME.conn.sent), out)
+    GAME = saved
+    seen_actions.clear()
+    out = await ns["_excavates"](inner)(ctx=CTX, unit_id=7, action="fortify")
+    check("excavate wrapper: other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
+
     # 16h. A refused trade route gives the game's reasons (game 20, turn 146: one Trader refused everywhere).
     lua = lq.build_make_trade_route(18, 35, 17)
     i = lua.index("ERR:CANNOT_START_ROUTE")

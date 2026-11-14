@@ -1692,6 +1692,66 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _tool.fn = _pillages(_tool.fn)
     _tool.description += bc.PILLAGE_NOTE + bc.CITY_ATTACK_NOTE
 
+    # unit_action had no excavate (bench_compat.EXCAVATE_NOTE has why). excavate sends the game's own order, then reads
+    # the artifact the game holds for the player's pick; with improvement=<civ> it makes that pick. An artifact with one
+    # possible civ is confirmed at once, as the game's popup offers only OK for it.
+    def _excavates(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            if str(kwargs.get("action") or "").lower() != "excavate":
+                return await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+            pick = kwargs.get("improvement")
+
+            async def settle(conn, want_pending: bool) -> list[str]:
+                state: list[str] = []
+                for _ in range(6):  # the order and the pick play out a frame or more later
+                    await asyncio.sleep(0.5)
+                    state = await conn.execute_write(bc.artifact_state_lua(), timeout=10.0)
+                    pending = any(ln.startswith("ART|") and not ln.startswith("ART|none") for ln in state)
+                    if pending == want_pending:
+                        break
+                return state
+
+            async def run():
+                conn = srv._get_game(ctx).conn
+                sent = _gsm._action_result(await conn.execute_write(bc.excavate_lua(uid % 65536, pick), timeout=10.0))
+                if sent.startswith("Error: NO_SUCH_CHOICE"):
+                    state = await conn.execute_write(bc.artifact_state_lua(), timeout=10.0)
+                    return f"Error: NO_SUCH_CHOICE|'{pick}' is not one of the choices. " + bc.artifact_report(state, uid)
+                if sent.startswith("Error:"):
+                    return sent
+                if sent.startswith("ARTIFACT_WAITING"):
+                    state = await conn.execute_write(bc.artifact_state_lua(), timeout=10.0)
+                    return "ARTIFACT_WAITING|An excavated artifact waits for your pick. " + bc.artifact_report(state, uid)
+                if sent.startswith("ARTIFACT_CHOSEN"):
+                    state = await settle(conn, False)
+                    return f"ARTIFACT_KEPT|The artifact is credited to {sent.split('|', 1)[1]}. " + bc.artifact_report(state, uid)
+                xy = "(" + ",".join(sent.split("|")[1:3]) + ")"
+                state = await settle(conn, True)
+                art = next((ln.split("|") for ln in state if ln.startswith("ART|")), ["ART", "none"])
+                if len(art) >= 8 and art[1] != "none" and not art[5]:
+                    await conn.execute_write(bc.excavate_lua(uid % 65536, art[2]), timeout=10.0)
+                    state = await settle(conn, False)
+                    return (f"EXCAVATED|{xy}: the site is gone from the map, and the artifact from {art[3]} ({art[4]}) "
+                            "is yours. " + bc.artifact_report(state, uid))
+                if len(art) >= 8 and art[1] != "none":
+                    return f"EXCAVATED|{xy}: the site is gone from the map. " + bc.artifact_report(state, uid)
+                return (f"EXCAVATE_SENT|{xy}: the order was sent, but no artifact waits for a pick yet; the next call of "
+                        "excavate on this unit shows it. " + bc.artifact_report(state, uid))
+
+            args_log = {"unit_id": uid, "action": "excavate"} | ({"improvement": pick} if pick else {})
+            return await srv._logged(ctx, "unit_action", args_log, run)
+
+        return wrapper
+
+    _tool.fn = _excavates(_tool.fn)
+    _tool.description += bc.EXCAVATE_NOTE
+    _lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_ARTIFACT"] = (
+        "An excavated artifact waits for your pick: unit_action(unit_id=<the Archaeologist>, action='excavate') lists "
+        "the choices")
+
     def _clears_answered(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):

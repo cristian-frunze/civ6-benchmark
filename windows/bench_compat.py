@@ -116,6 +116,11 @@ OUTPUT_RULES = {
     "get_victory_progress": [
         (re.compile(r"launch 4 space projects = 50 VP"), "5 space projects: Earth Satellite, Moon Landing, 3 Mars"),
     ],
+    # Game 26 listed its antiquity site as builder work ("ANTIQUITY_SITE — build UNKNOWN") for 30 turns.
+    "get_builder_tasks": [
+        (re.compile(r"(ANTIQUITY_SITE|SHIPWRECK) — build UNKNOWN"),
+         r"\1 — not builder work: an Archaeologist excavates it (unit_action excavate)"),
+    ],
 }
 XP_TOOLS = [
     "get_governors", "appoint_governor", "assign_governor", "promote_governor",
@@ -276,6 +281,141 @@ def pillage_tile_lua(unit_index: int) -> str:
         "print('TILE|' .. x .. '|' .. y .. '|' .. unit:GetMovesRemaining() .. '|' .. table.concat(t, ',')) "
         "print('---END---')"
     )
+
+
+# Excavation. civ6-mcp had no order for an Archaeologist: in game 26 (turn 127) the agent's unit_action "excavate"
+# came back "Unknown action", it deleted the 670-gold unit and gave up on artifacts in a Culture game. The game's order
+# is UNITOPERATION_EXCAVATE on the unit's tile. The site then leaves the map and the game holds the artifact until the
+# player picks whose it is (ChooseArtifact.lua: the civ that acted there or, for a battle or a sunk ship, the other
+# side; the era is the event's either way, as the popup and the Great Works screen show), with
+# PlayerOperations.CHOOSE_ARTIFACT_PLAYER. Until then the turn cannot end
+# (ENDTURN_BLOCKING_ARTIFACT). Tested on game 26's turn-129 save: an Archaeologist excavated the antiquity site at
+# (60,27) and, after the pick, Toulouse's Archaeological Museum held the artifact.
+EXCAVATE_NOTE = (
+    "\n\nAlso: excavate = an Archaeologist digs up the antiquity site or shipwreck on its own tile (get_map_area shows "
+    "ANTIQUITY_SITE or SHIPWRECK) with the game's own order; the artifact goes to an empty artifact slot of one of your "
+    "museums. The game then asks whose artifact it is: the civ that left it, or for a battle or a sunk ship either side "
+    "(the era is the same either way). The result lists the choices; pick one with unit_action(unit_id=<the Archaeologist>, "
+    "action='excavate', improvement='<civ name from the list>'). The turn cannot end until you pick. An Archaeological "
+    "Museum doubles its tourism and culture when its 3 artifacts share one era and come from 3 different civs."
+)
+
+_ARTIFACT_KINDS = {0: "an artifact", 1: "a goody hut's relic", 2: "a barbarian camp's relic", 3: "a battle fought here",
+                   4: "a ship sunk here", 5: "a heroic relic"}
+
+# The artifact the game holds for the player's pick: ART|kind|actingId|actingCiv|actingEra|targetId|targetCiv|targetEra
+# (target fields empty when there is no second side), or ART|none.
+_ARTIFACT_PENDING_LUA = (
+    "local function civ(id) local pc = PlayerConfigurations[id] "
+    "  return pc and Locale.Lookup(pc:GetCivilizationShortDescription()) or ('player ' .. id) end "
+    "local function era(e) local r = GameInfo.Eras[e] return r and Locale.Lookup(r.Name) or tostring(e) end "
+    "local pend, single = nil, true "
+    "local arch = Players[me]:GetUnits():GetNextExtractingArchaeologist() "
+    "if arch then pend = Game.GetArtifactByIndex(arch:GetArchaeology():GetArtifactIndex()) end "
+    "if pend == nil then print('ART|none') else "
+    "  single = pend.Type == 1 or pend.Type == 2 or pend.Type == 5 or pend.TargetPlayerID == nil "
+    "    or pend.TargetPlayerID < 0 or pend.TargetPlayerID == pend.ActingPlayerID "
+    "  print('ART|' .. pend.Type .. '|' .. pend.ActingPlayerID .. '|' .. civ(pend.ActingPlayerID) .. '|' "
+    "    .. era(pend.ActingPlayerEra) .. '|' .. (single and '||' or (pend.TargetPlayerID .. '|' .. civ(pend.TargetPlayerID) "
+    "    .. '|' .. era(pend.TargetPlayerEra)))) "
+    "end "
+)
+
+# Each Archaeological Museum: MUS|city|filled|slots|themed|civ:era,...
+_MUSEUMS_LUA = (
+    "local row = GameInfo.Buildings['BUILDING_MUSEUM_ARTIFACT'] "
+    "if row then for _, c in Players[me]:GetCities():Members() do "
+    "  local b = c:GetBuildings() "
+    "  if b:HasBuilding(row.Index) then "
+    "    local n, t = b:GetNumGreatWorkSlots(row.Index), {} "
+    "    for i = 0, n - 1 do local g = b:GetGreatWorkInSlot(row.Index, i) "
+    "      if g and g >= 0 then "
+    "        local d = Game.GetGreatWorkDataFromIndex(g) local w = d and GameInfo.GreatWorks[d.GreatWorkType] "
+    "        local e = w and w.EraType and GameInfo.Eras[w.EraType] "
+    "        t[#t + 1] = (d and Locale.Lookup(d.CreatorName) or '?') .. ':' .. (e and Locale.Lookup(e.Name) or '?') "
+    "      end end "
+    "    local ok, th = pcall(function() return b:IsGreatWorkBuildingThemed(row.Index) end) "
+    "    print('MUS|' .. Locale.Lookup(c:GetName()) .. '|' .. #t .. '|' .. n .. '|' .. tostring(ok and th) .. '|' .. table.concat(t, ',')) "
+    "  end "
+    "end end "
+)
+
+
+def excavate_lua(unit_index: int, pick: str | None = None) -> str:
+    """With a pick: give the held artifact to the civ named (CHOOSE_ARTIFACT_PLAYER). Without: when an artifact waits
+    for a pick, list it (ART|...); otherwise send UNITOPERATION_EXCAVATE on the unit's tile (OK:EXCAVATE_SENT) or
+    report the game's reasons for refusing it."""
+    p = (pick or "").strip().lower().replace("'", "").replace("\\", "")
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        + _ARTIFACT_PENDING_LUA +
+        f"local pick = '{p}' "
+        "if pend ~= nil then "
+        "  if pick == '' then print('OK:ARTIFACT_WAITING') print('---END---') return end "
+        "  local ids = {pend.ActingPlayerID} "
+        "  if not single then ids[2] = pend.TargetPlayerID end "
+        "  for _, id in ipairs(ids) do "
+        "    local nm = string.lower(civ(id)) "
+        "    if pick == nm or pick == tostring(id) or (#pick >= 3 and string.find(nm, pick, 1, true)) then "
+        "      local t = {} t[PlayerOperations.PARAM_PLAYER_ONE] = id "
+        "      UI.RequestPlayerOperation(me, PlayerOperations.CHOOSE_ARTIFACT_PLAYER, t) "
+        "      print('OK:ARTIFACT_CHOSEN|' .. civ(id)) print('---END---') return "
+        "    end "
+        "  end "
+        "  print('ERR:NO_SUCH_CHOICE|' .. pick) print('---END---') return "
+        "end "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local entry = GameInfo.Units[unit:GetType()] "
+        "local x, y = unit:GetX(), unit:GetY() "
+        "local op = GameInfo.UnitOperations['UNITOPERATION_EXCAVATE'] "
+        "if op == nil then print('ERR:NO_OP|UNITOPERATION_EXCAVATE is not in this game') print('---END---') return end "
+        "local params = {[UnitOperationTypes.PARAM_X] = x, [UnitOperationTypes.PARAM_Y] = y} "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op.Hash, nil, params, true) end) "
+        "if ok and can then "
+        "  UnitManager.RequestOperation(unit, op.Hash, params) "
+        "  print('OK:EXCAVATE_SENT|' .. x .. '|' .. y) print('---END---') return "
+        "end "
+        + _WHY_LUA +
+        "local plot = Map.GetPlot(x, y) local rt = plot:GetResourceType() "
+        "local here = rt >= 0 and GameInfo.Resources[rt].ResourceType or 'nothing' "
+        "print('ERR:CANNOT_EXCAVATE|The game refused to excavate at (' .. x .. ',' .. y .. '): ' "
+        "  .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The unit is ' .. (entry and entry.UnitType or '?') "
+        "  .. ' with ' .. unit:GetMovesRemaining() .. ' moves left; the tile holds ' .. here .. '.') "
+        "print('---END---')"
+    )
+
+
+def artifact_state_lua() -> str:
+    """The held artifact (ART|...) and each Archaeological Museum (MUS|...)."""
+    return "local me = Game.GetLocalPlayer() " + _ARTIFACT_PENDING_LUA + _MUSEUMS_LUA + "print('---END---')"
+
+
+def artifact_report(lines: list[str], unit_id: int) -> str:
+    """Words for the agent from artifact_state_lua's lines: the pick to make, or the museums after it."""
+    art = next((ln.split("|") for ln in lines if ln.startswith("ART|")), ["ART", "none"])
+    mus = [ln.split("|") for ln in lines if ln.startswith("MUS|")]
+    out = []
+    if len(art) >= 8 and art[1] != "none":
+        kind = _ARTIFACT_KINDS.get(int(art[1]) if art[1].lstrip("-").isdigit() else 0, "an artifact")
+        if art[5]:
+            out.append(f"The site held {kind} in the {art[4]}, between {art[3]} and {art[6]}. The game asks "
+                       f"whose artifact it is (its era is the {art[4]} either way): unit_action(unit_id={unit_id}, "
+                       f"action='excavate', improvement='{art[3]}') or improvement='{art[6]}'. The turn cannot end "
+                       "until you pick.")
+        else:
+            out.append(f"The site held {kind} from {art[3]} ({art[4]}). The game asks you to confirm it: "
+                       f"unit_action(unit_id={unit_id}, action='excavate', improvement='{art[3]}').")
+    if mus:
+        parts = []
+        for m in mus:
+            if len(m) >= 6:
+                held = ", ".join(a.replace(":", " / ") for a in m[5].split(",") if a) or "empty"
+                parts.append(f"{m[1]} {m[2]} of {m[3]} ({held}{'; themed' if m[4] == 'true' else ''})")
+        out.append("Your Archaeological Museums: " + "; ".join(parts) + ".")
+    else:
+        out.append("You have no Archaeological Museum: an artifact needs an empty artifact slot in one.")
+    return " ".join(out)
+
 
 # Trade routes. civ6-mcp answers a refused route with "CanStartOperation returned false for destination (x,y)". In
 # game 20 (turn 146) one Trader got that for every destination it tried, and the agent left it idle. Replayed, the game
