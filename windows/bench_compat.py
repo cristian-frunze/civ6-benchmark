@@ -1149,6 +1149,24 @@ def war_state_lua(other_player_id: int) -> str:
     )
 
 
+def diplo_refused(out: str, action: str, st: dict | None) -> str:
+    """civ6-mcp's "Error: INVALID|unknown": the game's IsDiplomaticActionValid said no and gave no reason. Game 26 got it
+    twice for a friendship declaration (turn 174, Brazil; turn 222, India, the second of two declarations sent at once,
+    after the first was accepted). Name the state with that civ, and the reason when the state is the reason."""
+    if st is None or not str(out).startswith("Error: INVALID|unknown"):
+        return out
+    name, state = st["name"], st.get("state", "")
+    plain = state.replace("DIPLO_STATE_", "").replace("_", " ").lower() or "unknown"
+    a = str(action).upper().replace("DIPLOACTION_", "")
+    if a == "DECLARE_FRIENDSHIP" and state == "DIPLO_STATE_DECLARED_FRIEND":
+        why = f"you already have a declared friendship with {name}; a new declaration is possible only after it ends"
+    elif a == "DECLARE_FRIENDSHIP" and state == "DIPLO_STATE_ALLIED":
+        why = f"you are allied with {name}, which goes beyond a friendship"
+    else:
+        why = f"the game gave no reason, and your relation with {name} is {plain}"
+    return f"Error: INVALID|The game refused {a} toward {name}: {why}. get_diplomacy shows the state with each civ."
+
+
 def parse_war_state(lines) -> dict | None:
     for ln in lines or []:
         if ln.startswith("WARSTATE|"):

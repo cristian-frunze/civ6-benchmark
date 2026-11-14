@@ -982,6 +982,34 @@ async def main():
         ns["_vendor_send_diplomatic_action"] = _vendor_diplo
     check("declaration refused: one read, the alliance named", g5.conn.reads == 1
           and "you are allied with Greece" in r5, r5)
+    # 16o2. A diplomatic action the game refused without a reason (game 26: friendship with Brazil on turn 174 and
+    # with India, already a friend, on turn 222, both "INVALID|unknown").
+    INVALID = "Error: INVALID|unknown"
+    r = bcx.diplo_refused(INVALID, "DECLARE_FRIENDSHIP", {"at_war": False, "name": "India", "state": "DIPLO_STATE_DECLARED_FRIEND"})
+    check("friendship refused: already friends", r == "Error: INVALID|The game refused DECLARE_FRIENDSHIP toward India: "
+          "you already have a declared friendship with India; a new declaration is possible only after it ends. "
+          "get_diplomacy shows the state with each civ.", r)
+    r = bcx.diplo_refused(INVALID, "declare_friendship", {"at_war": False, "name": "Greece", "state": "DIPLO_STATE_ALLIED"})
+    check("friendship refused: allied", "you are allied with Greece" in r, r)
+    r = bcx.diplo_refused(INVALID, "RESIDENT_EMBASSY", {"at_war": False, "name": "Brazil", "state": "DIPLO_STATE_DENOUNCED"})
+    check("other refusal: the relation", "refused RESIDENT_EMBASSY toward Brazil: the game gave no reason, and your relation "
+          "with Brazil is denounced." in r, r)
+    check("refusal with reasons or unread state: civ6-mcp's", bcx.diplo_refused("Error: INVALID|Not enough gold", "X", ws2)
+          == "Error: INVALID|Not enough gold" and bcx.diplo_refused(INVALID, "X", None) == INVALID)
+    class FriendConn:
+        def __init__(self): self.reads = 0
+        async def execute_write(self, lua, timeout=None):
+            self.reads += 1
+            return ["WARSTATE|false|India|DIPLO_STATE_DECLARED_FRIEND", "---END---"]
+    async def invalid_diplo(self, other, action): return INVALID
+    ns["_vendor_send_diplomatic_action"] = invalid_diplo
+    try:
+        g6 = types.SimpleNamespace(conn=FriendConn())
+        r6 = await GameState.send_diplomatic_action(g6, 2, "DECLARE_FRIENDSHIP")
+    finally:
+        ns["_vendor_send_diplomatic_action"] = _vendor_diplo
+    check("friendship refused through the tool: one read, the friendship named", g6.conn.reads == 1
+          and "already have a declared friendship with India" in r6, r6)
 
     # 16p. set_research / set_civic ask the game's own CanResearch / CanProgress before the request (game 25: Economics
     # accepted on turn 115 before its prerequisites, and the game asked for a tech again the next turn).

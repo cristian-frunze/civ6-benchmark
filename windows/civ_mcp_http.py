@@ -651,6 +651,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             except Exception:
                 return out
             return bc.war_refused(out, bc.parse_war_state(lines))
+        if str(out).startswith("Error: INVALID|unknown"):  # the game gave no reason: name the state with that civ
+            try:
+                lines = await self.conn.execute_write(bc.war_state_lua(other_player_id), timeout=10.0)
+            except Exception:
+                return out
+            return bc.diplo_refused(out, action, bc.parse_war_state(lines))
         if not str(out).startswith("WARN:WAR_UNCERTAIN"):
             return out
         st = None
