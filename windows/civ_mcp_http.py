@@ -129,14 +129,29 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         "  print('UNITS_BLOCK') "
         "  for _, u in Players[me]:GetUnits():Members() do "
         "    if u:GetX() ~= -9999 and u:GetMovesRemaining() > 0 then "
+        "      local ready = true pcall(function() ready = u:IsReadyToSelect() end) "
         "      local e = GameInfo.Units[u:GetType()] "
-        "      print('UNIT|' .. u:GetID() .. '|' .. (e and e.UnitType or '?') .. '|' .. u:GetX() .. ',' .. u:GetY() "
-        "        .. '|' .. u:GetMovesRemaining() .. '/' .. u:GetMaxMoves()) "
+        "      print((ready and 'UNIT|' or 'IDLE|') .. u:GetID() .. '|' .. (e and e.UnitType or '?') .. '|' "
+        "        .. u:GetX() .. ',' .. u:GetY() .. '|' .. u:GetMovesRemaining() .. '/' .. u:GetMaxMoves()) "
         "    end "
         "  end "
         "end "
         "print('---END---')"
     )
+
+    # The list named every unit with moves left, skipped ones included: 33 units on game 28's turn 120 (replayed
+    # live), where the game's own test (IsReadyToSelect, as in skip_remaining_units) held one, a Field Cannon that had
+    # just walked its order. Agents skipped everything a second time instead of ordering that unit (about 25 turns of
+    # game 28). The units the game is waiting on now come first; the others are listed only when it names none.
+    def _units_needing_orders(lines) -> str | None:
+        ready = [ln.split("|") for ln in lines if ln.startswith("UNIT|")]
+        idle = [ln.split("|") for ln in lines if ln.startswith("IDLE|")]
+        if "UNITS_BLOCK" not in lines or not (ready or idle):
+            return None
+        rows = lambda us: "\n".join(f"  {t} [id:{i}] at ({xy}), moves {m}" for _, i, t, xy, m in us)  # noqa: E731
+        if ready:
+            return "Units waiting for orders:\n" + rows(ready)
+        return "Units with moves left:\n" + rows(idle)
 
     # A leader screen left open with no diplomacy session stalls the AI turns (bench_compat.LEADER_SCREEN_LUA). The
     # close can take more than one try: a view still finishing its conversation only fades to the overview at first.
@@ -1122,14 +1137,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 lines = await srv._get_game(ctx).conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
             except Exception:
                 lines = []
-            if "UNITS_BLOCK" in lines:
-                units = [ln.split("|") for ln in lines if ln.startswith("UNIT|")]
-                if units:
-                    listed = "\n".join(f"  {t} [id:{i}] at ({xy}), moves {m}" for _, i, t, xy, m in units)
-                    return ("Cannot end turn: a unit still needs orders (the game's end-turn button reads "
-                            "\"Unit needs orders\"). Units with moves left:\n" + listed +
-                            "\nGive each an order (move, attack, fortify, skip) with unit_action, or call "
-                            "skip_remaining_units, then end_turn again. The turn has not ended.")
+            listed = _units_needing_orders(lines)
+            if listed:
+                return ("Cannot end turn: a unit still needs orders (the game's end-turn button reads "
+                        "\"Unit needs orders\"). " + listed +
+                        "\nGive each an order (move, attack, fortify, skip) with unit_action, or call "
+                        "skip_remaining_units, then end_turn again. The turn has not ended.")
             return await fn(*args, **kwargs)
 
         return wrapper
@@ -1260,6 +1273,27 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _GameState.diplomacy_respond = _respond_names_sessions
 
+    # civ6-mcp names a deal's agreements only for open borders, joint war and alliances, and drops the others, so an
+    # AI's peace offer (a peace treaty both ways, plus what it pays) read like a gift. Game 28's turn 120, replayed
+    # live: India's offer was listed as "They offer: Gold per turn x48 (30 turns)", the deal held MAKE_PEACE from both
+    # sides as well. The peace treaty is now named, in the turn report's session and in get_pending_trades.
+    _NO_NAME = 'else itemName = "" end'
+    _PEACE_ITEM = ('elseif DealAgreementTypes.MAKE_PEACE ~= nil and select(2, pcall(function() '
+                   'return item:GetSubType() end)) == DealAgreementTypes.MAKE_PEACE then '
+                   'itemName = "Peace treaty" duration = 0 ')
+
+    def _names_peace(build):
+        def wrapped(*args, **kwargs):
+            lua = build(*args, **kwargs)
+            if _NO_NAME not in lua:
+                logging.getLogger("civ_mcp_http").warning("civ6-mcp's deal Lua changed: peace treaties not named")
+                return lua
+            return lua.replace(_NO_NAME, _PEACE_ITEM + _NO_NAME, 1)
+        return wrapped
+
+    _lq.build_diplomacy_session_query = _names_peace(_lq.build_diplomacy_session_query)
+    _lq.build_pending_deals_query = _names_peace(_lq.build_pending_deals_query)
+
     async def _gs_end_turn_recorded(self, *args, **kwargs):
         out = await _with_player_ids(self, await _original_gs_end_turn(self, *args, **kwargs))
         seen = _END_TURN_RESULTS.get()
@@ -1309,6 +1343,53 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _etm.execute_end_turn = _end_turn_reports_turn_on
 
+    # civ6-mcp takes a session an AI civ opens during the AI turns for a war declaration when the two civs are at war
+    # as it reads the session (is_at_war), closes it unread and reports "WAR DECLARED by India (Gandhi)! Session
+    # dismissed." So a session from a civ already at war was never shown: 5 times in game 28 (China once, India 4
+    # times, at war since turns 84 and 85; the agent wondered whether India had "re-declared war") and 4 times in game
+    # 24 (Germany once, Rome 3 times, all after the agent had declared on them). The wars are now read when the end
+    # turn is sent, and only a civ at peace with the player then counts as declaring. A session from a civ already at
+    # war is shown, like any other, for an answer.
+    _AT_WAR_LUA = (
+        "local me = Game.GetLocalPlayer() local d = Players[me]:GetDiplomacy() local t = {} "
+        "for i = 0, 62 do local p = Players[i] "
+        "if i ~= me and p ~= nil and p:IsAlive() and d:IsAtWarWith(i) then t[#t + 1] = tostring(i) end end "
+        "print('ATWAR|' .. table.concat(t, ',')) print('---END---')"
+    )
+
+    async def _players_at_war(gs) -> set[int] | None:
+        try:
+            lines = await gs.conn.execute_write(_AT_WAR_LUA, timeout=10.0)
+        except Exception:
+            return None
+        row = next((ln for ln in lines if ln.startswith("ATWAR|")), None)
+        if row is None:
+            return None
+        return {int(x) for x in row[len("ATWAR|"):].split(",") if x.strip().isdigit()}
+
+    _end_turn_before_wars = _etm.execute_end_turn
+
+    async def _end_turn_reads_wars(gs, *args, **kwargs):
+        # A request still in flight (after a mid-turn session) keeps the wars read when it was sent.
+        if not getattr(gs, "_pending_end_turn", False):
+            gs._at_war_when_sent = await _players_at_war(gs)
+        return await _end_turn_before_wars(gs, *args, **kwargs)
+
+    _etm.execute_end_turn = _end_turn_reads_wars
+
+    _original_get_sessions = _GameState.get_diplomacy_sessions
+
+    async def _sessions_new_wars_only(self):
+        sessions = await _original_get_sessions(self)
+        before = getattr(self, "_at_war_when_sent", None) or set()
+        for s in sessions:
+            if s.is_at_war and s.other_player_id in before:
+                s.is_at_war = False
+                self._war_before_sessions = getattr(self, "_war_before_sessions", set()) | {s.other_civ_name}
+        return sessions
+
+    _GameState.get_diplomacy_sessions = _sessions_new_wars_only
+
     # A leader screen can also come up while end_turn is already waiting for the AI turns, after the checks around the
     # tools have run. Game 13's turn 108 hung twice that way (replayed live: Brazil was the only civ still in its turn,
     # no session or deal was open, and the screen was up; closing it let the turn finish within seconds). civ6-mcp
@@ -1340,16 +1421,21 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 ulines = await gs.conn.execute_write(_UNITS_BLOCKING_LUA, timeout=10.0)
             except Exception:
                 ulines = []
-            units = [ln.split("|") for ln in ulines if ln.startswith("UNIT|")]
-            if "UNITS_BLOCK" in ulines and units:
+            listed = _units_needing_orders(ulines)
+            if listed:
                 logging.getLogger("civ_mcp_http").warning("End turn: refused by the game, a unit needs orders")
-                listed = "\n".join(f"  {t} [id:{i}] at ({xy}), moves {m}" for _, i, t, xy, m in units)
                 return ("The turn did not end: as it ended, the game moved units along their orders, and a unit was "
-                        "left needing orders (the game's end-turn button reads \"Unit needs orders\"). Units with "
-                        "moves left:\n" + listed + "\nGive each an order (move, attack, fortify, skip) with "
-                        "unit_action, or call skip_remaining_units, then end_turn again. The turn has not ended.",
+                        "left needing orders (the game's end-turn button reads \"Unit needs orders\"). " + listed
+                        + "\nGive each an order (move, attack, fortify, skip) with unit_action, or call "
+                        "skip_remaining_units, then end_turn again. The turn has not ended.",
                         False)
-        return await _original_mid_turn_diplomacy(gs, lua, turn_before)
+        gs._war_before_sessions = set()
+        msg, advanced = await _original_mid_turn_diplomacy(gs, lua, turn_before)
+        kept = getattr(gs, "_war_before_sessions", set())
+        if isinstance(msg, str) and kept and "diplomatic proposal from" in msg:
+            msg += (f"\nYou were already at war with {', '.join(sorted(kept))} when you ended the turn: this session "
+                    "is not a war declaration.")
+        return msg, advanced
 
     _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first
 

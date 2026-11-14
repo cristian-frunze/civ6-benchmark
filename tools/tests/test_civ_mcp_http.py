@@ -397,11 +397,94 @@ async def main():
         check("turn end refused over a unit: named at the probe, not after 10 minutes",
               got[1] is False and got[0].startswith("The turn did not end") and "UNIT_SETTLER [id:2686988]" in got[0]
               and orig_calls == [108], got)
+        # Game 28's turn 120, live: 33 units with moves left, one the game waits on.
+        class ManyConn:
+            async def execute_write(self, lua, timeout=None):
+                if "LEADER_SCREEN" in lua: return ["LEADER_SCREEN|HIDDEN", lq.SENTINEL]
+                return ["UNITS_BLOCK", "IDLE|4128768|UNIT_CROSSBOWMAN|64,31|2/2",
+                        "UNIT|7995448|UNIT_FIELD_CANNON|26,31|1/2", "IDLE|5242881|UNIT_KNIGHT|48,16|4/4", lq.SENTINEL]
+        got = await ns["_mid_turn_leader_screen_first"](types.SimpleNamespace(conn=ManyConn()), "lua", 120)
+        check("only the unit the game waits on is named", "Units waiting for orders:\n  UNIT_FIELD_CANNON [id:7995448] "
+              "at (26,31), moves 1/2\nGive" in got[0] and "UNIT_KNIGHT" not in got[0], got[0])
+        check("none ready: units with moves left, as before", ns["_units_needing_orders"](
+            ["UNITS_BLOCK", "IDLE|5242881|UNIT_KNIGHT|48,16|4/4"]) == "Units with moves left:\n  UNIT_KNIGHT "
+            "[id:5242881] at (48,16), moves 4/4")
+        check("no block: nothing", ns["_units_needing_orders"](["IDLE|5242881|UNIT_KNIGHT|48,16|4/4"]) is None)
+        check("units Lua: the game's ready test", "IsReadyToSelect" in ns["_UNITS_BLOCKING_LUA"]
+              and "'IDLE|'" in ns["_UNITS_BLOCKING_LUA"])
         active[0] = False
         got = await ns["_mid_turn_leader_screen_first"](types.SimpleNamespace(conn=UnitsConn()), "lua", 100)
         check("AI turns still running: no units check", got == ("Turn paused", False), got)
     finally:
         etm._get_turn_number, ns["_original_mid_turn_diplomacy"], ns["asyncio"].sleep, ns["_turn_active"] = saved
+
+    # 31b. A session from a civ already at war when the turn ended is not a war declaration (game 28: India 4 times,
+    #      China once, all closed unread as "WAR DECLARED"). Run through civ6-mcp's own mid-turn check.
+    class WarConn:
+        def __init__(self, reply="ATWAR|2,5"): self.reply, self.sent = reply, []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            if "ATWAR|" in lua: return [self.reply, lq.SENTINEL]
+            if "LEADER_SCREEN" in lua: return ["LEADER_SCREEN|SESSION", lq.SENTINEL]
+            return [lq.SENTINEL]
+    got = await ns["_players_at_war"](types.SimpleNamespace(conn=WarConn()))
+    check("wars read: player ids", got == {2, 5}, got)
+    got = await ns["_players_at_war"](types.SimpleNamespace(conn=WarConn("ATWAR|")))
+    check("wars read: none", got == set(), got)
+    got = await ns["_players_at_war"](types.SimpleNamespace(conn=WarConn("nothing")))
+    check("wars read: no answer, unknown", got is None, got)
+    inner_calls = []
+    async def fake_inner(gs, *a, **k): inner_calls.append(getattr(gs, "_at_war_when_sent", "unset")); return "Turn 5 -> 6"
+    saved_inner = ns["_end_turn_before_wars"]
+    ns["_end_turn_before_wars"] = fake_inner
+    try:
+        gs = types.SimpleNamespace(conn=WarConn("ATWAR|2"), _pending_end_turn=False)
+        await ns["_end_turn_reads_wars"](gs)
+        gs.conn.reply, gs._pending_end_turn = "ATWAR|2,7", True
+        await ns["_end_turn_reads_wars"](gs)
+        check("wars read when the end turn is sent, kept while it is in flight", inner_calls == [{2}, {2}], inner_calls)
+    finally:
+        ns["_end_turn_before_wars"] = saved_inner
+    def india(at_war=True):
+        return [lq.DiplomacySession(session_id=1, other_player_id=2, other_civ_name="India", other_leader_name="Gandhi",
+                                    choices=[], dialogue_text="Let us end this war.", is_at_war=at_war)]
+    saved = (ns["_original_get_sessions"], ns["_turn_active"], etm._get_turn_number, ns["asyncio"].sleep)
+    async def fake_sessions(self): return india()
+    async def not_active(game): return False
+    async def same_turn(gs): return 105
+    ns["_original_get_sessions"], ns["_turn_active"], etm._get_turn_number, ns["asyncio"].sleep = (
+        fake_sessions, not_active, same_turn, no_sleep)
+    class WarGS:
+        get_diplomacy_sessions = ns["_sessions_new_wars_only"]
+        def __init__(self, before): self.conn, self._at_war_when_sent = WarConn(), before
+    try:
+        gs = WarGS({2, 5})
+        msg, adv = await ns["_mid_turn_leader_screen_first"](gs, "lua", 105)
+        check("at war before the turn ended: shown for an answer, not dismissed",
+              "WAR DECLARED" not in msg and "diplomatic proposal from India (Gandhi" in msg
+              and 'India says: "Let us end this war."' in msg and "already at war with India" in msg
+              and not any("EXIT" in s for s in gs.conn.sent) and adv is False, (msg, gs.conn.sent))
+        gs = WarGS(set())
+        msg, adv = await ns["_mid_turn_leader_screen_first"](gs, "lua", 105)
+        check("at peace before the turn ended: a war declaration, as before",
+              msg.startswith("WAR DECLARED by India (Gandhi)! Session dismissed.") and "already at war" not in msg, msg)
+        gs = WarGS(None)
+        msg, adv = await ns["_mid_turn_leader_screen_first"](gs, "lua", 105)
+        check("wars unknown: civ6-mcp's reading, as before", msg.startswith("WAR DECLARED by India"), msg)
+    finally:
+        ns["_original_get_sessions"], ns["_turn_active"], etm._get_turn_number, ns["asyncio"].sleep = saved
+    # India's offer on game 28's turn 120 (live): a peace treaty both ways and 48 gold a turn, listed as gold alone.
+    for name in ("build_diplomacy_session_query", "build_pending_deals_query"):
+        lua = getattr(lq, name)()
+        check(f"{name}: peace treaty named before the unnamed rest",
+              lua.count('"Peace treaty"') == 1 and lua.index("MAKE_PEACE") < lua.index('else itemName = "" end'))
+    live = ["SESSION|2|2|India|Gandhi||||1", "DEAL_ITEM|2|THEM|AGREEMENT|Peace treaty|0|0",
+            "DEAL_ITEM|2|US|AGREEMENT|Peace treaty|0|0", "DEAL_ITEM|2|THEM|GOLD|Gold per turn|48|30"]
+    got = lq.parse_diplomacy_sessions(live)[0].deal_summary
+    check("India's offer reads as peace", got == "They offer: Peace treaty; You offer: Peace treaty; They offer: Gold per "
+          "turn x48 (30 turns)", got)
+    check("accepted terms name the peace treaty", "'a peace treaty'" in ns["bc"].DEAL_TERMS_FN
+          and "st ~= DealAgreementTypes.MAKE_PEACE" in ns["bc"].DEAL_TERMS_FN)
     # Every tool's outermost wrapper binds the call log (_bound_first); the one inside it is checked.
     bound = ns["_bound_first"](stock).__code__
     for name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "send_diplomatic_action",
@@ -1480,7 +1563,8 @@ async def main():
     # 25. A turn that ends after civ6-mcp closes a session from a civ at war: the report names the new turn and the
     #     advisor budget resets (game 9, turn 144: "Turn 144 -> 144"); the autosave is named for the turn it holds.
     check("execute_end_turn and the end-turn autosave are patched",
-          et.execute_end_turn is ns["_end_turn_reports_turn_on"] and et.save_game is ns["_autosave_of_turn_on"])
+          et.execute_end_turn is ns["_end_turn_reads_wars"] and ns["_end_turn_before_wars"] is ns["_end_turn_reports_turn_on"]
+          and et.save_game is ns["_autosave_of_turn_on"])
     class WarConn(Conn):
         async def execute_write(self, lua, timeout=None):
             if '"EXIT" == "EXIT"' in lua: self.turn = 145  # the AI turns finish once the session is closed

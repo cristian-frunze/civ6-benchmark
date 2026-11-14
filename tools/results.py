@@ -98,7 +98,9 @@ def main() -> None:
     diaries = sorted((arch / "civ6mcp").glob(f"diary_*_{a.game_id}*.jsonl"))
     for d in diaries:
         gz(d, out / ("diary_cities.jsonl.gz" if d.stem.endswith("_cities") else "diary.jsonl.gz"))
-    shots = sorted((arch / "shots").glob("T*.jpg"))
+    # A shot from a turn after the last one played is a leftover from the game loaded before this one (game 28's
+    # folder got a T0195 shot of game 27's last turn before its own turn 1 loaded), so it is left out.
+    shots = [s for s in sorted((arch / "shots").glob("T*.jpg")) if int(s.stem[1:]) <= turns[-1]["turn"]]
     for want in a.shots.split(","):
         pick = shots[-1] if want == "last" else next((s for s in shots if int(s.stem[1:]) >= int(want)), None)
         if pick:
