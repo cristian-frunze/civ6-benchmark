@@ -806,6 +806,61 @@ async def main():
           False).startswith("Error: GOV_CHANGE_NOT_NOW|The game allows a government change only on a turn"))
     check("after note: Anarchy and its end", bcx.gov_after_note(anarchy).startswith(". ANARCHY until turn 206")
           and bcx.gov_after_note(new) == "" and bcx.gov_after_note(None) == "")
+    # 16o. War declarations settled by the war state read after them (game 24: all 9 came back WAR_UNCERTAIN, and
+    # the one on America on turn 115 had not taken effect).
+    uncertain = ("WARN:WAR_UNCERTAIN|DECLARE_SURPRISE_WAR session completed but war state not yet confirmed for "
+                 "America. Check next turn.")
+    ws = bcx.parse_war_state(["junk", "WARSTATE|true|America"])
+    check("war state parsed", ws == {"at_war": True, "name": "America"}, ws)
+    check("war state: missing or bad is None", bcx.parse_war_state(["OK"]) is None
+          and bcx.parse_war_state(["WARSTATE|maybe|America"]) is None)
+    check("war on: OK", bcx.war_result(uncertain, ws).startswith("OK:WAR_DECLARED|At war with America"))
+    check("still peace: needs another look", bcx.war_result(uncertain, {"at_war": False, "name": "America"}) == "")
+    check("other answers and unknown state: civ6-mcp's", bcx.war_result("ERR:ALREADY_AT_WAR|x", ws) == "ERR:ALREADY_AT_WAR|x"
+          and bcx.war_result(uncertain, None) == uncertain)
+    check("war Lua: the player id only", "local t = 5 " in bcx.war_state_lua(5) and "IsAtWarWith(t)" in bcx.war_state_lua(5))
+
+    class WarConn:
+        def __init__(self, states): self.states, self.reads = list(states), 0
+        async def execute_write(self, lua, timeout=None):
+            self.reads += 1
+            return [f"WARSTATE|{self.states.pop(0)}|America", "---END---"]
+
+    class WarGame:
+        def __init__(self, states): self.conn = WarConn(states)
+
+    _vendor_diplo, _sleep = ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep
+    async def fake_diplo(self, other, action):
+        return uncertain if action.upper().startswith("DECLARE_") else "OK:SENT|DENOUNCE sent to America"
+    async def no_sleep(s): return None
+    ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = fake_diplo, no_sleep
+    try:
+        g1, g2, g3 = WarGame(["true"]), WarGame(["false", "true"]), WarGame(["false", "false"])
+        r1 = await GameState.send_diplomatic_action(g1, 5, "DECLARE_SURPRISE_WAR")
+        r2 = await GameState.send_diplomatic_action(g2, 5, "DECLARE_SURPRISE_WAR")
+        r3 = await GameState.send_diplomatic_action(g3, 5, "declare_surprise_war")
+        g4 = WarGame([])
+        r4 = await GameState.send_diplomatic_action(g4, 5, "DENOUNCE")
+    finally:
+        ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = _vendor_diplo, _sleep
+    check("declaration: war on at the first look", r1.startswith("OK:WAR_DECLARED|") and g1.conn.reads == 1, r1)
+    check("declaration: war on at the second look", r2.startswith("OK:WAR_DECLARED|") and g2.conn.reads == 2, r2)
+    check("declaration: still peace says send again", r3.startswith("Error: WAR_NOT_DECLARED|The game still shows "
+          "peace with America") and "DECLARE_SURPRISE_WAR did not take effect" in r3 and g3.conn.reads == 2, r3)
+    check("other actions: untouched", r4 == "OK:SENT|DENOUNCE sent to America" and g4.conn.reads == 0, r4)
+
+    # 16p. set_research / set_civic ask the game's own CanResearch / CanProgress before the request (game 25: Economics
+    # set through GameCore on turn 115 before its prerequisites, reset by the game the next turn).
+    for _b, _n, _can in ((lq.build_set_research, "TECH_ECONOMICS", "GetTechs():CanResearch(idx)"),
+                         (lq.build_set_research_gamecore, "TECH_ECONOMICS", "GetTechs():CanResearch(idx)"),
+                         (lq.build_set_civic, "CIVIC_HUMANISM", "GetCulture():CanProgress(idx)"),
+                         (lq.build_set_civic_gamecore, "CIVIC_HUMANISM", "GetCulture():CanProgress(idx)")):
+        _r = bcx.base_game_rewrite(_b(_n), "-- prelude")
+        _i, _j = _r.find("ALREADY_COMPLETED"), _r.find("ERR:NOT_AVAILABLE|" + _n)
+        _k = max(_r.find("UI.RequestPlayerOperation"), _r.find("SetResearchingTech(idx)"), _r.find("SetProgressingCivic(idx)"))
+        check(f"{_b.__name__}: availability asked after the done check, before the request", _r.count("NOT_AVAILABLE") == 1
+              and _can in _r and 0 < _i < _j < _k, _r[_i:_i + 200])
+
     lua = bcx.gov_state_lua("GOVERNMENT_COMMUNISM")
     check("state Lua: anarchy turns read only outside Anarchy", "if usable and not an then" in lua
           and "GetAnarchyTurns(row.Index)" in lua and "GameInfo.Governments['GOVERNMENT_COMMUNISM']" in lua)

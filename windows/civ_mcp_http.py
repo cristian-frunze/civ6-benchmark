@@ -610,6 +610,28 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return out + bc.gov_after_note(await _gov_state(self, gov))
 
     _gsm.GameState.change_government = _change_government_checked
+
+    # War declarations, settled by the war state read again after the declaration (bench_compat.war_result has why).
+    _vendor_send_diplomatic_action = _gsm.GameState.send_diplomatic_action
+
+    async def _send_diplomatic_action_checked(self, other_player_id, action):
+        out = await _vendor_send_diplomatic_action(self, other_player_id, action)
+        if not str(out).startswith("WARN:WAR_UNCERTAIN"):
+            return out
+        st = None
+        for wait in (1.0, 2.0):
+            await asyncio.sleep(wait)
+            try:
+                st = bc.parse_war_state(await self.conn.execute_write(bc.war_state_lua(other_player_id), timeout=10.0))
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("reading the war state failed", exc_info=True)
+                return out
+            settled = bc.war_result(out, st)
+            if settled:
+                return settled
+        return bc.war_not_declared(str(action).upper(), st)
+
+    _gsm.GameState.send_diplomatic_action = _send_diplomatic_action_checked
     _vendor_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_districts(self, unit_index, target_x, target_y):

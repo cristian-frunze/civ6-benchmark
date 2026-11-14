@@ -15,6 +15,23 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+def _not_available_lua(name: str, tech: bool) -> str:
+    """Refuse a tech or civic the game does not offer yet (see the rule that uses it), naming the missing ones."""
+    owner, can, has, table, prereqs, own, pre = (
+        ("GetTechs", "CanResearch", "HasTech", "Technologies", "TechnologyPrereqs", "Technology", "PrereqTech") if tech
+        else ("GetCulture", "CanProgress", "HasCivic", "Civics", "CivicPrereqs", "Civic", "PrereqCivic"))
+    verb, lister = ("researched", "get_tech_civics") if tech else ("started", "get_tech_civics")
+    return (
+        f"do local okc, canc = pcall(function() return Players[id]:{owner}():{can}(idx) end) "
+        "if okc and canc == false then local miss = {} "
+        f"for p in GameInfo.{prereqs}() do if p.{own} == \"{name}\" then local r = GameInfo.{table}[p.{pre}] "
+        f"if r and not Players[id]:{owner}():{has}(r.Index) then miss[#miss + 1] = Locale.Lookup(r.Name) end end end "
+        f"print(\"ERR:NOT_AVAILABLE|{name} cannot be {verb} yet\" .. (#miss > 0 and (\": it needs \" .. "
+        f"table.concat(miss, \", \") .. \" first\") or \"\") .. \". {lister} lists what is available now.\") "
+        "print(\"---END---\") return end end\n"
+    )
+
+
 _CB_METHODS = (
     "GetFavor|GetGovernors|GetAllianceType|GetAllianceLevel|GetGrievancesAgainst|GetResourceStockpileCap|"
     "GetResourceAccumulationPerTurn|GetResourceImportPerTurn|GetUnitResourceDemandPerTurn|GetCulturalIdentity|"
@@ -45,6 +62,13 @@ RULES = [
     (re.compile(r"if Players\[id\]:(GetTechs|GetCulture)\(\):(HasTech|HasCivic)\(idx\) then"),
      lambda m: f"if Players[id]:{m[1]}():{m[2]}(idx) and not "
                f"GameInfo.{'Technologies' if m[2] == 'HasTech' else 'Civics'}[idx].Repeatable then"),
+    # set_research / set_civic took a tech or civic the game does not offer yet. The game ignores the request, and
+    # civ6-mcp then sets it through GameCore (SetResearchingTech), which skips the prerequisites: game 25 "researched"
+    # Economics on turn 115 before it had the techs for it, and the game put Astronomy back the next turn. Ask what the
+    # game's own tech and civic trees ask (CanResearch, CanProgress) first, and name what is missing.
+    (re.compile(r'(print\("ERR:ALREADY_COMPLETED\|((TECH|CIVIC)_\w+) is already researched"\); '
+                r'print\("---END---"\); return\s*\nend\n)'),
+     lambda m: m[1] + _not_available_lua(m[2], m[3] == "TECH")),
     # The game-over check names the victory with fallback tests. Game 4 won by Domination on turn 170 but was reported
     # as a Culture victory: the domination test reads PlayerCities:GetOriginalCapital(), which the base game lacks, so
     # it failed inside its pcall, and the culture test then counted 0 visiting tourists against 0 domestic ones as
@@ -635,6 +659,44 @@ def gov_after_note(st: dict | None) -> str:
         return (f". ANARCHY until turn {st['anarchy_end']}: no government, and no gold, science, culture or faith "
                 "until then.")
     return ""
+
+
+# War declarations. civ6-mcp reads the war state in the same Lua call that sends the declaration, before the game has
+# committed it, so every declaration in game 24 came back WARN:WAR_UNCERTAIN ("not yet confirmed ... Check next
+# turn"). Eight of its nine took effect; the one on America on turn 115 did not, and the agent learned it only from a
+# refused attack the next turn. The state read again in a call of its own, a moment later, says which it was.
+def war_state_lua(other_player_id: int) -> str:
+    """One WARSTATE|atWar|name line for the local player and that player."""
+    t = int(other_player_id)
+    return (
+        f"local me = Game.GetLocalPlayer() local t = {t} local d = Players[me]:GetDiplomacy() "
+        "local cfg = PlayerConfigurations[t] "
+        "local name = cfg and Locale.Lookup(cfg:GetCivilizationShortDescription()) or ('player ' .. t) "
+        "print('WARSTATE|' .. tostring(d:IsAtWarWith(t)) .. '|' .. name) print('---END---')"
+    )
+
+
+def parse_war_state(lines) -> dict | None:
+    for ln in lines or []:
+        if ln.startswith("WARSTATE|"):
+            p = ln.split("|", 2)
+            if len(p) == 3 and p[1] in ("true", "false"):
+                return {"at_war": p[1] == "true", "name": p[2]}
+    return None
+
+
+def war_result(out: str, st: dict | None) -> str:
+    """civ6-mcp's answer to a war declaration, settled by the state read after it ("" when it needs another look)."""
+    if not out.startswith("WARN:WAR_UNCERTAIN") or st is None:
+        return out
+    if st["at_war"]:
+        return f"OK:WAR_DECLARED|At war with {st['name']} (the game's war state, read after the declaration)."
+    return ""
+
+
+def war_not_declared(action: str, st: dict) -> str:
+    return (f"Error: WAR_NOT_DECLARED|The game still shows peace with {st['name']} a few seconds after the declaration: "
+            f"{action} did not take effect. Send it again; units cannot attack {st['name']} until the war is on.")
 
 
 # Trades. The AI answers a deal a frame or more after it is sent, as a diplomacy statement in the open session (the
