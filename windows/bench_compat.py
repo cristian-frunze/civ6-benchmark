@@ -62,10 +62,11 @@ RULES = [
     (re.compile(r"if Players\[id\]:(GetTechs|GetCulture)\(\):(HasTech|HasCivic)\(idx\) then"),
      lambda m: f"if Players[id]:{m[1]}():{m[2]}(idx) and not "
                f"GameInfo.{'Technologies' if m[2] == 'HasTech' else 'Civics'}[idx].Repeatable then"),
-    # set_research / set_civic took a tech or civic the game does not offer yet. The game ignores the request, and
-    # civ6-mcp then sets it through GameCore (SetResearchingTech), which skips the prerequisites: game 25 "researched"
-    # Economics on turn 115 before it had the techs for it, and the game put Astronomy back the next turn. Ask what the
-    # game's own tech and civic trees ask (CanResearch, CanProgress) first, and name what is missing.
+    # set_research / set_civic took a tech or civic the game does not offer yet: game 25's set_research answered
+    # RESEARCHING|TECH_ECONOMICS on turn 115 without Scientific Theory, and the next turn the game asked for a tech
+    # again (the agent picked Astronomy). When the game ignores a request, civ6-mcp also falls back to GameCore
+    # (SetResearchingTech), which skips the prerequisites. Ask what the game's own tech and civic trees ask
+    # (CanResearch, CanProgress) first, on both paths, and name what is missing.
     (re.compile(r'(print\("ERR:ALREADY_COMPLETED\|((TECH|CIVIC)_\w+) is already researched"\); '
                 r'print\("---END---"\); return\s*\nend\n)'),
      lambda m: m[1] + _not_available_lua(m[2], m[3] == "TECH")),
@@ -195,6 +196,12 @@ def spy_travel_lua(unit_index: int, x: int, y: int) -> str:
         "  local who = o == me and 'yours' or (Players[o]:IsMajor() and Locale.Lookup(cfg:GetCivilizationShortDescription()) "
         "    or 'a city-state') "
         "  at = 'the city there is ' .. Locale.Lookup(city:GetName()) .. ' (' .. who .. ')' "
+        # the game sends no spy into an ally's cities and gives no reason (game 26: India and Greece, every city)
+        "  local okA, st = pcall(function() return GameInfo.DiplomaticStates[Players[o]:GetDiplomaticAI()"
+        ":GetDiplomaticStateIndex(me)].StateType end) "
+        "  if o ~= me and okA and st == 'DIPLO_STATE_ALLIED' and #why == 0 then "
+        "    why[1] = who .. ' is your ally, and the game sends no spies into an ally' .. string.char(39) .. 's cities "
+        "while the alliance lasts' end "
         "end "
         "print('ERR:CANNOT_TRAVEL|The game will not send this spy to (' .. x .. ',' .. y .. ') now: ' "
         "  .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The spy has ' "
@@ -451,6 +458,269 @@ def attack_lua(original):
     return build
 
 
+
+# Theological combat. In game 25 (Arabia, Religious goal) the agent twice sent an Apostle against another civ's
+# religious unit (turns 91 and 127) and got "NO_ENEMY|No hostile unit or city at (x,y)"; it concluded the tool could not
+# do theological combat and stopped trying, while India's apostles kept killing its own. civ6-mcp's attack looks for the
+# target with Map.GetUnitsAt and, had it found one, would have refused a unit of a civ at peace (NOT_AT_WAR), but
+# theological combat needs no war. The game's own UI (Civ6Common.lua RequestMoveOperation) starts it like a melee
+# attack: MOVE_TO onto the target's tile with the ATTACK modifier. So when the attacker has religious strength, the
+# attack finds a religious unit of another player on the tile by walking every player's units, checks the attack
+# would not start a war (CombatManager.IsAttackChangeWarState, as the UI does), and sends that order.
+_THEO_ANCHOR = "local ux, uy = unit:GetX(), unit:GetY()\n"
+
+
+def _theological_lua(x: int, y: int, sentinel: str) -> str:
+    x, y = int(x), int(y)
+
+    def bail(msg_lua: str) -> str:
+        return f"print({msg_lua}) print('{sentinel}') return "
+
+    return (
+        "if (unit:GetReligiousStrength() or 0) > 0 then\n"
+        "    local tgt = nil\n"
+        "    for pid = 0, 63 do\n"
+        "        local pp = Players[pid]\n"
+        "        if pid ~= me and pp and pp:GetUnits() then\n"
+        "            for _, o in pp:GetUnits():Members() do\n"
+        f"                if o:GetX() == {x} and o:GetY() == {y} and (o:GetReligiousStrength() or 0) > 0 then tgt = o break end\n"
+        "            end\n"
+        "        end\n"
+        "        if tgt then break end\n"
+        "    end\n"
+        "    if tgt == nil then\n"
+        f"        {bail(repr(f'ERR:NO_RELIGIOUS_UNIT|No religious unit of another player at ({x},{y}). Theological combat targets another religion' + chr(39) + 's Missionary, Apostle, Inquisitor or Guru on that tile; check the tile with get_map_area first.'))}\n"
+        "    end\n"
+        "    local ti = GameInfo.Units[tgt:GetType()]\n"
+        "    local tname = ti and ti.UnitType or 'UNKNOWN'\n"
+        "    local cfg = PlayerConfigurations[tgt:GetOwner()]\n"
+        "    local tciv = cfg and Locale.Lookup(cfg:GetCivilizationShortDescription()) or ('player ' .. tgt:GetOwner())\n"
+        "    local okr, r1 = pcall(function() return unit:GetReligionType() end)\n"
+        "    local okt, r2 = pcall(function() return tgt:GetReligionType() end)\n"
+        "    if okr and okt and r1 ~= nil and r1 >= 0 and r1 == r2 then\n"
+        f"        {bail(chr(39) + 'ERR:SAME_RELIGION|' + chr(39) + ' .. tname .. ' + chr(39) + ' of ' + chr(39) + ' .. tciv .. ' + chr(39) + f' at ({x},{y}) spreads the same religion as your unit; theological combat is only against another religion.' + chr(39))}\n"
+        "    end\n"
+        "    if unit:GetMovesRemaining() <= 0 then\n"
+        f"        {bail(repr('ERR:NO_MOVES|Your religious unit has no moves left this turn; attack next turn.'))}\n"
+        "    end\n"
+        "    local tp = {}\n"
+        f"    tp[UnitOperationTypes.PARAM_X] = {x}\n"
+        f"    tp[UnitOperationTypes.PARAM_Y] = {y}\n"
+        "    tp[UnitOperationTypes.PARAM_MODIFIERS] = UnitOperationMoveModifiers.ATTACK\n"
+        f"    local okw, war = pcall(function() return CombatManager.IsAttackChangeWarState(unit:GetComponentID(), {x}, {y}) end)\n"
+        "    if okw and war ~= nil and #war > 0 then\n"
+        f"        {bail(chr(39) + 'ERR:WOULD_DECLARE_WAR|The game says this attack on ' + chr(39) + ' .. tname .. ' + chr(39) + ' of ' + chr(39) + ' .. tciv .. ' + chr(39) + ' would start a war, so it was not sent. Declare war first if you mean to.' + chr(39))}\n"
+        "    end\n"
+        "    if not UnitManager.CanStartOperation(unit, UnitOperationTypes.MOVE_TO, nil, tp) then\n"
+        f"        {bail(chr(39) + 'ERR:ATTACK_BLOCKED|The game will not let your ' + chr(39) + ' .. (GameInfo.Units[unit:GetType()].UnitType) .. ' + chr(39) + ' at (' + chr(39) + ' .. ux .. ' + chr(39) + ',' + chr(39) + ' .. uy .. ' + chr(39) + f') attack ' + chr(39) + ' .. tname .. ' + chr(39) + ' of ' + chr(39) + ' .. tciv .. ' + chr(39) + f' at ({x},{y}): it must be next to the target with moves left, and not every religious unit can start theological combat (Apostles and Inquisitors can).' + chr(39))}\n"
+        "    end\n"
+        "    local thp, tmax = tgt:GetMaxDamage() - tgt:GetDamage(), tgt:GetMaxDamage()\n"
+        "    local mhp, mmax = unit:GetMaxDamage() - unit:GetDamage(), unit:GetMaxDamage()\n"
+        "    UnitManager.RequestOperation(unit, UnitOperationTypes.MOVE_TO, tp)\n"
+        f"    print('OK:THEOLOGICAL_ATTACK|target:' .. tname .. ' of ' .. tciv .. ' at ({x},{y})|pre_hp:' .. thp .. '/' .. tmax\n"
+        "      .. '|your HP:' .. mhp .. '/' .. mmax .. '|ref:' .. tgt:GetOwner() .. ':' .. tgt:GetID())\n"
+        f"    print('{sentinel}') return\n"
+        "end\n"
+    )
+
+
+def theological_lua(original, sentinel: str = "---END---"):
+    """civ6-mcp's attack builder, which also does theological combat when the attacking unit is a religious one."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        if lua.count(_THEO_ANCHOR) != 1:
+            return lua  # civ6-mcp changed: its own attack, unchanged
+        return lua.replace(_THEO_ANCHOR, _THEO_ANCHOR + _theological_lua(target_x, target_y, sentinel))
+    return build
+
+
+def religious_state_lua(unit_index: int, ref: str) -> str:
+    """Both sides of a theological attack after it: REL|<your HP or GONE>|<target HP or GONE> (one line)."""
+    owner, uid = (int(v) for v in ref.split(":"))
+    return (
+        "local me = Game.GetLocalPlayer() "
+        f"local u = UnitManager.GetUnit(me, {int(unit_index)}) local t = UnitManager.GetUnit({owner}, {uid}) "
+        "local function hp(x) if x == nil or x:GetX() == -9999 then return 'GONE' end "
+        "  return tostring(x:GetMaxDamage() - x:GetDamage()) end "
+        "print('REL|' .. hp(u) .. '|' .. hp(t)) print('---END---')"
+    )
+
+
+_THEO_RE = re.compile(r"THEOLOGICAL_ATTACK\|target:([^|]*)\|pre_hp:(\d+)/\d+\|your HP:(\d+)/\d+\|ref:(\d+:\d+)")
+
+
+def theological_ref(out: str):
+    """(target, its HP before, yours before, 'owner:id') from a THEOLOGICAL_ATTACK result, or None."""
+    m = _THEO_RE.search(out)
+    return (m[1], int(m[2]), int(m[3]), m[4]) if m else None
+
+
+def theological_report(out: str, rel_line: str, waited: float) -> str:
+    """The attack's result as it played out, from the REL| line read after it."""
+    ref = theological_ref(out)
+    if ref is None:
+        return out
+    target, t0, m0, _ = ref
+    p = rel_line.split("|")
+    if len(p) < 3:
+        return (f"THEOLOGICAL_ATTACK|target:{target}|enemy HP:{t0}|your HP:{m0}|The attack was sent, but the units "
+                "could not be read back; check get_units.")
+    mine = "your unit died" if p[1] == "GONE" else f"your HP:{m0} -> {p[1]}"
+    theirs = "enemy HP:" + str(t0) + (" -> killed" if p[2] == "GONE" else f" -> {p[2]}")
+    if p[1] != "GONE" and p[2] != "GONE" and int(p[1]) == m0 and int(p[2]) == t0:
+        return (f"Error: NOT_RESOLVED|The theological attack on {target} was sent, but after {waited:.0f} seconds "
+                "neither unit's HP has changed. Check get_units before you order it again.")
+    note = (" Killing a religious unit adds pressure for your religion in the cities around it." if p[2] == "GONE"
+            else "")
+    return f"THEOLOGICAL_ATTACK|target:{target}|{theirs}|{mine}{note}"
+
+
+
+# The culture victory count. civ6-mcp's get_victory_progress compared, civ by civ, the tourists from that civ visiting
+# you with that civ's domestic tourists ("vs Egypt: 46/310 tourists (need 264 more)"). The game counts differently: its
+# World Rankings screen (WorldRankings.lua GatherCultureData) takes all the tourists visiting you (GetTouristsTo) and
+# needs one more than the largest domestic count of any other civ. In game 26 (France, Culture goal) the game showed
+# "Your Culture Victory Imminent" on turn 220 while the tool showed every civ out of reach; the agent decided the
+# tool was off but judged a culture win "unlikely given the tourist gap". The query now also prints every civ's
+# visiting and domestic tourists, and the Culture section and its verdict use the game's rule.
+_CULTURE_ROWS_LUA = (  # in its own function: the query already holds many locals, and Lua allows 200 per function
+    "(function() local cme = Game.GetLocalPlayer() local cdip = Players[cme]:GetDiplomacy() "
+    "for i = 0, 62 do local q = Players[i] if q and q:IsMajor() and q:IsAlive() then "
+    "  local c = q:GetCulture() local okT, vis = pcall(function() return c:GetTouristsTo() end) "
+    "  local okS, stay = pcall(function() return c:GetStaycationers() end) "
+    "  local okF, from = pcall(function() return Players[cme]:GetCulture():GetTouristsFrom(i) end) "
+    "  local okU, turns = pcall(function() return c:GetTurnsUntilVictory() end) "
+    "  local name = 'an unmet civ' "
+    "  if i == cme or cdip:HasMet(i) then name = Locale.Lookup(PlayerConfigurations[i]:GetCivilizationShortDescription()) end "
+    "  print('CULTOT|' .. i .. '|' .. name .. '|' .. ((okT and vis) or -1) .. '|' .. ((okS and stay) or -1) .. '|' "
+    "    .. ((okF and from) or 0) .. '|' .. ((okU and turns) or -1) .. '|' .. tostring(i == cme)) "
+    "end end "
+    # the score victory's turn limit: civ6-mcp writes "SCORE (highest at turn 500)" whatever the game's limit is
+    "local mt = 0 pcall(function() mt = Game.GetMaxTurns() end) "
+    "if (mt or 0) <= 0 then pcall(function() mt = GameConfiguration.GetMaxTurns() end) end "
+    # none set (game 26 had 0): the game speed's own length, the sum of its GameSpeed_Turns rows (Online 250)
+    "if (mt or 0) <= 0 then pcall(function() local sp = GameInfo.GameSpeeds[GameConfiguration.GetGameSpeedType()]"
+    ".GameSpeedType mt = 0 for r in GameInfo.GameSpeed_Turns() do if r.GameSpeedType == sp then "
+    "mt = mt + r.TurnsPerIncrement end end end) end "
+    "print('MAXT|' .. (mt or 0)) end)() "
+)
+
+
+def victory_query(original):
+    """civ6-mcp's victory progress query, which also prints a CULTOT row per civ for the culture count."""
+    def build() -> str:
+        lua = original()
+        i = lua.rfind('print("---END---")')
+        if i < 0:
+            return lua  # civ6-mcp changed: its own query, unchanged
+        return lua[:i] + _CULTURE_ROWS_LUA + "\n" + lua[i:]
+    return build
+
+
+def culture_rows(lines) -> list[dict]:
+    """The CULTOT rows: pid, name, visiting (all tourists visiting that civ), domestic, from (visiting you from that
+    civ), turns (the game's turns to a culture win, -1 when it gives none), me."""
+    rows = []
+    for ln in lines:
+        p = ln.split("|")
+        if p[0] == "CULTOT" and len(p) >= 8:
+            try:
+                rows.append({"pid": int(p[1]), "name": p[2], "visiting": int(float(p[3])), "domestic": int(float(p[4])),
+                             "from": int(float(p[5])), "turns": int(float(p[6])), "me": p[7] == "true"})
+            except ValueError:
+                continue
+    return rows
+
+
+def max_turns(lines) -> int:
+    """The game's turn limit from the MAXT row, 0 when it has none or the row is missing."""
+    for ln in lines:
+        if ln.startswith("MAXT|"):
+            try:
+                return int(float(ln.split("|")[1]))
+            except ValueError:
+                return 0
+    return 0
+
+
+def score_turn_fix(text: str, limit: int) -> str:
+    """civ6-mcp's Score heading names turn 500 whatever the game's limit; name the game's own."""
+    if limit <= 0:
+        return text
+    return text.replace("SCORE (highest at turn 500)", f"SCORE (highest at turn {limit}, this game's turn limit)", 1)
+
+
+def culture_need(rows, row) -> tuple[int, str]:
+    """(tourists the civ needs, the civ that sets it): one more than any other civ's domestic tourists."""
+    others = [r for r in rows if r["pid"] != row["pid"]]
+    if not others:
+        return 1, ""
+    top = max(others, key=lambda r: r["domestic"])
+    return top["domestic"] + 1, top["name"]
+
+
+def culture_section(rows) -> str:
+    """The Culture section of get_victory_progress, by the game's rule."""
+    me = next((r for r in rows if r["me"]), None)
+    if me is None or me["visiting"] < 0:
+        return ""
+    need, by = culture_need(rows, me)
+    out = ["CULTURE (the tourists visiting you from all other civs together must outnumber every other civ's domestic "
+           "tourists; the game's World Rankings count)"]
+    togo = need - me["visiting"]
+    out.append(f"  You: {me['visiting']} visiting tourists, need {need} (one more than {by}'s {need - 1} domestic): "
+               + ("you meet it" if togo <= 0 else f"{togo} to go")
+               + (f", the game says {me['turns']} turns to a culture win" if me["turns"] > 0 else "") + ".")
+    out.append(f"  Your domestic tourists: {me['domestic']}. A rival needs more visiting tourists than this, and than "
+               "every other civ's domestic count, to win on culture.")
+    rivals = []
+    for r in sorted((r for r in rows if not r["me"]), key=lambda r: r["visiting"], reverse=True):
+        n, _ = culture_need(rows, r)
+        rivals.append(f"{r['name']} {r['visiting']}/{n}")
+    out.append("  Rivals, visiting tourists / needed: " + ", ".join(rivals) + ".")
+    frm = [f"{r['name']} {r['from']}" for r in sorted(rows, key=lambda r: r["from"], reverse=True) if not r["me"]]
+    out.append("  Tourists visiting you, by home civ: " + ", ".join(frm) + ".")
+    return "\n".join(out)
+
+
+def culture_reason(rows):
+    """The Culture verdict's reason, by the game's rule, or None."""
+    me = next((r for r in rows if r["me"]), None)
+    if me is None or me["visiting"] < 0:
+        return None
+    need, by = culture_need(rows, me)
+    togo = need - me["visiting"]
+    if togo <= 0:
+        return f"{me['visiting']}/{need} visiting tourists: you meet the culture condition"
+    return f"{me['visiting']}/{need} visiting tourists, {togo} to go ({by} has the most domestic tourists)"
+
+
+def culture_scoring(rows, their_staycationers: dict) -> dict | None:
+    """What civ6-mcp's verdict should compare: {civ: your visiting tourists - 1} against each civ's domestic count, so
+    its gap (domestic - this) is at most 0 exactly when you have one more than every civ's domestic tourists."""
+    me = next((r for r in rows if r["me"]), None)
+    if me is None or me["visiting"] < 0:
+        return None
+    return {name: me["visiting"] - 1 for name in their_staycationers}
+
+
+_VENDOR_CULTURE_RE = re.compile(r"CULTURE \(your tourists > every civ's domestic tourists\)\n(?:  [^\n]*(?:\n|$))*")
+_VENDOR_VERDICT_RE = re.compile(r"^(  Culture +\[[#-]{10}\] \d+% — )([^\n]*?)((?: \*\* RECOMMENDED \*\*)?)$", re.M)
+
+
+def culture_fix(text: str, rows) -> str:
+    """Replace civ6-mcp's Culture section and its verdict's reason with the game's count; unchanged without rows."""
+    section = culture_section(rows)
+    if not section:
+        return text
+    text, n = _VENDOR_CULTURE_RE.subn(lambda m: section + "\n", text, count=1)
+    if n == 0:
+        return text
+    reason = culture_reason(rows)
+    if reason:
+        text = _VENDOR_VERDICT_RE.sub(lambda m: m[1] + reason + m[3], text, count=1)
+    return text
+
 def district_state_lua(x: int, y: int) -> str:
     """The district at (x, y) after an attack: DEF|owner|is it the player's|garrison hp/max|walls hp/max (one line)."""
     x, y = int(x), int(y)
@@ -672,16 +942,18 @@ def war_state_lua(other_player_id: int) -> str:
         f"local me = Game.GetLocalPlayer() local t = {t} local d = Players[me]:GetDiplomacy() "
         "local cfg = PlayerConfigurations[t] "
         "local name = cfg and Locale.Lookup(cfg:GetCivilizationShortDescription()) or ('player ' .. t) "
-        "print('WARSTATE|' .. tostring(d:IsAtWarWith(t)) .. '|' .. name) print('---END---')"
+        "local st = '' pcall(function() st = GameInfo.DiplomaticStates[Players[t]:GetDiplomaticAI()"
+        ":GetDiplomaticStateIndex(me)].StateType end) "
+        "print('WARSTATE|' .. tostring(d:IsAtWarWith(t)) .. '|' .. name .. '|' .. st) print('---END---')"
     )
 
 
 def parse_war_state(lines) -> dict | None:
     for ln in lines or []:
         if ln.startswith("WARSTATE|"):
-            p = ln.split("|", 2)
-            if len(p) == 3 and p[1] in ("true", "false"):
-                return {"at_war": p[1] == "true", "name": p[2]}
+            p = ln.split("|")
+            if len(p) >= 3 and p[1] in ("true", "false"):
+                return {"at_war": p[1] == "true", "name": p[2], "state": p[3] if len(p) > 3 else ""}
     return None
 
 
@@ -692,6 +964,28 @@ def war_result(out: str, st: dict | None) -> str:
     if st["at_war"]:
         return f"OK:WAR_DECLARED|At war with {st['name']} (the game's war state, read after the declaration)."
     return ""
+
+
+# A refused declaration. civ6-mcp answered every refusal with "Possible reasons: friendship/alliance active, 10-turn
+# peace cooldown, or target is invalid." In game 26 the agent sent war on Greece, its ally since turn 226, on turns
+# 240, 241 and 242 while Greece finished the space race, each time with that answer. Replayed from turn 240's save,
+# the game's CanDeclareWarOn was false for each civ France was allied with or had declared friendship with, and true
+# for the others: the refusal now names the state with that civ.
+def war_refused(out: str, st: dict | None) -> str:
+    if st is None:
+        return out
+    name, state = st["name"], st.get("state", "")
+    if state == "DIPLO_STATE_ALLIED":
+        why = (f"you are allied with {name}, and the game allows no war on an ally while the alliance lasts "
+               "(get_diplomacy shows the state with each civ).")
+    elif state == "DIPLO_STATE_DECLARED_FRIEND":
+        why = (f"you have a declared friendship with {name}, and the game allows no war on a declared friend while "
+               "it lasts (get_diplomacy shows the state with each civ).")
+    else:
+        why = (f"the game gives no reason, and your relation with {name} is "
+               f"{state.replace('DIPLO_STATE_', '').replace('_', ' ').lower() or 'unknown'}. A peace deal blocks war "
+               "for 10 turns after it is signed.")
+    return f"Error: CANNOT_DECLARE_WAR|The game will not let you declare war on {name} now: {why}"
 
 
 def war_not_declared(action: str, st: dict) -> str:

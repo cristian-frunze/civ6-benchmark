@@ -545,7 +545,7 @@ async def main():
     check("ranged units take the ranged path", ns["_IS_RANGED"].rstrip("\n") + " or " + ns["_RANGED_UNIT"] in lua)
     check("no melee fallback for ranged units", f"elseif dist <= 1 and not {ns['_RANGED_UNIT']} then" in lua
           and 'print("ERR:RANGED_REFUSED|' in lua and "on (43,45) next to it" in lua
-          and lua.index("ERR:RANGED_REFUSED") < lua.index("UnitOperationTypes.MOVE_TO"))
+          and lua.index("ERR:RANGED_REFUSED") < lua.index("UnitOperationTypes.MOVE_TO, nil, params)"))
     check("the estimate counts an adjacent shot as ranged",
           "local isRanged = attRS > 0\n" in lq.build_combat_estimate_query(9, 43, 45))
     REFUSED = EST + "Error: RANGED_REFUSED|The game would not let UNIT_ARCHER fire from (39,40) at UNIT_WARRIOR on (43,45)"
@@ -621,6 +621,9 @@ async def main():
     check("spy travel: same op and params as civ6-mcp's",
           "UNITOPERATION_SPY_TRAVEL_NEW_CITY" in lua and bc.op_hash("UNITOPERATION_SPY_TRAVEL_NEW_CITY") == -1295211657
           and "PARAM_X0] = x" in lua and "GetUnit(me, 19)" in lua and "local x, y = 57, 14" in lua)
+    check("spy travel: an ally's city is named as the reason (game 26: India and Greece refused, every city)",
+          "st == 'DIPLO_STATE_ALLIED' and #why == 0" in lua and "the game sends no spies into an ally" in lua
+          and lua.index("DIPLO_STATE_ALLIED") < lua.index("ERR:CANNOT_TRAVEL"))
     check("spy travel: refusal gives reasons, moves and the city", "res[UnitOperationResults.FAILURE_REASONS]" in lua and "GetMovesRemaining" in lua
           and "Cities.GetPlotPurchaseCity(x, y)" in lua and "Allied civ" not in lua)
     spy_doc = mcp._tool_manager.get_tool("spy_action").description
@@ -811,7 +814,21 @@ async def main():
     uncertain = ("WARN:WAR_UNCERTAIN|DECLARE_SURPRISE_WAR session completed but war state not yet confirmed for "
                  "America. Check next turn.")
     ws = bcx.parse_war_state(["junk", "WARSTATE|true|America"])
-    check("war state parsed", ws == {"at_war": True, "name": "America"}, ws)
+    check("war state parsed", ws == {"at_war": True, "name": "America", "state": ""}, ws)
+    ws2 = bcx.parse_war_state(["WARSTATE|false|Greece|DIPLO_STATE_ALLIED", "---END---"])
+    check("war state with the diplomatic state", ws2 == {"at_war": False, "name": "Greece", "state": "DIPLO_STATE_ALLIED"}, ws2)
+    check("war Lua reads the diplomatic state", "GetDiplomaticStateIndex(me)].StateType" in bcx.war_state_lua(4))
+    VENDOR_REFUSED = ("Error: CANNOT_DECLARE_WAR|Cannot declare war. Possible reasons: friendship/alliance active, "
+                      "10-turn peace cooldown, or target is invalid.")
+    r = bcx.war_refused(VENDOR_REFUSED, ws2)
+    check("refused war on an ally names the alliance", r.startswith("Error: CANNOT_DECLARE_WAR|The game will not let you "
+          "declare war on Greece now: you are allied with Greece") and "while the alliance lasts" in r, r)
+    r = bcx.war_refused(VENDOR_REFUSED, {"at_war": False, "name": "America", "state": "DIPLO_STATE_DECLARED_FRIEND"})
+    check("refused war on a declared friend says so", "declared friendship with America" in r, r)
+    r = bcx.war_refused(VENDOR_REFUSED, {"at_war": False, "name": "Rome", "state": "DIPLO_STATE_NEUTRAL"})
+    check("refused war otherwise: the relation and the peace rule", "your relation with Rome is neutral" in r
+          and "10 turns" in r, r)
+    check("refused war, state unread: civ6-mcp's answer", bcx.war_refused(VENDOR_REFUSED, None) == VENDOR_REFUSED)
     check("war state: missing or bad is None", bcx.parse_war_state(["OK"]) is None
           and bcx.parse_war_state(["WARSTATE|maybe|America"]) is None)
     check("war on: OK", bcx.war_result(uncertain, ws).startswith("OK:WAR_DECLARED|At war with America"))
@@ -849,8 +866,24 @@ async def main():
           "peace with America") and "DECLARE_SURPRISE_WAR did not take effect" in r3 and g3.conn.reads == 2, r3)
     check("other actions: untouched", r4 == "OK:SENT|DENOUNCE sent to America" and g4.conn.reads == 0, r4)
 
+    class AllyConn:
+        def __init__(self): self.reads = 0
+        async def execute_write(self, lua, timeout=None):
+            self.reads += 1
+            assert "local t = 4 " in lua, lua
+            return ["WARSTATE|false|Greece|DIPLO_STATE_ALLIED", "---END---"]
+    async def refused_diplo(self, other, action): return VENDOR_REFUSED
+    ns["_vendor_send_diplomatic_action"] = refused_diplo
+    try:
+        g5 = types.SimpleNamespace(conn=AllyConn())
+        r5 = await GameState.send_diplomatic_action(g5, 4, "DECLARE_SURPRISE_WAR")
+    finally:
+        ns["_vendor_send_diplomatic_action"] = _vendor_diplo
+    check("declaration refused: one read, the alliance named", g5.conn.reads == 1
+          and "you are allied with Greece" in r5, r5)
+
     # 16p. set_research / set_civic ask the game's own CanResearch / CanProgress before the request (game 25: Economics
-    # set through GameCore on turn 115 before its prerequisites, reset by the game the next turn).
+    # accepted on turn 115 before its prerequisites, and the game asked for a tech again the next turn).
     for _b, _n, _can in ((lq.build_set_research, "TECH_ECONOMICS", "GetTechs():CanResearch(idx)"),
                          (lq.build_set_research_gamecore, "TECH_ECONOMICS", "GetTechs():CanResearch(idx)"),
                          (lq.build_set_civic, "CIVIC_HUMANISM", "GetCulture():CanProgress(idx)"),
@@ -894,9 +927,123 @@ async def main():
     check("change_government: description says the game's rules", "First switch after" not in _t.description
           and "at least 3 turns of Anarchy" in _t.description, _t.description)
 
+    # 16h. Theological combat (game 25, turns 91 and 127: an Apostle's attack on another civ's religious unit came back
+    #      "NO_ENEMY|No hostile unit or city at (x,y)", and civ6-mcp would refuse a civ at peace anyway).
+    lua = lq.build_attack_unit(9, 39, 19)
+    i_rel = lua.index("GetReligiousStrength() or 0) > 0 then")
+    check("theological: branch before civ6-mcp's target search and war check",
+          lua.index("local ux, uy = unit:GetX(), unit:GetY()") < i_rel < lua.index("Map.GetUnitsAt(39, 19)")
+          < lua.index("IsAtWarWith(enemyOwner)"))
+    rel = lua[i_rel:lua.index("Map.GetUnitsAt(39, 19)")]
+    check("theological: target found by walking every player's units, not Map.GetUnitsAt",
+          "for pid = 0, 63 do" in rel and "o:GetX() == 39 and o:GetY() == 19" in rel and "GetUnitsAt" not in rel)
+    check("theological: the UI's order (MOVE_TO with ATTACK), the war check, no IsAtWarWith",
+          "UnitOperationMoveModifiers.ATTACK" in rel and "IsAttackChangeWarState(unit:GetComponentID(), 39, 19)" in rel
+          and "UnitManager.RequestOperation(unit, UnitOperationTypes.MOVE_TO, tp)" in rel and "IsAtWarWith" not in rel
+          and rel.index("IsAttackChangeWarState") < rel.index("CanStartOperation") < rel.index("RequestOperation"))
+    check("theological: every exit prints the sentinel and returns",
+          rel.count("print('" + lq.SENTINEL + "') return") == 6, rel.count("print('" + lq.SENTINEL + "') return"))
+    check("theological: messages are plain text", "{" not in rel.replace("tp = {}", "") and "ERR:NO_RELIGIOUS_UNIT|" in rel
+          and "OK:THEOLOGICAL_ATTACK|target:" in rel and "'|ref:' .. tgt:GetOwner() .. ':' .. tgt:GetID()" in rel)
+    check("theological: Lua quotes balanced", all(ln.count("'") % 2 == 0 for ln in rel.splitlines()
+                                                    if "religion's" not in ln and "religion" + chr(39) not in ln),
+          [ln for ln in rel.splitlines() if ln.count("'") % 2])
+    check("theological: unchanged when civ6-mcp's text moves",
+          bc.theological_lua(lambda u, x, y: "print('x')")(1, 2, 3) == "print('x')")
+    OKT = ("THEOLOGICAL_ATTACK|target:UNIT_INQUISITOR of Russia at (39,19)|pre_hp:100/100|your HP:100/100|ref:1:524301")
+    check("theological: ref parsed", bc.theological_ref("Combat Estimate:\n" + OKT) == ("UNIT_INQUISITOR of Russia at (39,19)",
+                                                                                          100, 100, "1:524301"))
+    rs = bc.religious_state_lua(9, "1:524301")
+    check("theological: read-back Lua", "UnitManager.GetUnit(me, 9)" in rs and "UnitManager.GetUnit(1, 524301)" in rs
+          and "'REL|'" in rs)
+    rep = bc.theological_report(OKT, "REL|71|GONE", 1.0)
+    check("theological report: killed", rep.startswith("THEOLOGICAL_ATTACK|target:UNIT_INQUISITOR of Russia at (39,19)|"
+          "enemy HP:100 -> killed|your HP:100 -> 71") and "adds pressure" in rep, rep)
+    rep = bc.theological_report(OKT, "REL|80|37", 1.0)
+    check("theological report: damaged", rep == "THEOLOGICAL_ATTACK|target:UNIT_INQUISITOR of Russia at (39,19)|"
+          "enemy HP:100 -> 37|your HP:100 -> 80", rep)
+    rep = bc.theological_report(OKT, "REL|GONE|12", 1.0)
+    check("theological report: attacker died", "your unit died" in rep and "enemy HP:100 -> 12" in rep, rep)
+    rep = bc.theological_report(OKT, "REL|100|100", 6.0)
+    check("theological report: nothing happened", rep.startswith("Error: NOT_RESOLVED|") and "6 seconds" in rep, rep)
+    class RelConn:
+        def __init__(self, rows): self.rows, self.sent = list(rows), []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            return [self.rows.pop(0) if len(self.rows) > 1 else self.rows[0], lq.SENTINEL]
+    saved_orig = ns["_original_attack_unit"]
+    async def theo_atk(self, u, x, y): return "Combat Estimate (Melee):\n  Est damage to defender: ~44\n" + OKT
+    ns["_original_attack_unit"] = theo_atk
+    try:
+        g = types.SimpleNamespace(conn=RelConn(["REL|100|100", "REL|100|100", "REL|74|40"]))
+        g.conn_states = None
+        async def no_state(game, ui, tx, ty): return None
+        saved_state = ns["_attack_state"]
+        ns["_attack_state"] = no_state
+        try:
+            rep = await GameState.__dict__["attack_unit"](g, 9, 39, 19)
+        finally:
+            ns["_attack_state"] = saved_state
+        check("attack_unit: theological attack read back until it plays out",
+              rep == "THEOLOGICAL_ATTACK|target:UNIT_INQUISITOR of Russia at (39,19)|enemy HP:100 -> 40|your HP:100 -> 74"
+              and len(g.conn.sent) == 3 and "Combat Estimate" not in rep, (len(g.conn.sent), rep))
+    finally:
+        ns["_original_attack_unit"] = saved_orig
+
+    # 16i. The culture victory count (game 26: "Your Culture Victory Imminent" on turn 220 while get_victory_progress
+    #      showed France far behind every civ, comparing each civ's tourists to France with its domestic count).
+    import civ_mcp.narrate as nr_mod
+    vq = lq.build_victory_progress_query()
+    check("victory query prints CULTOT rows before its end",
+          "print('CULTOT|'" in vq and "GetTouristsTo()" in vq and vq.index("CULTOT") < vq.rindex('print("---END---")')
+          and "(function() local cme" in vq and "print('MAXT|' .. (mt or 0)) end)()" in vq
+          and "GameInfo.GameSpeed_Turns()" in vq and "mt = mt + r.TurnsPerIncrement" in vq)
+    check("victory query: unchanged when civ6-mcp's text moves", bc.victory_query(lambda: "print('x')")() == "print('x')")
+    vlines = ["PLAYER|0|France|554|0|50|0|674|1056|62|51|0|286|false|8|206|440|185",
+              "PLAYER|1|Egypt|557|0|50|0|790|1374|54|51|0|316|false|13|198|430|90",
+              "PLAYER|2|Greece|493|4|50|0|20|95|68|39|0|54|false|12|240|72|60",
+              "CULTURE|Egypt|46|316|false", "CULTURE|Greece|21|54|false",
+              "CULTOT|0|France|245|286|0|-1|true", "CULTOT|1|Egypt|250|316|46|-1|false",
+              "CULTOT|2|Greece|30|54|21|-1|false", "CULTOT|3|an unmet civ|5|12|0|-1|false", "MAXT|250", lq.SENTINEL]
+    vp = lq.parse_victory_progress_response(vlines)
+    check("parse keeps the CULTOT rows", len(getattr(vp, "_bench_culture", [])) == 4
+          and vp._bench_culture[0] == {"pid": 0, "name": "France", "visiting": 245, "domestic": 286, "from": 0,
+                                       "turns": -1, "me": True}, getattr(vp, "_bench_culture", None))
+    vout = nr_mod.narrate_victory_progress(vp)
+    check("culture section by the game's rule", "You: 245 visiting tourists, need 317 (one more than Egypt's 316 "
+          "domestic): 72 to go." in vout and "Rivals, visiting tourists / needed: Egypt 250/287, Greece 30/317, "
+          "an unmet civ 5/317." in vout and "Tourists visiting you, by home civ: Egypt 46, Greece 21, an unmet civ 0."
+          in vout, vout)
+    check("score heading names the game's turn limit", "SCORE (highest at turn 250, this game's turn limit)" in vout
+          and "turn 500" not in vout, vout)
+    check("score heading unchanged without a limit", bc.score_turn_fix("SCORE (highest at turn 500)", 0)
+          == "SCORE (highest at turn 500)")
+    check("civ6-mcp's per-civ comparison is gone", "46/316 tourists" not in vout and "need 270 more" not in vout
+          and "CULTURE (your tourists" not in vout, vout)
+    vline = next((ln for ln in vout.splitlines() if ln.startswith("  Culture ")), "")
+    check("culture verdict: the game's count and civ6-mcp's bucket for a 72 gap",
+          vline.startswith("  Culture      [#---------] 15% — 245/317 visiting tourists, 72 to go (Egypt has the most "
+                           "domestic tourists)"), vline)
+    vp = lq.parse_victory_progress_response([l.replace("CULTOT|0|France|245|", "CULTOT|0|France|317|") for l in vlines])
+    vout = nr_mod.narrate_victory_progress(vp)
+    vline = next((ln for ln in vout.splitlines() if ln.startswith("  Culture ")), "")
+    check("culture verdict: one more than the top domestic count meets it",
+          "[#########-] 95% — 317/317 visiting tourists: you meet the culture condition" in vline
+          and "you meet it" in vout, vline)
+    vp = lq.parse_victory_progress_response([l.replace("CULTOT|0|France|245|", "CULTOT|0|France|316|") for l in vlines])
+    vline = next((ln for ln in nr_mod.narrate_victory_progress(vp).splitlines() if ln.startswith("  Culture ")), "")
+    check("culture verdict: equal to the top domestic count is not enough", "70% — 316/317 visiting tourists, 1 to go"
+          in vline, vline)
+    vp = lq.parse_victory_progress_response([l for l in vlines if not l.startswith("CULTOT")])
+    vout = nr_mod.narrate_victory_progress(vp)
+    check("no CULTOT rows: civ6-mcp's section unchanged", "CULTURE (your tourists > every civ's domestic tourists)"
+          in vout and "vs Egypt: 46/316 tourists" in vout, vout)
+
     # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
     lua = lq.build_attack_unit(13, 42, 35)
-    check("attack builder replaced", lq.build_attack_unit.__qualname__.startswith("attack_lua"))
+    check("attack builder replaced", lq.build_attack_unit.__qualname__.startswith("theological_lua")
+          and lq.build_attack_unit.__closure__ and any(getattr(c.cell_contents, "__qualname__", "").startswith("attack_lua")
+                                                       for c in lq.build_attack_unit.__closure__))
     check("attack: city centre or Encampment taken as the target", "DISTRICT_GARRISON" in lua
           and "Players[owner]:GetDistricts():Members()" in lua and "enemyName = di.DistrictType" in lua
           and lua.index("DISTRICT_GARRISON") < lua.index("No hostile unit or city at (42,35)")

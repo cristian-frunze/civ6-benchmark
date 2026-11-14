@@ -567,6 +567,35 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # Encampment as the target, and the report says what the district shows afterwards instead of civ6-mcp's "killed".
     # It sits under _attack_unit_settled, which retries and re-reads the attack.
     _lq.build_attack_unit = bc.attack_lua(_lq.build_attack_unit)  # GameState.attack_unit looks it up at call time
+    _lq.build_attack_unit = bc.theological_lua(_lq.build_attack_unit, _lq.SENTINEL)  # religious attackers (bench_compat)
+
+    # The culture victory count (bench_compat.victory_query has why): the victory query also prints CULTOT rows, the
+    # parse keeps them on the result, civ6-mcp's verdict compares your visiting tourists with each civ's domestic
+    # tourists, and the Culture section is rewritten by the game's rule. The Score heading names the game's turn limit
+    # (MAXT row) instead of civ6-mcp's fixed 500. get_victory_progress and end_turn's 10-turn snapshot both use these.
+    import civ_mcp.narrate as nr  # noqa: E402  (end_turn and server look the function up at call time)
+
+    _lq.build_victory_progress_query = bc.victory_query(_lq.build_victory_progress_query)
+    _original_parse_victory = _lq.parse_victory_progress_response
+
+    def _parse_victory_culture(lines):
+        vp = _original_parse_victory(lines)
+        vp._bench_culture = bc.culture_rows(lines)
+        vp._bench_max_turns = bc.max_turns(lines)
+        return vp
+
+    _lq.parse_victory_progress_response = _parse_victory_culture
+    _original_narrate_victory = nr.narrate_victory_progress
+
+    def _narrate_victory_culture(vp):
+        rows = getattr(vp, "_bench_culture", None) or []
+        scoring = bc.culture_scoring(rows, vp.their_staycationers) if rows else None
+        if scoring:
+            vp.our_tourists_from = scoring
+        text = bc.culture_fix(_original_narrate_victory(vp), rows)
+        return bc.score_turn_fix(text, getattr(vp, "_bench_max_turns", 0))
+
+    nr.narrate_victory_progress = _narrate_victory_culture
     _lq.build_make_trade_route = bc.trade_route_lua(_lq.build_make_trade_route)  # the refusal's reasons
     _lq.build_cities_query = bc.city_targets_lua(_lq.build_cities_query)  # the game's own attack targets
     _lq.build_send_envoy = bc.send_envoy_lua(_lq.build_send_envoy)  # says how many envoys are left
@@ -616,6 +645,12 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     async def _send_diplomatic_action_checked(self, other_player_id, action):
         out = await _vendor_send_diplomatic_action(self, other_player_id, action)
+        if str(out).startswith("Error: CANNOT_DECLARE_WAR"):  # name the state with that civ (bench_compat.war_refused)
+            try:
+                lines = await self.conn.execute_write(bc.war_state_lua(other_player_id), timeout=10.0)
+            except Exception:
+                return out
+            return bc.war_refused(out, bc.parse_war_state(lines))
         if not str(out).startswith("WARN:WAR_UNCERTAIN"):
             return out
         st = None
@@ -650,6 +685,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     async def _attack_unit_settled(self, unit_index, target_x, target_y):
         before = await _attack_state(self, unit_index, target_x, target_y)
         result = await _original_attack_unit(self, unit_index, target_x, target_y)
+        if bc.theological_ref(result):  # theological combat (bench_compat.theological_lua): read both units back
+            return await _theological_settled(self, unit_index, result)
         if "RANGED_REFUSED|" in result:
             await asyncio.sleep(1.0)
             result = await _original_attack_unit(self, unit_index, target_x, target_y)
@@ -680,6 +717,25 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return result.split("Error: STOPPED_SHORT|", 1)[0] + _attack_report(before, after, target_x, target_y, waited)
 
     _EST_START = re.compile(r"^MELEE_ATTACK\|", re.M)
+
+    async def _theological_settled(game, unit_index, result):
+        """A theological attack's result once it has played out: both units' HP read back until one changes (6 s)."""
+        result = result[result.index("THEOLOGICAL_ATTACK|"):]  # civ6-mcp's military combat estimate does not apply
+        ref = bc.theological_ref(result)
+        line, waited = "", 0.0
+        while waited < 6.0:
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            try:
+                lines = await game.conn.execute_write(bc.religious_state_lua(unit_index, ref[3]), timeout=10.0)
+            except Exception:
+                continue
+            line = next((ln for ln in lines if ln.startswith("REL|")), line)
+            p = line.split("|")
+            if len(p) >= 3 and (p[1] == "GONE" or p[2] == "GONE" or p[1] != str(ref[2]) or p[2] != str(ref[1])):
+                break
+        logging.getLogger("civ_mcp_http").info("Theological attack re-read after %.1f s: %s", waited, line)
+        return bc.theological_report(result, line, waited)
 
     def _adjacent_report(before, after, tx, ty, waited) -> str:
         """What an attack from next to the target did, read back once it has played out."""
