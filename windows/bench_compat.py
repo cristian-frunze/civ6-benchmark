@@ -814,7 +814,9 @@ def victory_query(original):
         i = lua.rfind('print("---END---")')
         if i < 0:
             return lua  # civ6-mcp changed: its own query, unchanged
-        return lua[:i] + _CULTURE_ROWS_LUA + "\n" + lua[i:]
+        # Each block is one call statement, "(function() ... end)()"; the ";" ends it, or Lua reads the next block's
+        # "(" as a call on its result (a syntax error that broke get_victory_progress on its first live run).
+        return lua[:i] + _CULTURE_ROWS_LUA + ";\n" + _RELIGION_ROWS_LUA + ";\n" + lua[i:]
     return build
 
 
@@ -922,6 +924,95 @@ def culture_fix(text: str, rows) -> str:
         text = _VENDOR_VERDICT_RE.sub(lambda m: m[1] + reason + m[3], text, count=1)
     return text
 
+# The religion count. civ6-mcp's Religion section printed each civ's majority religion and "N cities converted", where
+# N is the number of cities anywhere that follow the religion that civ founded (GetNumCitiesFollowingReligion): 0 for
+# every civ that founded none. Game 29 (Russia, Religious goal) read "Rome: majority=Orthodoxy | 0 cities converted"
+# and "Germany: majority=none (FOUNDED: Protestantism) | 5 cities converted", while what the win turned on was that
+# 3 of Germany's 8 cities followed Orthodoxy and 5 were needed. A civ follows a religion when more than half of its
+# cities do (GetReligionInMajorityOfCities). The query now also counts, for every civ, its cities and those whose
+# majority religion is the player's, and the section says how many each civ still needs.
+_RELIGION_ROWS_LUA = (  # its own function, like the culture rows
+    "(function() local rme = Game.GetLocalPlayer() local mine = -1 "
+    "pcall(function() mine = Players[rme]:GetReligion():GetReligionTypeCreated() end) "
+    "print('RELMINE|' .. rme .. '|' .. tostring(mine)) "
+    "for i = 0, 62 do local q = Players[i] if q and q:IsMajor() and q:IsAlive() then "
+    "  local n, f = 0, 0 "
+    "  for _, c in q:GetCities():Members() do n = n + 1 "
+    "    local r = -1 pcall(function() r = c:GetReligion():GetMajorityReligion() end) "
+    "    if mine >= 0 and r == mine then f = f + 1 end end "
+    "  print('RELCIV|' .. i .. '|' .. n .. '|' .. f) "
+    "end end end)()"
+)
+
+
+def religion_rows(lines) -> dict | None:
+    """{"me": pid, "mine": the religion the player founded (-1: none), "civs": {pid: (cities, following yours)}}."""
+    out = None
+    civs = {}
+    for ln in lines:
+        p = ln.split("|")
+        try:
+            if p[0] == "RELMINE" and len(p) >= 3:
+                out = {"me": int(p[1]), "mine": int(p[2])}
+            elif p[0] == "RELCIV" and len(p) >= 4:
+                civs[int(p[1])] = (int(p[2]), int(p[3]))
+        except ValueError:
+            continue
+    if out is None or not civs:
+        return None
+    out["civs"] = civs
+    return out
+
+
+def religion_section(vp, rel) -> str:
+    """The Religion section of get_victory_progress, by the game's rule; "" when it cannot be built."""
+    if not rel:
+        return ""
+    players = [p for p in vp.players if getattr(p, "player_id", None) in rel["civs"]]
+    us = next((p for p in players if p.player_id == rel["me"]), None)
+    if us is None:
+        return ""
+    slots = (f" Religions founded: {vp.religions_founded} of {vp.religions_max}"
+             + (", so no more Great Prophets." if vp.religions_max and vp.religions_founded >= vp.religions_max else ".")
+             if vp.religions_max > 0 else "")
+    out = ["RELIGION (a religious victory: your religion is the majority religion of every civ, followed by more than "
+           "half of its cities)"]
+    if rel["mine"] < 0:
+        out.append("  You have founded no religion, so a religious victory is closed to you." + slots)
+    else:
+        name = vp.religion_founded_names.get(us.name, "your religion")
+        held = 0
+        lines = []
+        for p in players:
+            n, f = rel["civs"][p.player_id]
+            need = n // 2 + 1
+            if n and f >= need:
+                held += 1
+                state = f"{f} of {n} cities follow it: majority"
+            else:
+                maj = vp.religion_majority.get(p.name, "none")
+                maj = maj.replace("RELIGION_", "").replace("_", " ").title() if maj != "none" else "none"
+                state = f"{f} of {n} cities follow it, {need - f} more needed (majority now: {maj})"
+            founded = vp.religion_founded_names.get(p.name)
+            if founded and p.player_id != us.player_id:
+                state += f". Founded {founded}, followed in {p.religion_cities} cities"
+            lines.append(f"  {p.name}: {state}" + (" <--" if p.player_id == us.player_id else ""))
+        out.append(f"  Your religion: {name}, the majority religion of {held} of {len(players)} civs." + slots)
+        out += lines
+    return "\n".join(out)
+
+
+_VENDOR_RELIGION_RE = re.compile(r"RELIGION \(your religion majority in all civs[^\n]*\n(?:  [^\n]*(?:\n|$))*")
+
+
+def religion_fix(text: str, vp, rel) -> str:
+    """Replace civ6-mcp's Religion section with the game's count; unchanged without rows."""
+    section = religion_section(vp, rel)
+    if not section:
+        return text
+    return _VENDOR_RELIGION_RE.sub(lambda m: section + "\n", text, count=1)
+
+
 def district_state_lua(x: int, y: int) -> str:
     """The district at (x, y) after an attack: DEF|owner|is it the player's|garrison hp/max|walls hp/max (one line)."""
     x, y = int(x), int(y)
@@ -937,6 +1028,184 @@ def district_state_lua(x: int, y: int) -> str:
         "  end end end "
         "print(out) print('---END---')"
     )
+
+
+# Game 29 (Russia, Religious goal) was the first game with theological combat in the tools, and the agent never used
+# it: on turn 90 it wondered whether a Debater could take on Egypt's religious units "though the tool may not support
+# that", and four Egyptian Inquisitors kept removing its conversions. unit_action's description named attack only for
+# armies. It now says what attack does with a religious unit.
+THEOLOGICAL_NOTE = (
+    "\n\nAlso: attack with an Apostle or an Inquisitor = theological combat against another religion's Missionary, "
+    "Apostle, Inquisitor or Guru on an adjacent tile (target_x, target_y), with the game's own attack order. It needs "
+    "no war and starts none. Religious strength decides it as combat strength does for armies; a unit at 0 HP dies, and "
+    "killing one adds pressure for your religion in the cities around it. Other religious units cannot start it."
+)
+
+
+# Religious unit orders. civ6-mcp's unit_action spreads religion and nothing else: no Evangelize Belief, Launch
+# Inquisition or Remove Heresy. In game 29 (turn 68) Opus bought an Apostle to add an enhancer belief, found no order
+# for it, and Eastern Orthodoxy kept its two founding beliefs for the 156 turns that followed; game 25's Arabia had the
+# same gap. The game's orders are UNITOPERATION_EVANGELIZE_BELIEF, UNITOPERATION_LAUNCH_INQUISITION and
+# UNITOPERATION_REMOVE_HERESY. Evangelize earns a belief (GetNumBeliefsEarned goes up), the game holds the turn on
+# ENDTURN_BLOCKING_BELIEF, and the player picks it with PlayerOperations.ADD_BELIEF, as the game's ReligionScreen.lua
+# does: any belief that is not pantheon class, not in a religion yet and not one too many of its class for yours
+# (IsInSomeReligion, IsTooManyForReligion).
+RELIGIOUS_ORDERS_NOTE = (
+    "\n\nAlso: evangelize = an Apostle's Evangelize Belief (the game's own order, on the Apostle's tile): it adds a "
+    "belief to the religion you founded. The result lists the beliefs you can add; pick one with unit_action(unit_id="
+    "<the Apostle>, action='evangelize', improvement='<BELIEF_TYPE>'), or give improvement on the first call to evangelize "
+    "and pick at once. The turn cannot end until you pick. launch_inquisition = an Apostle's Launch Inquisition, which "
+    "lets you buy Inquisitors. remove_heresy = an Inquisitor's Remove Heresy, which removes other religions' presence "
+    "from the city on or next to its tile. When the game refuses one of these orders, the result gives its reasons."
+)
+
+_BELIEF_STATE_LUA = (
+    "local me = Game.GetLocalPlayer() local pr = Players[me]:GetReligion() local gr = Game.GetReligion() "
+    "local rel = pr:GetReligionTypeCreated() local earned = pr:GetNumBeliefsEarned() local equipped = 0 "
+    "for _, r in ipairs(gr:GetReligions()) do if r.Founder == me then for _ in pairs(r.Beliefs) do "
+    "  equipped = equipped + 1 end end end "
+    "print('BELIEFS|' .. tostring(rel) .. '|' .. earned .. '|' .. equipped) "
+)
+
+_BELIEF_OPTIONS_LUA = (
+    "for row in GameInfo.Beliefs() do "
+    "  if row.BeliefClassType ~= 'BELIEF_CLASS_PANTHEON' and not gr:IsInSomeReligion(row.Index) "
+    "    and not gr:IsTooManyForReligion(row.Index, rel) then "
+    "    print('BELIEFOPT|' .. row.BeliefClassType:gsub('^BELIEF_CLASS_', '') .. '|' .. row.BeliefType .. '|' "
+    "      .. Locale.Lookup(row.Name):gsub('|', '/') .. '|' .. Locale.Lookup(row.Description):gsub('|', '/'):gsub('[\\r\\n]+', ' ')) "
+    "  end "
+    "end "
+)
+
+_RELIGIOUS_OPS = {"evangelize": "UNITOPERATION_EVANGELIZE_BELIEF", "launch_inquisition": "UNITOPERATION_LAUNCH_INQUISITION",
+                  "remove_heresy": "UNITOPERATION_REMOVE_HERESY"}
+
+
+def belief_state_lua() -> str:
+    """BELIEFS|religion|earned|equipped, and BELIEFOPT|class|type|name|description for each belief you can add."""
+    return _BELIEF_STATE_LUA + "if rel >= 0 and earned > equipped then " + _BELIEF_OPTIONS_LUA + "end print('---END---')"
+
+
+def add_belief_lua(pick: str) -> str:
+    """Add the belief picked (its BeliefType or name) when the religion has an earned belief to fill."""
+    p = re.sub(r"[^a-z0-9_ ]", "", str(pick or "").strip().lower())
+    return (
+        _BELIEF_STATE_LUA +
+        "if rel < 0 or earned <= equipped then print('ERR:NO_BELIEF_WAITING') print('---END---') return end "
+        f"local pick = '{p}' local hit = nil "
+        "for row in GameInfo.Beliefs() do "
+        "  if row.BeliefClassType ~= 'BELIEF_CLASS_PANTHEON' and (string.lower(row.BeliefType) == pick "
+        "    or string.lower(row.BeliefType) == 'belief_' .. pick:gsub(' ', '_') "
+        "    or string.lower(Locale.Lookup(row.Name)) == pick) then hit = row end "
+        "end "
+        "if hit == nil or gr:IsInSomeReligion(hit.Index) or gr:IsTooManyForReligion(hit.Index, rel) then "
+        "  print('ERR:NO_SUCH_CHOICE|' .. pick) print('---END---') return end "
+        "local t = {} t[PlayerOperations.PARAM_BELIEF_TYPE] = hit.Hash "
+        "t[PlayerOperations.PARAM_INSERT_MODE] = PlayerOperations.VALUE_EXCLUSIVE "
+        "UI.RequestPlayerOperation(me, PlayerOperations.ADD_BELIEF, t) "
+        "print('OK:BELIEF_SENT|' .. hit.BeliefType .. '|' .. Locale.Lookup(hit.Name)) print('---END---')"
+    )
+
+
+def religious_op_lua(unit_index: int, action: str) -> str:
+    """Send the religious order on the unit's tile, or on a city tile next to it when the game refuses the unit's own
+    tile (Remove Heresy works on a city); report the game's reasons for the unit's tile when it refuses both."""
+    op = _RELIGIOUS_OPS[action]
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        f"local op = GameInfo.UnitOperations['{op}'] "
+        f"if op == nil then print('ERR:NO_OP|{op} is not in this game') print('---END---') return end "
+        "local entry = GameInfo.Units[unit:GetType()] local x, y = unit:GetX(), unit:GetY() "
+        "local function try(tx, ty) local params = {[UnitOperationTypes.PARAM_X] = tx, [UnitOperationTypes.PARAM_Y] = ty} "
+        "  local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op.Hash, nil, params, true) end) "
+        "  if ok and can then UnitManager.RequestOperation(unit, op.Hash, params) "
+        "    print('OK:RELIGIOUS_OP_SENT|' .. tx .. '|' .. ty) print('---END---') return true, ok, res end "
+        "  return false, ok, res end "
+        "local sent, ok, res = try(x, y) if sent then return end "
+        "for d = 0, 5 do local adj = Map.GetAdjacentPlot(x, y, d) "
+        "  if adj and adj:IsCity() then if try(adj:GetX(), adj:GetY()) then return end end end "
+        + _WHY_LUA +
+        f"print('ERR:CANNOT_{action.upper()}|The game refused {op.replace('UNITOPERATION_', '').replace('_', ' ').title()} at (' "
+        "  .. x .. ',' .. y .. '): ' .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason') .. '. The unit is ' "
+        "  .. (entry and entry.UnitType or '?') .. ' with ' .. unit:GetMovesRemaining() .. ' moves left.') "
+        "print('---END---')"
+    )
+
+
+def belief_choices(lines) -> tuple[dict | None, list[tuple[str, str, str, str]]]:
+    """The BELIEFS state ({religion, earned, equipped}) and the BELIEFOPT choices (class, type, name, description)."""
+    st, opts = None, []
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "BELIEFS" and len(p) >= 4:
+            try:
+                st = {"religion": int(p[1]), "earned": int(p[2]), "equipped": int(p[3])}
+            except ValueError:
+                pass
+        elif p[0] == "BELIEFOPT" and len(p) >= 5:
+            opts.append((p[1], p[2], p[3], "|".join(p[4:])))
+    return st, opts
+
+
+def belief_report(lines) -> str:
+    """The beliefs you can add now, grouped by class, or what the religion holds when none is waiting."""
+    st, opts = belief_choices(lines)
+    if st is None:
+        return "The belief state could not be read."
+    if st["religion"] < 0:
+        return "You have not founded a religion, so there is no belief to add."
+    if st["earned"] <= st["equipped"]:
+        return f"No belief waits: your religion has {st['equipped']} of the {st['earned']} beliefs it has earned."
+    out = [f"A belief waits ({st['equipped']} of {st['earned']} earned are in your religion). Beliefs you can add:"]
+    for cls in dict.fromkeys(o[0] for o in opts):
+        out.append(f"  {cls.title()}:")
+        out += [f"    {t} ({n}): {d}" for c, t, n, d in opts if c == cls]
+    if not opts:
+        out.append("  none listed by the game")
+    out.append("Pick one with unit_action(unit_id=<any of your units>, action='evangelize', improvement='<BELIEF_TYPE>').")
+    return "\n".join(out)
+
+
+# Wonder placement. civ6-mcp's get_wonder_advisor takes every plot list GetOperationTargets returns, not only the
+# placeable plots, and ranks them by what building there would remove, so bare tiles come first. In game 29 its first
+# pick for Hagia Sophia was a mountain three times (turns 121, 135 and 163: (36,42), then (37,39) twice), each refused
+# as "CANNOT_START ... may require a completed district"; a grassland farm tile further down its list then worked, 42
+# turns after the first try. Over the benchmark's games 13 of its 51 answers listed mountains, 11 of them first. Each listed tile is now checked with the
+# game's own CanStartOperation for that wonder there, the test set_city_production makes, and only those it accepts
+# are listed. When it accepts none, none are listed (a live test on game 29's turn 212 save had civ6-mcp list three
+# mountains and two (0,0) ocean plots for Sydney Opera House in a city with no Harbor), and WONDER_NONE_NOTE says why
+# that can be.
+_WONDER_LOOP = "for _, pIdx in ipairs(plotIndices) do\n  local plot = Map.GetPlotByIndex(pIdx)\n  if plot then"
+_WONDER_CHECK = (
+    "local bench_ok, bench_n = {}, 0\n"
+    "for _, pIdx in ipairs(plotIndices) do\n"
+    "  local pl = Map.GetPlotByIndex(pIdx)\n"
+    "  if pl and bench_ok[pIdx] == nil then\n"
+    "    local ok, can = pcall(function() return CityManager.CanStartOperation(pCity, CityOperationTypes.BUILD, "
+    "{[CityOperationTypes.PARAM_BUILDING_TYPE] = brow.Hash, [CityOperationTypes.PARAM_X] = pl:GetX(), "
+    "[CityOperationTypes.PARAM_Y] = pl:GetY()}, false) end)\n"
+    "    bench_ok[pIdx] = (ok and can) and true or false\n"
+    "    if bench_ok[pIdx] then bench_n = bench_n + 1 end\n"
+    "  end\n"
+    "end\n"
+    "for _, pIdx in ipairs(plotIndices) do\n  local plot = Map.GetPlotByIndex(pIdx)\n"
+    "  if plot and bench_ok[pIdx] == true then\n    bench_ok[pIdx] = 'listed'"
+)
+
+
+WONDER_NONE_NOTE = (
+    " The game accepts none of its tiles for this wonder now. A wonder can need a tech or civic first, a district or "
+    "building in the city (a Harbor for some coastal wonders, for example), terrain or a river the city lacks, or "
+    "another civ may have built it already."
+)
+
+
+def wonder_tiles_checked(lua: str) -> str | None:
+    """civ6-mcp's wonder advisor Lua with each tile checked by the game (see above), or None when its Lua changed."""
+    if lua.count(_WONDER_LOOP) != 1 or "brow.Hash" not in lua:
+        return None
+    return lua.replace(_WONDER_LOOP, _WONDER_CHECK, 1)
 
 
 CITY_ATTACK_NOTE = (
@@ -1205,6 +1474,48 @@ def war_refused(out: str, st: dict | None) -> str:
                f"{state.replace('DIPLO_STATE_', '').replace('_', ' ').lower() or 'unknown'}. A peace deal blocks war "
                "for 10 turns after it is signed.")
     return f"Error: CANNOT_DECLARE_WAR|The game will not let you declare war on {name} now: {why}"
+
+
+# A war type the game does not accept yet. civ6-mcp checks only CanDeclareWarOn, which is true when any war is
+# possible, then sends the war type asked for; the game ignores one it does not accept. In game 29 (turns 211 and 212)
+# DECLARE_FORMAL_WAR on Sumeria came back twice as "did not take effect. Send it again" a few turns after the agent
+# had denounced Sumeria (a formal war needs an earlier denouncement), and DECLARE_SURPRISE_WAR then went through at
+# once. The war type is now checked with the game's IsDiplomaticActionValid first, with its reasons and the war
+# types it accepts now.
+def war_type_lua(other_player_id: int, action: str) -> str:
+    a = "DIPLOACTION_" + re.sub(r"[^A-Z_]", "", str(action).upper().replace("DIPLOACTION_", ""))
+    return (
+        f"local me = Game.GetLocalPlayer() local d = Players[me]:GetDiplomacy() local t = {int(other_player_id)} "
+        "local cfg = PlayerConfigurations[t] "
+        "print('WARNAME|' .. (cfg and Locale.Lookup(cfg:GetCivilizationShortDescription()) or ('player ' .. t))) "
+        f"local ok, valid, res = pcall(function() return d:IsDiplomaticActionValid('{a}', t, true) end) "
+        "print('WARVALID|' .. (ok and tostring(valid) or 'error')) "
+        "if ok and not valid and res and res.FailureReasons then for _, r in ipairs(res.FailureReasons) do "
+        "  local s = tostring(r or '') local l = Locale.Lookup(s) print('WHY|' .. ((l ~= nil and l ~= '') and l or s)) "
+        "end end "
+        "for row in GameInfo.DiplomaticActions() do local x = row.DiplomaticActionType "
+        "  if x:find('^DIPLOACTION_DECLARE_') and x:find('_WAR$') then "
+        "    local ok2, v2 = pcall(function() return d:IsDiplomaticActionValid(x, t, false) end) "
+        "    if ok2 and v2 then print('CANWAR|' .. x:gsub('^DIPLOACTION_', '')) end end end "
+        "print('---END---')"
+    )
+
+
+def war_type_refused(action: str, lines) -> str | None:
+    """The refusal of a war type the game does not accept while another type is open, or None to go ahead."""
+    if "WARVALID|false" not in (lines or []):
+        return None
+    name = next((ln.split("|", 1)[1] for ln in lines if ln.startswith("WARNAME|")), "that civ")
+    can = [ln.split("|", 1)[1] for ln in lines if ln.startswith("CANWAR|")]
+    if not can:
+        return None  # no war at all: civ6-mcp's own check refuses it and names the state (war_refused)
+    why = "; ".join(dict.fromkeys(re.sub(r"\s*\[NEWLINE\]\s*", ": ", ln.split("|", 1)[1]).strip().rstrip(".")
+                                  for ln in lines if ln.startswith("WHY|") and ln[4:].strip()))
+    a = str(action).upper().replace("DIPLOACTION_", "")
+    return (f"Error: WAR_TYPE_NOT_AVAILABLE|The game does not accept {a} on {name} now"
+            + (f": {why}" if why else " and gives no reason") + ". Nothing was sent. War types it accepts on "
+            f"{name} now: {', '.join(can)}. A formal war needs an earlier denouncement; a surprise war costs more "
+            "grievances and war weariness.")
 
 
 def war_not_declared(action: str, st: dict) -> str:

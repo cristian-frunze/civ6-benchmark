@@ -141,7 +141,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     # The list named every unit with moves left, skipped ones included: 33 units on game 28's turn 120 (replayed
     # live), where the game's own test (IsReadyToSelect, as in skip_remaining_units) held one, a Field Cannon that had
-    # just walked its order. Agents skipped everything a second time instead of ordering that unit (about 25 turns of
+    # just walked its order. Agents skipped everything a second time instead of ordering that unit (34 turns of
     # game 28). The units the game is waiting on now come first; the others are listed only when it names none.
     def _units_needing_orders(lines) -> str | None:
         ready = [ln.split("|") for ln in lines if ln.startswith("UNIT|")]
@@ -596,6 +596,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     def _parse_victory_culture(lines):
         vp = _original_parse_victory(lines)
         vp._bench_culture = bc.culture_rows(lines)
+        vp._bench_religion = bc.religion_rows(lines)
         vp._bench_max_turns = bc.max_turns(lines)
         return vp
 
@@ -608,6 +609,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if scoring:
             vp.our_tourists_from = scoring
         text = bc.culture_fix(_original_narrate_victory(vp), rows)
+        text = bc.religion_fix(text, vp, getattr(vp, "_bench_religion", None))
         return bc.score_turn_fix(text, getattr(vp, "_bench_max_turns", 0))
 
     nr.narrate_victory_progress = _narrate_victory_culture
@@ -659,6 +661,15 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _vendor_send_diplomatic_action = _gsm.GameState.send_diplomatic_action
 
     async def _send_diplomatic_action_checked(self, other_player_id, action):
+        a = str(action).upper()
+        if a.startswith("DECLARE_") and a.endswith("_WAR"):  # the war type, before civ6-mcp sends it (war_type_refused)
+            try:
+                lines = await self.conn.execute_write(bc.war_type_lua(other_player_id, a), timeout=10.0)
+            except Exception:
+                lines = []
+            refused = bc.war_type_refused(a, lines)
+            if refused:
+                return refused
         out = await _vendor_send_diplomatic_action(self, other_player_id, action)
         if str(out).startswith("Error: CANNOT_DECLARE_WAR"):  # name the state with that civ (bench_compat.war_refused)
             try:
@@ -1291,6 +1302,24 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             return lua.replace(_NO_NAME, _PEACE_ITEM + _NO_NAME, 1)
         return wrapped
 
+    def _checks_wonder_tiles(build):  # bench_compat.wonder_tiles_checked has why
+        def wrapped(*args, **kwargs):
+            lua = build(*args, **kwargs)
+            checked = bc.wonder_tiles_checked(lua)
+            if checked is None:
+                logging.getLogger("civ_mcp_http").warning("civ6-mcp's wonder advisor Lua changed: tiles not checked")
+                return lua
+            return checked
+        return wrapped
+
+    _lq.build_wonder_advisor_query = _checks_wonder_tiles(_lq.build_wonder_advisor_query)
+    _original_narrate_wonder = nr.narrate_wonder_advisor
+
+    def _narrate_wonder_none(placements, wonder_name):  # server looks it up at call time
+        text = _original_narrate_wonder(placements, wonder_name)
+        return text + bc.WONDER_NONE_NOTE if not placements else text
+
+    nr.narrate_wonder_advisor = _narrate_wonder_none
     _lq.build_diplomacy_session_query = _names_peace(_lq.build_diplomacy_session_query)
     _lq.build_pending_deals_query = _names_peace(_lq.build_pending_deals_query)
 
@@ -1788,7 +1817,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool = mcp._tool_manager.get_tool("unit_action")
     _tool.fn = _pillages(_tool.fn)
-    _tool.description += bc.PILLAGE_NOTE + bc.CITY_ATTACK_NOTE
+    _tool.description += bc.PILLAGE_NOTE + bc.CITY_ATTACK_NOTE + bc.THEOLOGICAL_NOTE
 
     # unit_action had no excavate (bench_compat.EXCAVATE_NOTE has why). excavate sends the game's own order, then reads
     # the artifact the game holds for the player's pick; with improvement=<civ> it makes that pick. An artifact with one
@@ -1849,6 +1878,75 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_ARTIFACT"] = (
         "An excavated artifact waits for your pick: unit_action(unit_id=<the Archaeologist>, action='excavate') lists "
         "the choices")
+
+    # unit_action spread religion and had no other religious order (bench_compat.RELIGIOUS_ORDERS_NOTE has why).
+    # evangelize sends the Apostle's Evangelize Belief, waits for the earned belief, and lists the beliefs the game
+    # allows, or adds the one named in improvement; with a belief already waiting it only lists or adds.
+    # launch_inquisition and remove_heresy send the game's order on the unit's tile or a city next to it.
+    def _religious_orders(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            action = str(kwargs.get("action") or "").lower()
+            if action not in bc._RELIGIOUS_OPS:
+                return await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+            pick = str(kwargs.get("improvement") or "").strip()
+
+            async def beliefs(conn):
+                lines = await conn.execute_write(bc.belief_state_lua(), timeout=10.0)
+                st, _ = bc.belief_choices(lines)
+                return lines, st is not None and st["religion"] >= 0 and st["earned"] > st["equipped"]
+
+            async def add(conn):
+                out = _gsm._action_result(await conn.execute_write(bc.add_belief_lua(pick), timeout=10.0))
+                if out.startswith("Error: NO_SUCH_CHOICE"):
+                    lines, _ = await beliefs(conn)
+                    return f"Error: NO_SUCH_CHOICE|'{pick}' is not a belief you can add. " + bc.belief_report(lines)
+                if out.startswith("Error:"):
+                    return out
+                name = out.split("|")[2] if out.count("|") >= 2 else pick
+                for _ in range(6):  # the pick plays out a frame or more later
+                    await asyncio.sleep(0.5)
+                    lines, waiting = await beliefs(conn)
+                    if not waiting:
+                        return f"BELIEF_ADDED|{name} is now a belief of your religion. " + bc.belief_report(lines)
+                return f"BELIEF_SENT|{name} was sent, but the game still shows a belief waiting. " + bc.belief_report(lines)
+
+            async def run():
+                conn = srv._get_game(ctx).conn
+                if action == "evangelize":
+                    lines, waiting = await beliefs(conn)
+                    if waiting:
+                        return await add(conn) if pick else "BELIEF_WAITING|" + bc.belief_report(lines)
+                sent = _gsm._action_result(await conn.execute_write(bc.religious_op_lua(uid % 65536, action), timeout=10.0))
+                if sent.startswith("Error:"):
+                    return sent
+                xy = "(" + ",".join(sent.split("|")[1:3]) + ")"
+                if action != "evangelize":
+                    return f"{action.upper()}_SENT|The game took the order at {xy}."
+                for _ in range(6):
+                    await asyncio.sleep(0.5)
+                    lines, waiting = await beliefs(conn)
+                    if waiting:
+                        break
+                if not waiting:
+                    return (f"EVANGELIZE_SENT|{xy}: the order was sent, but no belief waits yet; the next call of "
+                            "evangelize shows the choices. " + bc.belief_report(lines))
+                if pick:
+                    return await add(conn)
+                return f"BELIEF_WAITING|The Apostle evangelized at {xy}. " + bc.belief_report(lines)
+
+            args_log = {"unit_id": uid, "action": action} | ({"improvement": pick} if pick else {})
+            return await srv._logged(ctx, "unit_action", args_log, run)
+
+        return wrapper
+
+    _tool.fn = _religious_orders(_tool.fn)
+    _tool.description += bc.RELIGIOUS_ORDERS_NOTE
+    _lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_BELIEF"] = (
+        "A belief your religion earned waits: unit_action(unit_id=<any of your units>, action='evangelize') lists the "
+        "beliefs you can add, and improvement='<BELIEF_TYPE>' adds one")
 
     def _clears_answered(fn):
         @functools.wraps(fn)

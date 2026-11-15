@@ -855,6 +855,101 @@ async def main():
     out = await ns["_excavates"](inner)(ctx=CTX, unit_id=7, action="fortify")
     check("excavate wrapper: other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
 
+    # 16d3. Religious orders (game 29, turn 68: no order for an Apostle's Evangelize Belief; Orthodoxy kept its two
+    # founding beliefs to the end): evangelize, the belief pick, launch_inquisition and remove_heresy.
+    check("unit_action description names the religious orders", "evangelize = an Apostle's Evangelize Belief"
+          in ua.description and "remove_heresy = an Inquisitor's Remove Heresy" in ua.description, ua.description[-900:])
+    check("belief blocker names evangelize", "action='evangelize'" in lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_BELIEF"])
+    lua = bc.religious_op_lua(9, "evangelize")
+    check("evangelize: the game's op on the unit's tile, a city next to it, reasons on refusal",
+          "UnitManager.GetUnit(me, 9)" in lua and "GameInfo.UnitOperations['UNITOPERATION_EVANGELIZE_BELIEF']" in lua
+          and "CanStartOperation(unit, op.Hash, nil, params, true)" in lua and "adj:IsCity()" in lua
+          and "ERR:CANNOT_EVANGELIZE|The game refused Evangelize Belief at (" in lua and lua.endswith("print('---END---')"), lua)
+    check("remove heresy and inquisition ops", "UNITOPERATION_REMOVE_HERESY" in bc.religious_op_lua(9, "remove_heresy")
+          and "UNITOPERATION_LAUNCH_INQUISITION" in bc.religious_op_lua(9, "launch_inquisition"))
+    lua = bc.add_belief_lua("Itinerant Preachers'); os.exit() --")
+    check("belief pick: the screen's player operation, only letters kept", "PlayerOperations.ADD_BELIEF" in lua
+          and "PlayerOperations.VALUE_EXCLUSIVE" in lua and "local pick = 'itinerant preachers osexit '" in lua
+          and "IsTooManyForReligion(hit.Index, rel)" in lua, lua)
+    check("belief options: the screen's filter", all(x in bc.belief_state_lua() for x in (
+          "BELIEF_CLASS_PANTHEON", "IsInSomeReligion(row.Index)", "IsTooManyForReligion(row.Index, rel)",
+          "GetNumBeliefsEarned()", "if rel >= 0 and earned > equipped then")))
+    st, opts = bc.belief_choices(["BELIEFS|3|3|2", "BELIEFOPT|ENHANCER|BELIEF_ITINERANT_PREACHERS|Itinerant Preachers|"
+                                  "Religion spreads 30% further|x", "junk"])
+    check("belief choices parsed", st == {"religion": 3, "earned": 3, "equipped": 2} and opts == [("ENHANCER",
+          "BELIEF_ITINERANT_PREACHERS", "Itinerant Preachers", "Religion spreads 30% further|x")], (st, opts))
+    check("belief report: no religion, none waiting, unread", "not founded a religion" in bc.belief_report(["BELIEFS|-1|0|0"])
+          and "No belief waits: your religion has 2 of the 2" in bc.belief_report(["BELIEFS|3|2|2"])
+          and bc.belief_report([]) == "The belief state could not be read.")
+
+    class FaithConn:
+        """The game in replay: Evangelize earns a belief, the pick fills it."""
+        def __init__(self, refuse_heresy=False):
+            self.sent, self.earned, self.equipped, self.refuse = [], 2, 2, refuse_heresy
+        def state(self):
+            out = [f"BELIEFS|3|{self.earned}|{self.equipped}"]
+            if self.earned > self.equipped:
+                out += ["BELIEFOPT|ENHANCER|BELIEF_ITINERANT_PREACHERS|Itinerant Preachers|Religion spreads 30% further",
+                        "BELIEFOPT|WORSHIP|BELIEF_CATHEDRAL|Cathedral|Allows Cathedral"]
+            return out + [lq.SENTINEL]
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            if "UNITOPERATION_EVANGELIZE_BELIEF" in lua:
+                self.earned += 1
+                return ["OK:RELIGIOUS_OP_SENT|38|40", lq.SENTINEL]
+            if "UNITOPERATION_REMOVE_HERESY" in lua:
+                return (["ERR:CANNOT_REMOVE_HERESY|The game refused Remove Heresy at (38,40): Not in your territory. The "
+                         "unit is UNIT_INQUISITOR with 2 moves left.", lq.SENTINEL] if self.refuse
+                        else ["OK:RELIGIOUS_OP_SENT|39|40", lq.SENTINEL])
+            if "PlayerOperations.ADD_BELIEF" in lua:
+                if "local pick = 'nope'" in lua:
+                    return ["BELIEFS|3|3|2", "ERR:NO_SUCH_CHOICE|nope", lq.SENTINEL]
+                self.equipped += 1
+                return ["BELIEFS|3|3|2", "OK:BELIEF_SENT|BELIEF_ITINERANT_PREACHERS|Itinerant Preachers", lq.SENTINEL]
+            return self.state()
+    GAME = types.SimpleNamespace(conn=FaithConn())
+    out = await ua.fn(CTX, unit_id=65545, action="evangelize")
+    check("evangelize: the belief waits, with the choices by class", out.startswith("BELIEF_WAITING|The Apostle "
+          "evangelized at (38,40). A belief waits (2 of 3 earned") and "  Enhancer:\n    BELIEF_ITINERANT_PREACHERS "
+          "(Itinerant Preachers): Religion spreads 30% further" in out and "improvement='<BELIEF_TYPE>'" in out
+          and any("GetUnit(me, 9)" in x for x in GAME.conn.sent), out)
+    out = await ua.fn(CTX, unit_id=65545, action="evangelize")
+    check("evangelize again: no second order while a belief waits", out.startswith("BELIEF_WAITING|A belief waits")
+          and GAME.conn.earned == 3, out)
+    out = await ua.fn(CTX, unit_id=65545, action="evangelize", improvement="nope")
+    check("belief pick: an unknown one lists the choices", out.startswith("Error: NO_SUCH_CHOICE|'nope' is not a belief")
+          and "BELIEF_CATHEDRAL" in out, out)
+    out = await ua.fn(CTX, unit_id=65545, action="evangelize", improvement="BELIEF_ITINERANT_PREACHERS")
+    check("belief pick: added", out.startswith("BELIEF_ADDED|Itinerant Preachers is now a belief of your religion. "
+          "No belief waits: your religion has 3 of the 3") and GAME.conn.equipped == 3, out)
+    GAME = types.SimpleNamespace(conn=FaithConn())
+    out = await ua.fn(CTX, unit_id=65545, action="evangelize", improvement="BELIEF_ITINERANT_PREACHERS")
+    check("evangelize with a pick: order and belief in one call", out.startswith("BELIEF_ADDED|Itinerant Preachers")
+          and GAME.conn.earned == 3 and GAME.conn.equipped == 3, out)
+    out = await ua.fn(CTX, unit_id=65545, action="remove_heresy")
+    check("remove heresy: sent", out == "REMOVE_HERESY_SENT|The game took the order at (39,40).", out)
+    GAME = types.SimpleNamespace(conn=FaithConn(refuse_heresy=True))
+    out = await ua.fn(CTX, unit_id=65545, action="remove_heresy")
+    check("remove heresy: the game's reasons", out.startswith("Error: CANNOT_REMOVE_HERESY|The game refused Remove "
+          "Heresy at (38,40): Not in your territory."), out)
+    GAME = saved
+    seen_actions.clear()
+    out = await ns["_religious_orders"](inner)(ctx=CTX, unit_id=7, action="fortify")
+    check("religious orders wrapper: other actions pass through", out == "FORTIFIED" and seen_actions == ["fortify"], out)
+    # 16d4. The wonder advisor lists only tiles the game accepts (game 29: its first pick for Hagia Sophia was a
+    # mountain three times, refused each time).
+    wl = lq.build_wonder_advisor_query(65536, "BUILDING_HAGIA_SOPHIA")
+    check("wonder advisor: each tile checked with the game's CanStartOperation for the wonder there",
+          "CityManager.CanStartOperation(pCity, CityOperationTypes.BUILD, {[CityOperationTypes.PARAM_BUILDING_TYPE] = "
+          "brow.Hash, [CityOperationTypes.PARAM_X] = pl:GetX()" in wl and "if plot and bench_ok[pIdx] == true then" in wl
+          and "bench_n == 0" not in wl
+          and wl.count("for _, pIdx in ipairs(plotIndices) do") == 2, wl[-2500:])
+    check("wonder advisor: changed civ6-mcp Lua is left alone", bc.wonder_tiles_checked("print('x')") is None)
+    none = ns["nr"].narrate_wonder_advisor([], "BUILDING_SYDNEY_OPERA_HOUSE")
+    check("wonder advisor: with no accepted tile it says what a wonder can need",
+          none.startswith("No valid placement tiles for BUILDING_SYDNEY_OPERA_HOUSE") and none.endswith(bc.WONDER_NONE_NOTE),
+          none)
+
     # 16h. A refused trade route gives the game's reasons (game 20, turn 146: one Trader refused everywhere).
     lua = lq.build_make_trade_route(18, 35, 17)
     i = lua.index("ERR:CANNOT_START_ROUTE")
@@ -1024,6 +1119,8 @@ async def main():
     class WarConn:
         def __init__(self, states): self.states, self.reads = list(states), 0
         async def execute_write(self, lua, timeout=None):
+            if "WARVALID|" in lua:  # the war type check before the declaration: accepted
+                return ["WARNAME|America", "WARVALID|true", "---END---"]
             self.reads += 1
             return [f"WARSTATE|{self.states.pop(0)}|America", "---END---"]
 
@@ -1053,6 +1150,8 @@ async def main():
     class AllyConn:
         def __init__(self): self.reads = 0
         async def execute_write(self, lua, timeout=None):
+            if "WARVALID|" in lua:  # no war of any type open: civ6-mcp's own check refuses it
+                return ["WARNAME|Greece", "WARVALID|false", "---END---"]
             self.reads += 1
             assert "local t = 4 " in lua, lua
             return ["WARSTATE|false|Greece|DIPLO_STATE_ALLIED", "---END---"]
@@ -1065,6 +1164,49 @@ async def main():
         ns["_vendor_send_diplomatic_action"] = _vendor_diplo
     check("declaration refused: one read, the alliance named", g5.conn.reads == 1
           and "you are allied with Greece" in r5, r5)
+    # 16o1. A war type the game does not accept, checked before it is sent (game 29: DECLARE_FORMAL_WAR on Sumeria came
+    # back twice as "did not take effect. Send it again" on turns 211 and 212; a surprise war then went through).
+    wl = bcx.war_type_lua(3, "declare_formal_war")
+    check("war type Lua: the action, the player, reasons and the open types",
+          "IsDiplomaticActionValid('DIPLOACTION_DECLARE_FORMAL_WAR', t, true)" in wl and "local t = 3 " in wl
+          and "FailureReasons" in wl and "CANWAR|" in wl and "WARNAME|" in wl and wl.endswith("print('---END---')"), wl)
+    check("war type Lua: no injection through the action", "'" not in bcx.war_type_lua(3, "X') os.exit() --")
+          .split("IsDiplomaticActionValid(")[1].split(", t, true)")[0].strip("'"))
+    FORMAL_NO = ["WARNAME|Sumeria", "WARVALID|false", "WHY|You must denounce this player 5 turns before a formal war",
+                 "WHY|You must denounce this player 5 turns before a formal war", "CANWAR|DECLARE_SURPRISE_WAR", "---END---"]
+    r = bcx.war_type_refused("DECLARE_FORMAL_WAR", FORMAL_NO)
+    check("formal war not accepted: the reason once and the open types", r == "Error: WAR_TYPE_NOT_AVAILABLE|The game "
+          "does not accept DECLARE_FORMAL_WAR on Sumeria now: You must denounce this player 5 turns before a formal war. "
+          "Nothing was sent. War types it accepts on Sumeria now: DECLARE_SURPRISE_WAR. A formal war needs an earlier "
+          "denouncement; a surprise war costs more grievances and war weariness.", r)
+    r = bcx.war_type_refused("DECLARE_FORMAL_WAR", [ln for ln in FORMAL_NO if not ln.startswith("WHY|")])
+    check("no reason given: says so", "on Sumeria now and gives no reason. Nothing was sent." in r, r)
+    check("accepted, no war open at all, unread or failed check: go ahead",
+          bcx.war_type_refused("DECLARE_FORMAL_WAR", ["WARVALID|true", "CANWAR|DECLARE_FORMAL_WAR"]) is None
+          and bcx.war_type_refused("DECLARE_FORMAL_WAR", ["WARNAME|Rome", "WARVALID|false", "---END---"]) is None
+          and bcx.war_type_refused("DECLARE_FORMAL_WAR", []) is None
+          and bcx.war_type_refused("DECLARE_FORMAL_WAR", ["WARVALID|error", "CANWAR|DECLARE_SURPRISE_WAR"]) is None)
+
+    class FormalConn:
+        def __init__(self): self.luas = []
+        async def execute_write(self, lua, timeout=None):
+            self.luas.append(lua)
+            return FORMAL_NO
+    sent = []
+    async def record_diplo(self, other, action):
+        sent.append(action)
+        return uncertain
+    ns["_vendor_send_diplomatic_action"] = record_diplo
+    try:
+        g7 = types.SimpleNamespace(conn=FormalConn())
+        r7 = await GameState.send_diplomatic_action(g7, 3, "DECLARE_FORMAL_WAR")
+        g8 = types.SimpleNamespace(conn=FormalConn())
+        r8 = await GameState.send_diplomatic_action(g8, 3, "DENOUNCE")
+    finally:
+        ns["_vendor_send_diplomatic_action"] = _vendor_diplo
+    check("formal war through the tool: refused before sending, one read", r7.startswith(
+          "Error: WAR_TYPE_NOT_AVAILABLE|") and sent == ["DENOUNCE"] and len(g7.conn.luas) == 1, (r7, sent))
+    check("other actions: no war type check", not any("WARVALID" in x for x in g8.conn.luas), g8.conn.luas)
     # 16o2. A diplomatic action the game refused without a reason (game 26: friendship with Brazil on turn 174 and
     # with India, already a friend, on turn 222, both "INVALID|unknown").
     INVALID = "Error: INVALID|unknown"
@@ -1250,6 +1392,54 @@ async def main():
     vout = nr_mod.narrate_victory_progress(vp)
     check("no CULTOT rows: civ6-mcp's section unchanged", "CULTURE (your tourists > every civ's domestic tourists)"
           in vout and "vs Egypt: 46/316 tourists" in vout, vout)
+
+    # 16j. The religion count (game 29, turn 220: "Rome: majority=Orthodoxy | 0 cities converted", "Germany:
+    #      majority=none (FOUNDED: Protestantism) | 5 cities converted"; 3 of Germany's 8 cities were Orthodox).
+    check("victory query prints the religion rows before its end", "print('RELCIV|'" in vq
+          and "GetMajorityReligion()" in vq and vq.index("RELCIV") < vq.rindex('print("---END---")')
+          and "(function() local rme" in vq)
+    rlines = ["PLAYER|0|Russia|470|0|50|0|90|1446|51|46|50|111|true|12|91|124|30",
+              "PLAYER|1|Rome|396|0|50|0|80|516|56|40|0|60|false|6|109|106|38",
+              "PLAYER|2|Germany|451|0|50|0|90|175|44|47|5|150|true|8|133|161|172",
+              "PLAYER|3|Sumeria|339|0|50|0|60|897|46|36|12|90|true|10|127|103|13",
+              "RELMAJ|Russia|RELIGION_ORTHODOXY", "RELMAJ|Rome|RELIGION_ORTHODOXY", "RELMAJ|Germany|none",
+              "RELMAJ|Sumeria|RELIGION_ZOROASTRIANISM", "RELFOUNDED|Russia|Eastern Orthodoxy",
+              "RELFOUNDED|Germany|Protestantism", "RELFOUNDED|Sumeria|Zoroastrianism", "RELSLOTS|5|5",
+              "RELMINE|0|3", "RELCIV|0|12|12", "RELCIV|1|6|6", "RELCIV|2|8|3", "RELCIV|3|10|1", lq.SENTINEL]
+    vp = lq.parse_victory_progress_response(rlines)
+    check("parse keeps the religion rows", getattr(vp, "_bench_religion", None) == {
+        "me": 0, "mine": 3, "civs": {0: (12, 12), 1: (6, 6), 2: (8, 3), 3: (10, 1)}}, getattr(vp, "_bench_religion", None))
+    vout = nr_mod.narrate_victory_progress(vp)
+    for want in ("RELIGION (a religious victory: your religion is the majority religion of every civ, followed by more "
+                 "than half of its cities)",
+                 "  Your religion: Eastern Orthodoxy, the majority religion of 2 of 4 civs. Religions founded: 5 of 5, so "
+                 "no more Great Prophets.",
+                 "  Russia: 12 of 12 cities follow it: majority <--",
+                 "  Rome: 6 of 6 cities follow it: majority\n",
+                 "  Germany: 3 of 8 cities follow it, 2 more needed (majority now: none). Founded Protestantism, "
+                 "followed in 5 cities\n",
+                 "  Sumeria: 1 of 10 cities follow it, 5 more needed (majority now: Zoroastrianism). Founded "
+                 "Zoroastrianism, followed in 12 cities\n"):
+        check(f"religion section: {want.strip()[:40]}", want in vout, vout)
+    check("civ6-mcp's 'cities converted' is gone", "cities converted" not in vout and "majority=" not in vout
+          and "!! All 5 religion slots" not in vout, vout)
+    vp = lq.parse_victory_progress_response([l.replace("RELMINE|0|3", "RELMINE|0|-1") for l in rlines])
+    vout = nr_mod.narrate_victory_progress(vp)
+    check("no religion founded: says the path is closed", "  You have founded no religion, so a religious victory is "
+          "closed to you. Religions founded: 5 of 5, so no more Great Prophets." in vout and "Rome:" not in
+          vout.split("RELIGION (")[1].split("\n\n")[0], vout)
+    vp = lq.parse_victory_progress_response([l for l in rlines if not l.startswith("REL") or l.startswith("RELMAJ")
+                                             or l.startswith("RELFOUNDED") or l.startswith("RELSLOTS")])
+    vout = nr_mod.narrate_victory_progress(vp)
+    check("no religion rows: civ6-mcp's section unchanged", "RELIGION (your religion majority in all civs" in vout
+          and "cities converted" in vout, vout)
+    udesc = mcp._tool_manager.get_tool("unit_action").description
+    check("unit_action says what attack does with a religious unit (game 29 never tried it)",
+          udesc.count(bc.THEOLOGICAL_NOTE) == 1 and "needs no war" in udesc and "Apostle or an Inquisitor" in udesc)
+    check("even split is not a majority", "1 more needed" in bc.religion_section(types.SimpleNamespace(
+        players=[types.SimpleNamespace(player_id=0, name="A", religion_cities=0)], religions_founded=1,
+        religions_max=0, religion_founded_names={"A": "X"}, religion_majority={"A": "none"}),
+        {"me": 0, "mine": 1, "civs": {0: (4, 2)}}))
 
     # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
     lua = lq.build_attack_unit(13, 42, 35)
