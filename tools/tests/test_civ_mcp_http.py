@@ -945,6 +945,60 @@ async def main():
           and "bench_n == 0" not in wl
           and wl.count("for _, pIdx in ipairs(plotIndices) do") == 2, wl[-2500:])
     check("wonder advisor: changed civ6-mcp Lua is left alone", bc.wonder_tiles_checked("print('x')") is None)
+    ua = mcp._tool_manager.get_tool("unit_action").description
+    check("unit_action's list of actions names the harness's orders (game 31: evangelize was never found)",
+          "teleport, spread_religion, pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy" in ua
+          and ua.count("evangelize, launch_inquisition") == 1, ua[:900])
+    check("unit_action's list: a changed civ6-mcp list is left alone", bc.action_list("no list here") is None)
+    # Open Borders bought in a deal lasted 0 turns (game 31, turn 210): agreements get the game's duration now.
+    import civ_mcp.lua.diplomacy as dipl
+    pt = dipl.build_propose_trade(2, [{"type": "GOLD", "amount": 80}], [{"type": "AGREEMENT", "subtype": "OPEN_BORDERS"}])
+    check("deal: an agreement gets the duration the game offers (DealManager.GetPossibleDealItems, 30 if none)",
+          "ai:SetSubType(DealAgreementTypes.OPEN_BORDERS) local benchDur = 30" in pt
+          and "DealManager.GetPossibleDealItems(target, me, DealItemTypes.AGREEMENTS, deal)" in pt
+          and "ai:SetDuration(benchDur)" in pt and "gi:SetAmount(80)" in pt, pt[-1500:])
+    check("deal: the harness's own proposals use the same items",
+          "SetDuration(benchDur)" in ns["_lua_deal_item"]("me", {"type": "AGREEMENT", "subtype": "OPEN_BORDERS"})
+          and "GetPossibleDealItems(me, target," in ns["_lua_deal_item"]("me", {"type": "AGREEMENT", "subtype": "OPEN_BORDERS"}))
+    # A move the game did not carry out gets what the game shows, not civ6-mcp's "need Open Borders" (game 31: 58 times).
+    zoc = bc.move_blocked_reason(["MF|UNIT|FORMATION_CLASS_CIVILIAN|3|true", "MF|OWNER|Germany|true|false|false",
+                                  "MF|DISTRICT|Wonder", "MF|PATH|1|1|62,15"])
+    check("blocked move: a zone of control, and no open-borders claim for a religious unit",
+          "zone of control" in zoc and "3 moves left" in zoc and "open borders" not in zoc and "one tile" in zoc, zoc)
+    mil = bc.move_blocked_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|5|false", "MF|OWNER|Greece|true|false|false",
+                                  "MF|PATH|3|2|43,15"])
+    check("blocked move: a military unit without open borders is told so, with the path's first step",
+          "no open borders from Greece" in mil and "first step (43,15)" in mil and "zone of control" not in mil, mil)
+    ob = bc.move_blocked_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|5|false", "MF|OWNER|Greece|true|false|true"])
+    check("blocked move: open borders held are not blamed", "(you have open borders)" in ob and "needs them" not in ob, ob)
+    check("blocked move: unreadable facts keep civ6-mcp's text", bc.move_blocked_reason(["MF|GONE"]) is None)
+    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_CIVILIAN|3|true", "MF|OWNER|Germany|true|false|false"])
+    check("stopped short with moves left: the zone of control", st.startswith("it stopped on the way with 3 moves left: it "
+          "moved into a zone of control") and "until next turn" in st, st)
+    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|2|false", "MF|PATH|4|2|40,12"])
+    check("stopped short with moves left: the path on", st == "it stopped on the way with 2 moves left; the game's path on "
+          "is 4 tile(s), 2 turn(s), next step (40,12)", st)
+    check("stopped short with no moves or unread: civ6-mcp's text", bc.move_stopped_reason(["MF|UNIT|X|0|false"]) is None
+          and bc.move_stopped_reason(["MF|GONE"]) is None and bc.move_stopped_reason(["MF|UNIT|X|?|false"]) is None)
+
+    class StopConn:
+        def __init__(self, unit_line): self.unit_line, self.luas = unit_line, []
+        async def execute_write(self, lua, timeout=None):
+            self.luas.append(lua)
+            return [self.unit_line, "---END---"] if "MF|UNIT" in lua else ["---END---"]
+    _orig_mv = ns["_original_move_unit"]
+    async def stopped_mv(self, i, x, y): return "MOVING_TO|62,15|from:62,17|now_at:62,16|(moved dx:+0 dy:-1)" + bc.STOPPED_GUESS
+    ns["_original_move_unit"] = stopped_mv
+    try:
+        g_st = types.SimpleNamespace(conn=StopConn("MF|UNIT|FORMATION_CLASS_CIVILIAN|3|true"))
+        r_st = await GameState.move_unit(g_st, 23, 62, 15)
+        g_st0 = types.SimpleNamespace(conn=StopConn("MF|UNIT|FORMATION_CLASS_CIVILIAN|0|false"))
+        r_st0 = await GameState.move_unit(g_st0, 23, 62, 15)
+    finally:
+        ns["_original_move_unit"] = _orig_mv
+    check("stopped short through the tool: the guess replaced", "STOPPED_MID_PATH (it stopped on the way with 3 moves left: "
+          "it moved into a zone of control" in r_st and "moves exhausted" not in r_st, r_st)
+    check("stopped short through the tool: no moves left keeps 'moves exhausted'", r_st0.endswith(bc.STOPPED_GUESS), r_st0)
     none = ns["nr"].narrate_wonder_advisor([], "BUILDING_SYDNEY_OPERA_HOUSE")
     check("wonder advisor: with no accepted tile it says what a wonder can need",
           none.startswith("No valid placement tiles for BUILDING_SYDNEY_OPERA_HOUSE") and none.endswith(bc.WONDER_NONE_NOTE),
@@ -1235,6 +1289,51 @@ async def main():
         ns["_vendor_send_diplomatic_action"] = _vendor_diplo
     check("friendship refused through the tool: one read, the friendship named", g6.conn.reads == 1
           and "already have a declared friendship with India" in r6, r6)
+    # 16o3. civ6-mcp says "accepted" for a friendship, embassy or delegation whatever the AI did (game 32, turn 78: four
+    # friendships "accepted", one held). The state read a moment later settles it.
+    FR = "ACCEPTED|Brazil accepted your friendship declaration"
+    chk = lambda st, d="false", e="false": {"name": "Brazil", "state": st, "delegation": d, "embassy": e}
+    check("accept check: parsed", bcx.parse_accept_check(["x", "ACCEPTCHK|Brazil|DIPLO_STATE_FRIENDLY|true|false"])
+          == chk("DIPLO_STATE_FRIENDLY", "true"))
+    check("accept check Lua: state, delegation and embassy", all(x in bcx.accept_check_lua(3) for x in
+          ("local t = 3", "GetDiplomaticStateIndex(me)", "HasDelegationAt(t)", "HasEmbassyAt(t)", "ACCEPTCHK|")))
+    r = bcx.accept_result(FR, "DECLARE_FRIENDSHIP", chk("DIPLO_STATE_DECLARED_FRIEND"))
+    check("friendship that took: confirmed", r.startswith("ACCEPTED|Brazil accepted") and "now shows a declared" in r, r)
+    check("friendship not yet: read again", bcx.accept_result(FR, "DECLARE_FRIENDSHIP", chk("DIPLO_STATE_FRIENDLY")) == "")
+    check("unread state: civ6-mcp's answer", bcx.accept_result(FR, "DECLARE_FRIENDSHIP", None) == FR
+          and bcx.accept_result(FR, "DECLARE_FRIENDSHIP", chk("")) == FR)
+    r = bcx.accept_not_taken("DECLARE_FRIENDSHIP", chk("DIPLO_STATE_FRIENDLY"))
+    check("friendship refused by the AI: said, with the relation", r == "NOT_ACCEPTED|Brazil did not accept your "
+          "friendship declaration: after the request the game shows your relation as friendly, not a declared "
+          "friendship. get_diplomacy shows each civ's attitude.", r)
+    EM = "ACCEPTED|Brazil accepted your embassy"
+    check("embassy that took / not yet / unknown", bcx.accept_result(EM, "RESIDENT_EMBASSY", chk("X", e="true")).endswith(
+          "embassy (the game now shows it).") and bcx.accept_result(EM, "RESIDENT_EMBASSY", chk("X")) == ""
+          and bcx.accept_result(EM, "RESIDENT_EMBASSY", chk("X", e="unknown")) == EM)
+    check("delegation not taken", "did not accept your delegation" in bcx.accept_not_taken("DIPLOMATIC_DELEGATION", chk("X")))
+    check("other answers untouched", bcx.accept_result("SENT|Denounced Brazil", "DENOUNCE", chk("X")) == "SENT|Denounced Brazil"
+          and bcx.accept_result("Error: INVALID|x", "DECLARE_FRIENDSHIP", chk("X")) == "Error: INVALID|x")
+
+    class AcceptConn:
+        def __init__(self, states): self.states, self.reads = list(states), 0
+        async def execute_write(self, lua, timeout=None):
+            self.reads += 1
+            return [f"ACCEPTCHK|Brazil|{self.states.pop(0)}|false|false", "---END---"]
+    async def accepted_diplo(self, other, action): return FR
+    _sleep = ns["asyncio"].sleep
+    async def no_sleep_a(s): return None
+    ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = accepted_diplo, no_sleep_a
+    try:
+        g7a = types.SimpleNamespace(conn=AcceptConn(["DIPLO_STATE_FRIENDLY", "DIPLO_STATE_DECLARED_FRIEND"]))
+        r7a = await GameState.send_diplomatic_action(g7a, 3, "DECLARE_FRIENDSHIP")
+        g7b = types.SimpleNamespace(conn=AcceptConn(["DIPLO_STATE_FRIENDLY", "DIPLO_STATE_FRIENDLY"]))
+        r7b = await GameState.send_diplomatic_action(g7b, 3, "declare_friendship")
+    finally:
+        ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = _vendor_diplo, _sleep
+    check("friendship through the tool: taken on the second read", g7a.conn.reads == 2
+          and "now shows a declared friendship" in r7a, r7a)
+    check("friendship through the tool: refused after two reads", g7b.conn.reads == 2
+          and r7b.startswith("NOT_ACCEPTED|Brazil did not accept"), r7b)
 
     # 16p. set_research / set_civic ask the game's own CanResearch / CanProgress before the request (game 25: Economics
     # accepted on turn 115 before its prerequisites, and the game asked for a tech again the next turn).

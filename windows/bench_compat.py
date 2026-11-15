@@ -1059,6 +1059,21 @@ RELIGIOUS_ORDERS_NOTE = (
     "from the city on or next to its tile. When the game refuses one of these orders, the result gives its reasons."
 )
 
+# unit_action's own list of actions ("action: One of: move, attack, ...") named none of the orders the harness adds;
+# each one was described only in an "Also:" note at the end of the description. In game 31 Opus bought an Apostle to
+# add a belief (turn 85), wrote "'evangelize' isn't among the unit_action options and I'm not sure how to trigger it",
+# and never used the order; Eastern Orthodoxy kept its two founding beliefs, as in game 29. The list names them now.
+ADDED_ACTIONS = "pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy"
+_ACTION_LIST_RE = re.compile(r"(action: One of: [^\n]*\bspread_religion)")
+
+
+def action_list(desc: str) -> str | None:
+    """unit_action's description with the harness's orders added to its list of actions, or None when it changed."""
+    if len(_ACTION_LIST_RE.findall(desc)) != 1:
+        return None
+    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these six: see Also: below)", desc)
+
+
 _BELIEF_STATE_LUA = (
     "local me = Game.GetLocalPlayer() local pr = Players[me]:GetReligion() local gr = Game.GetReligion() "
     "local rel = pr:GetReligionTypeCreated() local earned = pr:GetNumBeliefsEarned() local equipped = 0 "
@@ -1436,6 +1451,70 @@ def diplo_refused(out: str, action: str, st: dict | None) -> str:
     return f"Error: INVALID|The game refused {a} toward {name}: {why}. get_diplomacy shows the state with each civ."
 
 
+# civ6-mcp answers a friendship declaration, an embassy and a delegation with "ACCEPTED|<civ> accepted ..." whatever the
+# AI civ did: it opens the session, says yes for us, closes it and prints that line (the game's state only changes a
+# frame later). In game 32 (turn 78) Greece declared friendship with Brazil, Egypt, Sumeria and America, all four
+# "accepted"; on turn 84 only Sumeria was a friend. The state, read in a call of its own a moment later, says which.
+CHECKED_ACCEPTS = ("DECLARE_FRIENDSHIP", "RESIDENT_EMBASSY", "DIPLOMATIC_DELEGATION")
+
+
+def accept_check_lua(other_player_id: int) -> str:
+    """One ACCEPTCHK|name|state|delegation|embassy line for the local player and that player."""
+    t = int(other_player_id)
+    return (
+        f"local me = Game.GetLocalPlayer() local t = {t} local d = Players[me]:GetDiplomacy() "
+        "local cfg = PlayerConfigurations[t] "
+        "local name = cfg and Locale.Lookup(cfg:GetCivilizationShortDescription()) or ('player ' .. t) "
+        "local st = '' pcall(function() st = GameInfo.DiplomaticStates[Players[t]:GetDiplomaticAI()"
+        ":GetDiplomaticStateIndex(me)].StateType end) "
+        "local del, emb = 'unknown', 'unknown' pcall(function() del = tostring(d:HasDelegationAt(t)) end) "
+        "pcall(function() emb = tostring(d:HasEmbassyAt(t)) end) "
+        "print('ACCEPTCHK|' .. name .. '|' .. st .. '|' .. del .. '|' .. emb) print('---END---')"
+    )
+
+
+def parse_accept_check(lines) -> dict | None:
+    for ln in lines or []:
+        if ln.startswith("ACCEPTCHK|"):
+            p = ln.split("|")
+            if len(p) >= 5:
+                return {"name": p[1], "state": p[2], "delegation": p[3], "embassy": p[4]}
+    return None
+
+
+def accept_result(out: str, action: str, chk: dict | None) -> str:
+    """civ6-mcp's "ACCEPTED|..." for a friendship, embassy or delegation, settled by the state read after it. "" when it
+    has not taken effect yet (read again); the answer unchanged when the state could not be read."""
+    a = str(action).upper().replace("DIPLOACTION_", "")
+    if chk is None or a not in CHECKED_ACCEPTS or not str(out).startswith(("ACCEPTED|", "OK:ACCEPTED|")):
+        return out
+    name, state = chk["name"], chk["state"]
+    if a == "DECLARE_FRIENDSHIP":
+        if state in ("DIPLO_STATE_DECLARED_FRIEND", "DIPLO_STATE_ALLIED"):
+            return f"ACCEPTED|{name} accepted your friendship declaration (the game now shows a declared friendship)."
+        if not state:
+            return out
+        return ""
+    held = chk["embassy"] if a == "RESIDENT_EMBASSY" else chk["delegation"]
+    what = "embassy" if a == "RESIDENT_EMBASSY" else "delegation"
+    if held == "true":
+        return f"ACCEPTED|{name} accepted your {what} (the game now shows it)."
+    return "" if held == "false" else out
+
+
+def accept_not_taken(action: str, chk: dict | None) -> str:
+    """The answer when the friendship, embassy or delegation still does not show after the second read."""
+    a = str(action).upper().replace("DIPLOACTION_", "")
+    name = chk["name"] if chk else "that civ"
+    if a == "DECLARE_FRIENDSHIP":
+        plain = (chk or {}).get("state", "").replace("DIPLO_STATE_", "").replace("_", " ").lower() or "unknown"
+        return (f"NOT_ACCEPTED|{name} did not accept your friendship declaration: after the request the game shows "
+                f"your relation as {plain}, not a declared friendship. get_diplomacy shows each civ's attitude.")
+    what = "embassy" if a == "RESIDENT_EMBASSY" else "delegation"
+    return (f"NOT_ACCEPTED|{name} did not accept your {what}: the game does not show it after the request. "
+            "get_diplomacy shows each civ's attitude.")
+
+
 def parse_war_state(lines) -> dict | None:
     for ln in lines or []:
         if ln.startswith("WARSTATE|"):
@@ -1577,6 +1656,134 @@ def deal_poll_lua(target: int, mark: int) -> str:
         ".. tostring(inn and inn:GetItemCount() or 0)) "
         "print('---END---')"
     )
+
+
+# Agreements in a deal need a duration. civ6-mcp adds an agreement item (Open Borders) with its subtype only, so its
+# duration is 0: the game enacts the deal, the gold changes hands, and the open borders last 0 turns. In game 31 Opus
+# paid Greece 80 gold for Open Borders on turn 210 ("ACCEPTED ... the deal is in effect"), and its Cossacks were still
+# kept out of Greece on turn 223. Replayed on the turn 210 save: the same deal left HasOpenBordersFrom(Greece) false and
+# a Cossack still blocked; with the duration the game offers (DealManager.GetPossibleDealItems: 20 turns at Online
+# speed), it turned true. The game's deal view sets that duration on every agreement it adds (DiplomacyDealView.lua).
+_AGREEMENT_RE = re.compile(r"(ai:SetSubType\(DealAgreementTypes\.([A-Z_]+)\))")
+
+
+def agreement_duration(item_lua: str, from_var: str) -> str:
+    """civ6-mcp's Lua for one deal item, with an agreement's duration set to the one the game offers (30 if none)."""
+    other = "target" if from_var == "me" else "me"
+    return _AGREEMENT_RE.sub(lambda m: (
+        f"{m[1]} local benchDur = 30 local okP, pos = pcall(function() return DealManager.GetPossibleDealItems("
+        f"{from_var}, {other}, DealItemTypes.AGREEMENTS, deal) end) if okP and pos then for _, e in ipairs(pos) do "
+        f"if e.SubType == DealAgreementTypes.{m[2]} and (e.Duration or 0) > 0 then benchDur = e.Duration end end end "
+        f"ai:SetDuration(benchDur)"), item_lua)
+
+
+# A move the game did not carry out. civ6-mcp then guesses the reason from the target tile alone, and for any tile of
+# another civ it says "foreign territory (X) - need Open Borders via propose_trade". In game 31, 58 moves got that,
+# 0 of them because of borders where Opus could tell: religious units go anywhere without open borders. Replayed on
+# the turn 216 save, an Apostle the game refused had moved into a zone of control that turn (next to a German city):
+# HasMovedIntoZOC was true, it showed 3 moves left, and every later order, even to an empty tile, did nothing. The
+# game's own path check (CanStartOperation, GetMoveToPathEx) accepted each of those moves, so it cannot say which ones
+# will play out. The result now gives what the game shows instead: the zone of control, open borders for a military
+# unit, the units and district on the tile, and the game's path with its first step.
+def move_facts_lua(unit_index: int, x: int, y: int) -> str:
+    return (
+        f"local me = Game.GetLocalPlayer() local u = Players[me]:GetUnits():FindID({unit_index}) "
+        "if not u then print('MF|GONE') print('---END---') return end "
+        "local info = GameInfo.Units[u:GetType()] "
+        "print('MF|UNIT|' .. tostring(info.FormationClass) .. '|' .. u:GetMovesRemaining() .. '|' .. tostring(u:HasMovedIntoZOC())) "
+        f"local p = Map.GetPlot({x}, {y}) if not p then print('---END---') return end local o = p:GetOwner() "
+        "if o >= 0 and o ~= me then local d = Players[me]:GetDiplomacy() "
+        "  local nm = Locale.Lookup(PlayerConfigurations[o]:GetCivilizationShortDescription()) "
+        "  print('MF|OWNER|' .. nm:gsub('|', '/') .. '|' .. tostring(Players[o]:IsMajor()) .. '|' .. tostring(d:IsAtWarWith(o)) "
+        "    .. '|' .. tostring(d:HasOpenBordersFrom(o))) end "
+        "if p:GetDistrictType() >= 0 and o ~= me then local dd = GameInfo.Districts[p:GetDistrictType()] "
+        "  print('MF|DISTRICT|' .. (p:IsCity() and 'city centre' or Locale.Lookup(dd.Name))) end "
+        "local us = Map.GetUnitsAt(p) if us then for x in us:Units() do if x:GetOwner() ~= me then "
+        "  local c = PlayerConfigurations[x:GetOwner()] "
+        "  print('MF|ONTILE|' .. Locale.Lookup(GameInfo.Units[x:GetType()].Name) .. '|' .. (c and Locale.Lookup(c:GetCivilizationShortDescription()) or '?')) end end end "
+        "local ok, path = pcall(function() return UnitManager.GetMoveToPathEx(u, p:GetIndex()) end) "
+        "if ok and path and path.plots and #path.plots > 1 then local f = Map.GetPlotByIndex(path.plots[2]) "
+        "  print('MF|PATH|' .. (#path.plots - 1) .. '|' .. tostring(path.turns[#path.turns]) .. '|' .. f:GetX() .. ',' .. f:GetY()) "
+        "elseif ok then print('MF|NOPATH') end "
+        "print('---END---')"
+    )
+
+
+GUESSED_BLOCK = ("foreign territory (", "city-state territory (", "tile is enemy territory", "tile appears passable")
+
+
+def _move_facts(lines: list[str]) -> dict:
+    f = {}
+    for ln in lines or []:
+        if ln.startswith("MF|"):
+            p = ln.split("|")
+            if p[1] == "ONTILE":
+                f.setdefault("ONTILE", []).append(f"{p[2]} ({p[3]})")
+            else:
+                f[p[1]] = p[2:]
+    return f
+
+
+# civ6-mcp ends a move that stopped short with "STOPPED_MID_PATH (moves exhausted)" without reading the moves. Replayed
+# on game 31's turn 216 save, an Apostle ordered two tiles into Germany stopped after one with 3 moves left: it had
+# moved into a zone of control. The facts replace the guess when the unit still has moves.
+STOPPED_GUESS = "|STOPPED_MID_PATH (moves exhausted)"
+
+
+def move_stopped_reason(lines: list[str]) -> str | None:
+    """Why a move stopped short, from move_facts_lua's lines; None when the unit has no moves left or they are unread."""
+    f = _move_facts(lines)
+    if "UNIT" not in f:
+        return None
+    moves, zoc = f["UNIT"][1], f["UNIT"][2]
+    try:
+        if float(moves) <= 0:
+            return None
+    except ValueError:
+        return None
+    why = f"it stopped on the way with {moves} moves left"
+    if zoc == "true":
+        return why + (": it moved into a zone of control (next to a foreign city, Encampment or military unit), and "
+                      "the game stops it there until next turn")
+    if "PATH" in f:
+        n, turns, step = f["PATH"]
+        return why + f"; the game's path on is {n} tile(s), {turns} turn(s), next step ({step})"
+    if "NOPATH" in f:
+        return why + "; the game finds no path on from here"
+    return why
+
+
+def move_blocked_reason(lines: list[str]) -> str | None:
+    """What the game shows about a move it did not carry out, from move_facts_lua's lines; None when unreadable."""
+    f = _move_facts(lines)
+    if "UNIT" not in f:
+        return None
+    form, moves, zoc = f["UNIT"]
+    out = []
+    if zoc == "true":
+        out.append(f"it moved into a zone of control this turn (next to a foreign city, Encampment or military unit), "
+                   f"so the game stops it until next turn, though it shows {moves} moves left")
+    if "OWNER" in f:
+        civ, major, war, ob = f["OWNER"]
+        if form == "FORMATION_CLASS_LAND_COMBAT" and war == "false" and ob == "false":
+            out.append(f"the tile is {civ}'s and you have no open borders from {civ}: a military unit needs them "
+                       f"(propose_trade with request_open_borders) or a war to enter" if major == "true" else
+                       f"the tile is the city-state {civ}'s: a military unit needs its suzerainty or open borders")
+        else:
+            out.append(f"the tile is {civ}'s" + (" (at war)" if war == "true" else
+                       " (you have open borders)" if ob == "true" else ""))
+    if "DISTRICT" in f:
+        out.append(f"it holds a {f['DISTRICT'][0]}")
+    if "ONTILE" in f:
+        out.append("on it: " + ", ".join(f["ONTILE"]))
+    if "PATH" in f:
+        n, turns, step = f["PATH"]
+        out.append("the game's path there is one tile" if n == "1" else
+                   f"the game's path there is {n} tiles, {turns} turn(s), first step ({step}): a shorter move along it "
+                   f"may go through")
+    elif "NOPATH" in f:
+        out.append("the game finds no path there")
+    return "the game did not carry out the move; " + "; ".join(out) if out else None
 
 
 def deal_propose_lua(target: int, items_lua: str) -> str:

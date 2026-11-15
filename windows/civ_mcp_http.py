@@ -193,7 +193,13 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     from civ_mcp import lua as _lq  # noqa: E402
 
     # The trade calls wait for the AI's answer before they accept or close (bench_compat.DEAL_LISTENER has why).
-    from civ_mcp.lua.diplomacy import _lua_deal_item  # noqa: E402
+    import civ_mcp.lua.diplomacy as _dipl  # noqa: E402
+    _original_deal_item = _dipl._lua_deal_item
+
+    def _lua_deal_item(from_var, item):  # an agreement needs its duration (bench_compat.agreement_duration has why)
+        return bc.agreement_duration(_original_deal_item(from_var, item), from_var)
+
+    _dipl._lua_deal_item = _lua_deal_item
     from civ_mcp.narrate import narrate_test_trade  # noqa: E402
 
     _DEAL_ANSWER_S = 6.0  # the AI answered within a second in the live tests
@@ -683,6 +689,20 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             except Exception:
                 return out
             return bc.diplo_refused(out, action, bc.parse_war_state(lines))
+        if a.replace("DIPLOACTION_", "") in bc.CHECKED_ACCEPTS and str(out).startswith(("ACCEPTED|", "OK:ACCEPTED|")):
+            chk = None
+            for wait in (1.0, 2.0):  # civ6-mcp says accepted whatever the AI did (bench_compat.accept_result)
+                await asyncio.sleep(wait)
+                try:
+                    chk = bc.parse_accept_check(await self.conn.execute_write(bc.accept_check_lua(other_player_id),
+                                                                              timeout=10.0))
+                except Exception:
+                    logging.getLogger("civ_mcp_http").warning("reading the diplomatic state failed", exc_info=True)
+                    return out
+                settled = bc.accept_result(out, action, chk)
+                if settled:
+                    return settled
+            return bc.accept_not_taken(action, chk)
         if not str(out).startswith("WARN:WAR_UNCERTAIN"):
             return out
         st = None
@@ -964,6 +984,20 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     async def _move_says_moves_left(self, unit_index, target_x, target_y):
         result = await _original_move_unit(self, unit_index, target_x, target_y)
         head, sep, rest = result.partition("\n")
+        if any("|BLOCKED (" + g in head for g in bc.GUESSED_BLOCK):  # a guess (bench_compat.move_facts_lua has why)
+            try:
+                why = bc.move_blocked_reason(await self.conn.execute_write(bc.move_facts_lua(unit_index, target_x, target_y)))
+            except Exception:
+                why = None
+            if why:
+                head = re.sub(r"\|BLOCKED \(.*\)$", lambda _m: f"|BLOCKED ({why})", head)
+        if bc.STOPPED_GUESS in head:  # civ6-mcp did not read the moves (bench_compat.move_stopped_reason)
+            try:
+                why = bc.move_stopped_reason(await self.conn.execute_write(bc.move_facts_lua(unit_index, target_x, target_y)))
+            except Exception:
+                why = None
+            if why:
+                head = head.replace(bc.STOPPED_GUESS, f"|STOPPED_MID_PATH ({why})")
         if (f"now_at:{target_x},{target_y}|" in head + "|" and "|BLOCKED" not in head
                 and await _no_moves_left(self, unit_index)):
             head += "|arrived with no moves left: it can build, found or activate there next turn"
@@ -1944,6 +1978,11 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool.fn = _religious_orders(_tool.fn)
     _tool.description += bc.RELIGIOUS_ORDERS_NOTE
+    _listed = bc.action_list(_tool.description)  # bench_compat.ADDED_ACTIONS has why
+    if _listed is None:
+        logging.getLogger("civ_mcp_http").warning("civ6-mcp's unit_action list of actions changed: added orders not named")
+    else:
+        _tool.description = _listed
     _lq.BLOCKING_TOOL_MAP["ENDTURN_BLOCKING_BELIEF"] = (
         "A belief your religion earned waits: unit_action(unit_id=<any of your units>, action='evangelize') lists the "
         "beliefs you can add, and improvement='<BELIEF_TYPE>' adds one")
