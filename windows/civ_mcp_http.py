@@ -993,7 +993,9 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 head = re.sub(r"\|BLOCKED \(.*\)$", lambda _m: f"|BLOCKED ({why})", head)
         if bc.STOPPED_GUESS in head:  # civ6-mcp did not read the moves (bench_compat.move_stopped_reason)
             try:
-                why = bc.move_stopped_reason(await self.conn.execute_write(bc.move_facts_lua(unit_index, target_x, target_y)))
+                core = bc.parse_core_unit(await self.conn.execute_read(bc.core_unit_lua(unit_index)))
+                why = None if core is None or core[0] <= 0 else bc.move_stopped_reason(
+                    await self.conn.execute_write(bc.move_facts_lua(unit_index, target_x, target_y)), core)
             except Exception:
                 why = None
             if why:

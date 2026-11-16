@@ -972,33 +972,45 @@ async def main():
     ob = bc.move_blocked_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|5|false", "MF|OWNER|Greece|true|false|true"])
     check("blocked move: open borders held are not blamed", "(you have open borders)" in ob and "needs them" not in ob, ob)
     check("blocked move: unreadable facts keep civ6-mcp's text", bc.move_blocked_reason(["MF|GONE"]) is None)
-    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_CIVILIAN|3|true", "MF|OWNER|Germany|true|false|false"])
-    check("stopped short with moves left: the zone of control", st.startswith("it stopped on the way with 3 moves left: it "
-          "moved into a zone of control") and "until next turn" in st, st)
-    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|2|false", "MF|PATH|4|2|40,12"])
-    check("stopped short with moves left: the path on", st == "it stopped on the way with 2 moves left; the game's path on "
-          "is 4 tile(s), 2 turn(s), next step (40,12)", st)
-    check("stopped short with no moves or unread: civ6-mcp's text", bc.move_stopped_reason(["MF|UNIT|X|0|false"]) is None
-          and bc.move_stopped_reason(["MF|GONE"]) is None and bc.move_stopped_reason(["MF|UNIT|X|?|false"]) is None)
+    # Game 33: the UI state's moves lagged ("4 moves left" after 3 tiles); the core's moves and zone of control count.
+    check("core unit: parsed, and the Lua reads moves and zone of control", bc.parse_core_unit(["CORE|1.5|false"]) == (1.5, "false")
+          and bc.parse_core_unit(["x"]) is None and bc.parse_core_unit(["CORE|nil|x"]) is None
+          and all(x in bc.core_unit_lua(23) for x in ("FindID(23)", "GetMovesRemaining()", "HasMovedIntoZOC()", "CORE|")))
+    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_CIVILIAN|4|false", "MF|OWNER|Germany|true|false|false"], (3.0, "true"))
+    check("stopped short with moves left: the zone of control, with the core's moves", st.startswith("it stopped on the way "
+          "with 3 moves left: it moved into a zone of control") and "until next turn" in st, st)
+    st = bc.move_stopped_reason(["MF|UNIT|FORMATION_CLASS_LAND_COMBAT|4|true", "MF|PATH|4|2|40,12"], (1.0, "false"))
+    check("stopped short with moves left: the path on, the core's zone of control over the UI's", st == "it stopped on the "
+          "way with 1 moves left; the game's path on is 4 tile(s), 2 turn(s), next step (40,12)", st)
+    check("stopped short: the core's zone of control unknown falls back to the UI's",
+          "zone of control" in bc.move_stopped_reason(["MF|UNIT|X|4|true"], (2.0, "unknown")))
+    check("stopped short with no moves in the core, or the core unread: civ6-mcp's text",
+          bc.move_stopped_reason(["MF|UNIT|X|4|false"], (0.0, "false")) is None
+          and bc.move_stopped_reason(["MF|UNIT|X|4|false"], None) is None)
 
     class StopConn:
-        def __init__(self, unit_line): self.unit_line, self.luas = unit_line, []
+        def __init__(self, core_line): self.core_line, self.writes, self.reads = core_line, 0, 0
+        async def execute_read(self, lua, timeout=None):
+            self.reads += 1
+            return [self.core_line, "---END---"] if "CORE|" in lua else ["---END---"]
         async def execute_write(self, lua, timeout=None):
-            self.luas.append(lua)
-            return [self.unit_line, "---END---"] if "MF|UNIT" in lua else ["---END---"]
+            self.writes += 1
+            return ["MF|UNIT|FORMATION_CLASS_CIVILIAN|4|true", "---END---"] if "MF|UNIT" in lua else ["---END---"]
     _orig_mv = ns["_original_move_unit"]
     async def stopped_mv(self, i, x, y): return "MOVING_TO|62,15|from:62,17|now_at:62,16|(moved dx:+0 dy:-1)" + bc.STOPPED_GUESS
     ns["_original_move_unit"] = stopped_mv
     try:
-        g_st = types.SimpleNamespace(conn=StopConn("MF|UNIT|FORMATION_CLASS_CIVILIAN|3|true"))
+        g_st = types.SimpleNamespace(conn=StopConn("CORE|3|true"))
         r_st = await GameState.move_unit(g_st, 23, 62, 15)
-        g_st0 = types.SimpleNamespace(conn=StopConn("MF|UNIT|FORMATION_CLASS_CIVILIAN|0|false"))
+        g_st0 = types.SimpleNamespace(conn=StopConn("CORE|0|false"))
         r_st0 = await GameState.move_unit(g_st0, 23, 62, 15)
     finally:
         ns["_original_move_unit"] = _orig_mv
-    check("stopped short through the tool: the guess replaced", "STOPPED_MID_PATH (it stopped on the way with 3 moves left: "
-          "it moved into a zone of control" in r_st and "moves exhausted" not in r_st, r_st)
-    check("stopped short through the tool: no moves left keeps 'moves exhausted'", r_st0.endswith(bc.STOPPED_GUESS), r_st0)
+    check("stopped short through the tool: the guess replaced, with the core's 3 moves, not the UI's 4",
+          "STOPPED_MID_PATH (it stopped on the way with 3 moves left: it moved into a zone of control" in r_st
+          and "moves exhausted" not in r_st, r_st)
+    check("stopped short through the tool: no moves in the core keeps 'moves exhausted', no UI read",
+          r_st0.endswith(bc.STOPPED_GUESS) and g_st0.conn.writes == 0, r_st0)
     none = ns["nr"].narrate_wonder_advisor([], "BUILDING_SYDNEY_OPERA_HOUSE")
     check("wonder advisor: with no accepted tile it says what a wonder can need",
           none.startswith("No valid placement tiles for BUILDING_SYDNEY_OPERA_HOUSE") and none.endswith(bc.WONDER_NONE_NOTE),

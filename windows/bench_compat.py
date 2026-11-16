@@ -1730,17 +1730,37 @@ def _move_facts(lines: list[str]) -> dict:
 STOPPED_GUESS = "|STOPPED_MID_PATH (moves exhausted)"
 
 
-def move_stopped_reason(lines: list[str]) -> str | None:
-    """Why a move stopped short, from move_facts_lua's lines; None when the unit has no moves left or they are unread."""
+# Game 33 showed that the moves move_facts_lua reads (in the UI's Lua state) can lag behind the move: 13 of its 260
+# stopped-short notes said 4 or 5 moves left, a full Apostle or Missionary allowance, after the unit had moved 1 to 7
+# tiles. civ6-mcp reads the unit's new position in the game core, so the moves and zone of control come from there too.
+def core_unit_lua(unit_index: int) -> str:
+    """One CORE|moves|zoc line for the unit, run in the game core (execute_read)."""
+    return (
+        f"local u = Players[Game.GetLocalPlayer()]:GetUnits():FindID({int(unit_index)}) "
+        "if u then local z = 'unknown' pcall(function() z = tostring(u:HasMovedIntoZOC()) end) "
+        "print('CORE|' .. tostring(u:GetMovesRemaining()) .. '|' .. z) end print('---END---')"
+    )
+
+
+def parse_core_unit(lines) -> tuple[float, str] | None:
+    for ln in lines or []:
+        if ln.startswith("CORE|"):
+            p = ln.split("|")
+            try:
+                return float(p[1]), p[2] if len(p) > 2 else "unknown"
+            except ValueError:
+                return None
+    return None
+
+
+def move_stopped_reason(lines: list[str], core: tuple[float, str] | None) -> str | None:
+    """Why a move stopped short, from the game core's moves and zone of control (core) and move_facts_lua's path;
+    None when the core says no moves are left or could not be read."""
+    if core is None or core[0] <= 0:
+        return None
     f = _move_facts(lines)
-    if "UNIT" not in f:
-        return None
-    moves, zoc = f["UNIT"][1], f["UNIT"][2]
-    try:
-        if float(moves) <= 0:
-            return None
-    except ValueError:
-        return None
+    moves = f"{core[0]:g}"
+    zoc = core[1] if core[1] in ("true", "false") else (f["UNIT"][2] if "UNIT" in f else "false")
     why = f"it stopped on the way with {moves} moves left"
     if zoc == "true":
         return why + (": it moved into a zone of control (next to a foreign city, Encampment or military unit), and "
