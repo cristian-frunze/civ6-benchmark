@@ -1063,7 +1063,8 @@ RELIGIOUS_ORDERS_NOTE = (
 # each one was described only in an "Also:" note at the end of the description. In game 31 Opus bought an Apostle to
 # add a belief (turn 85), wrote "'evangelize' isn't among the unit_action options and I'm not sure how to trigger it",
 # and never used the order; Eastern Orthodoxy kept its two founding beliefs, as in game 29. The list names them now.
-ADDED_ACTIONS = "pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy, rush_wonder"
+ADDED_ACTIONS = ("pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy, rush_wonder, "
+                 "designate_park")
 _ACTION_LIST_RE = re.compile(r"(action: One of: [^\n]*\bspread_religion)")
 
 
@@ -1071,7 +1072,7 @@ def action_list(desc: str) -> str | None:
     """unit_action's description with the harness's orders added to its list of actions, or None when it changed."""
     if len(_ACTION_LIST_RE.findall(desc)) != 1:
         return None
-    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these seven: see Also: below)", desc)
+    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these eight: see Also: below)", desc)
 
 
 _BELIEF_STATE_LUA = (
@@ -1475,6 +1476,187 @@ def wonder_rush_report(before: dict, after: dict | None) -> str:
         return f"WONDER_RUSHED|{w} in {city} is complete (it had {before['progress']} of {before['cost']}). {charges}."
     return (f"WONDER_RUSHED|{w} in {city}: {before['progress']} -> {after['progress']} of {before['cost']} production. "
             f"{charges}. The order took the Builder's moves; it can add another charge next turn.")
+
+
+# A Naturalist's National Park. civ6-mcp sent every activate as UNITCOMMAND_ACTIVATE_GREAT_PERSON, which a Naturalist
+# never takes: the game's order is the unit operation UNITOPERATION_DESIGNATE_PARK, sent with no tile once the
+# Naturalist stands on a park site (UnitPanel.lua: CanStartOperation(..., OperationResultsTypes.NO_TARGETS), then
+# RequestOperation(unit, hash)), and the sites are Game.GetNationalParks():GetPossibleParkTiles(player), the tiles
+# SelectedUnit.lua highlights. In game 36 Opus bought a Naturalist on turn 163 and moved it to five tiles on turns 164
+# to 168; each activate came back "charges=0. No valid activation tiles found", with no appeal shown anywhere.
+PARK_NOTE = (
+    "\n\nAlso: designate_park = a Naturalist creates a National Park (the game's order; activate on a Naturalist does "
+    "the same). A park takes four tiles in a vertical diamond, all owned by one city, each a mountain, a natural wonder "
+    "or a tile of Charming appeal or better (2+), with no improvement or district. Move the Naturalist onto one of "
+    "the park sites, then unit_action(unit_id=<the Naturalist>, action='designate_park'). When the game refuses, the "
+    "result lists your park sites nearest first, with each tile's appeal and city, or says there is none."
+)
+
+_PARK_RULES = ("a park takes four tiles in a vertical diamond, all owned by one city, each a mountain, a natural "
+               "wonder or a tile of Charming appeal or better (2+), with no improvement or district")
+
+
+def appeal_label(a) -> str:
+    """The game's word for a tile's appeal (AppealHousingChanges: 4+, 2+, -1+, -3+, below)."""
+    a = int(a)
+    return ("Breathtaking" if a >= 4 else "Charming" if a >= 2 else "Average" if a >= -1
+            else "Uninviting" if a >= -3 else "Disgusting")
+
+
+def national_park_lua(unit_index: int) -> str:
+    """PK|x|y|unit type|moves, then for a Naturalist up to 8 PT|x|y|distance|appeal|city park sites nearest first and
+    PTN|count (-1 when unreadable), then OK:PARK_SENT or ERR:CANNOT_DESIGNATE_PARK|reasons (ERR:NOT_NATURALIST|type
+    for any other unit)."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = Players[me]:GetUnits():FindID({int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local ut = GameInfo.Units[unit:GetType()] local x, y = unit:GetX(), unit:GetY() "
+        "local mv = -1 pcall(function() mv = unit:GetMovesRemaining() or -1 end) "
+        "print('PK|' .. x .. '|' .. y .. '|' .. ut.UnitType .. '|' .. tostring(mv)) "
+        "if (ut.ParkCharges or 0) <= 0 then print('ERR:NOT_NATURALIST|' .. ut.UnitType) print('---END---') return end "
+        "local tiles, n = {}, 0 "
+        "local tok = pcall(function() for _, i in ipairs(Game.GetNationalParks():GetPossibleParkTiles(me)) do "
+        "  local p = Map.GetPlotByIndex(i) if p ~= nil then n = n + 1 "
+        "    local c = '' pcall(function() local pc = Cities.GetPlotPurchaseCity(p) if pc ~= nil then c = Locale.Lookup(pc:GetName()) end end) "
+        "    local a = '?' pcall(function() a = tostring(p:GetAppeal()) end) "
+        "    tiles[#tiles + 1] = {Map.GetPlotDistance(x, y, p:GetX(), p:GetY()), p:GetX(), p:GetY(), a, c} end end end) "
+        "table.sort(tiles, function(a, b) return a[1] < b[1] end) "
+        "for k = 1, math.min(8, #tiles) do local t = tiles[k] "
+        "  print('PT|' .. t[2] .. '|' .. t[3] .. '|' .. t[1] .. '|' .. t[4] .. '|' .. t[5]) end "
+        "print('PTN|' .. (tok and n or -1)) "
+        "local op = GameInfo.UnitOperations['UNITOPERATION_DESIGNATE_PARK'] "
+        "if op == nil then print('ERR:NO_OPERATION|UNITOPERATION_DESIGNATE_PARK is not in this game') print('---END---') return end "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op.Hash, nil, false, OperationResultsTypes.NO_TARGETS) end) "
+        "if ok and can then UnitManager.RequestOperation(unit, op.Hash) print('OK:PARK_SENT') print('---END---') return end "
+        + _WHY_LUA +
+        "print('ERR:CANNOT_DESIGNATE_PARK|' .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason')) "
+        "print('---END---')"
+    )
+
+
+def park_after_lua(unit_index: int, x: int, y: int) -> str:
+    """PA|1 when the tile is now a National Park|1 when the Naturalist is gone|the park's name."""
+    return (
+        f"local me = Game.GetLocalPlayer() local p = Map.GetPlot({int(x)}, {int(y)}) local park, name = 0, '' "
+        "pcall(function() if p:IsNationalPark() then park = 1 name = tostring(p:GetNationalParkName() or '') end end) "
+        f"local gone = Players[me]:GetUnits():FindID({int(unit_index)}) == nil and 1 or 0 "
+        "print('PA|' .. park .. '|' .. gone .. '|' .. name) print('---END---')"
+    )
+
+
+def parse_park(lines) -> dict:
+    d = {"facts": None, "tiles": [], "total": None, "status": None, "why": ""}
+    for ln in lines or []:
+        p = ln.split("|")
+        try:
+            if p[0] == "PK" and len(p) >= 5:
+                d["facts"] = {"x": int(p[1]), "y": int(p[2]), "unit": p[3], "moves": float(p[4])}
+            elif p[0] == "PT" and len(p) >= 6:
+                d["tiles"].append((int(p[1]), int(p[2]), int(p[3]), p[4], "|".join(p[5:])))
+            elif p[0] == "PTN" and len(p) >= 2:
+                d["total"] = int(p[1])
+        except ValueError:
+            continue
+        if ln.startswith("OK:PARK_SENT"):
+            d["status"] = "sent"
+        elif ln.startswith("ERR:"):
+            d["status"], _, d["why"] = ln[4:].partition("|")
+    return d
+
+
+def parse_park_after(lines) -> dict | None:
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "PA" and len(p) >= 4:
+            return {"park": p[1] == "1", "gone": p[2] == "1", "name": "|".join(p[3:])}
+    return None
+
+
+def park_sites(d: dict) -> str:
+    """The park sites from national_park_lua, nearest first, or why there are none."""
+    total = d["total"]
+    if total is None or total < 0:
+        return "The game's list of park sites could not be read."
+    if total == 0:
+        return (f"The game lists no park site in your territory now: {_PARK_RULES}. Moving the Naturalist will not "
+                "help until a city has such a diamond.")
+    def one(t):
+        x, y, dist, a, city = t
+        label = f" ({appeal_label(a)})" if a.lstrip("-").isdigit() else ""
+        away = "here" if dist == 0 else f"{dist} tile away" if dist == 1 else f"{dist} tiles away"
+        return f"({x},{y}) {away}, appeal {a}{label}" + (f", {city}" if city else "")
+    more = f" ({total - len(d['tiles'])} more further away)" if total > len(d["tiles"]) else ""
+    return f"Park sites, nearest first{more}: " + "; ".join(one(t) for t in d["tiles"]) + "."
+
+
+def park_refused(d: dict) -> str:
+    """Why the game refused designate_park, with the Naturalist's tile and the park sites."""
+    if d["status"] == "NOT_NATURALIST":
+        return f"Error: NOT_A_NATURALIST|designate_park is a Naturalist's order; this unit is {d['why']}."
+    if d["status"] != "CANNOT_DESIGNATE_PARK" or d["facts"] is None:
+        return f"Error: {d['status']}|{d['why']}"
+    f = d["facts"]
+    here = f"The Naturalist is at ({f['x']},{f['y']})" + (", with no moves left this turn" if f["moves"] == 0 else "")
+    on_site = any((t[0], t[1]) == (f["x"], f["y"]) for t in d["tiles"])
+    if on_site and f["moves"] == 0:  # live, game 36's turn-164 save: refused with no reason on a site, moves spent
+        tail = " Its tile is a park site, and the order needs moves: send designate_park again next turn."
+    elif on_site:
+        tail = " Its tile is a park site, so the reason above is what blocks it."
+    else:
+        tail = " Move it onto a site, then send designate_park again." if (d["total"] or 0) > 0 else ""
+    return f"Error: CANNOT_DESIGNATE_PARK|The game refused: {d['why']}. {here}. {park_sites(d)}{tail}"
+
+
+def park_report(d: dict, after: dict | None) -> str:
+    """The result of a designate_park the game took, from park_after_lua's read-back."""
+    x, y = d["facts"]["x"], d["facts"]["y"]
+    if after and after["park"]:
+        return (f"NATIONAL_PARK_CREATED|{after['name'] or 'A National Park'} at ({x},{y}), on the diamond of four tiles "
+                "there. Its tourism equals the appeal of its tiles. The Naturalist was used up.")
+    if after and after["gone"]:
+        return (f"PARK_SENT|The game took the order at ({x},{y}) and the Naturalist is gone, but the tile shows no park "
+                "yet. Check it next turn.")
+    return (f"PARK_SENT|The game took the order at ({x},{y}), but the tile shows no park and the Naturalist is still "
+            "there. Check it next turn before you send it again.")
+
+
+def naturalist_miss(out) -> bool:
+    """A Naturalist's activate, which civ6-mcp sends as the Great Person command and the game always refuses."""
+    return isinstance(out, str) and out.startswith("Error:") and "CANNOT_ACTIVATE|" in out and "(UNIT_NATURALIST)" in out
+
+
+# A refused improve said "unknown reason" when the tile's appeal was the cause: in game 36 (turn 171) a Builder's
+# Seaside Resort (IMPROVEMENT_BEACH_RESORT, MinimumAppeal 4) was refused that way, and Opus could only guess at low
+# appeal, since no tool shows a tile's appeal. A refused improve of an improvement with a minimum appeal now gives both.
+def improve_appeal_lua(unit_index: int, improvement: str) -> str:
+    """IA|the unit's tile appeal|the improvement's MinimumAppeal, or IA|none."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(improvement or "").upper())
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = Players[me]:GetUnits():FindID({int(unit_index)}) "
+        f"local imp = GameInfo.Improvements['{name}'] "
+        "if unit == nil or imp == nil or type(imp.MinimumAppeal) ~= 'number' then print('IA|none') print('---END---') return end "
+        "local a = '?' pcall(function() a = tostring(Map.GetPlot(unit:GetX(), unit:GetY()):GetAppeal()) end) "
+        "print('IA|' .. a .. '|' .. tostring(imp.MinimumAppeal)) print('---END---')"
+    )
+
+
+def improve_appeal_note(lines, improvement: str) -> str:
+    """' The tile's appeal is ...' for a refused improve whose improvement needs a minimum appeal (1 or more)."""
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "IA" and len(p) >= 3:
+            try:
+                a, m = int(p[1]), int(p[2])
+            except ValueError:
+                return ""
+            if m < 1:
+                return ""
+            if a < m:
+                return (f" The tile's appeal is {a} ({appeal_label(a)}), and {improvement} needs at least {m} "
+                        f"({appeal_label(m)}).")
+            return (f" The tile's appeal is {a} ({appeal_label(a)}), which meets {improvement}'s minimum of {m}, so "
+                    "appeal is not what blocks it.")
+    return ""
 
 
 CITY_ATTACK_NOTE = (

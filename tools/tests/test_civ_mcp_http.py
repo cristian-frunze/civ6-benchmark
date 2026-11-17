@@ -1923,8 +1923,92 @@ async def main():
           and not bc.builder_wonder_miss("Error: IMPROVEMENT_NOT_FOUND|IMPROVEMENT_FOO not in game database")
           and not bc.builder_wonder_miss(None))
     uad = ua.description
-    check("unit_action lists rush_wonder and describes it", "remove_heresy, rush_wonder (these seven: see Also: below)" in uad
-          and "Also: rush_wonder = a Builder spends one of its charges" in uad, uad[:900])
+    check("unit_action lists rush_wonder and designate_park and describes them",
+          "remove_heresy, rush_wonder, designate_park (these eight: see Also: below)" in uad
+          and "Also: rush_wonder = a Builder spends one of its charges" in uad
+          and "Also: designate_park = a Naturalist creates a National Park" in uad, uad[:900])
+
+    # A Naturalist's activate was sent as the Great Person command (game 36, turns 164-168: "charges=0. No valid
+    # activation tiles found" on five tiles). designate_park sends the game's UNITOPERATION_DESIGNATE_PARK, and on a
+    # refusal lists the park sites from GetPossibleParkTiles with their appeal; a Naturalist's activate does the same.
+    class ParkConn:
+        def __init__(self, unit="UNIT_NATURALIST", refuse=None, total=3, after="PA|1|1|Kwila National Park"):
+            self.unit, self.refuse, self.total, self.after, self.writes = unit, refuse, total, after, []
+        async def execute_write(self, lua, timeout=None):
+            self.writes.append(lua)
+            if "UNITOPERATION_DESIGNATE_PARK" in lua:
+                out = [f"PK|38|23|{self.unit}|4"]
+                if self.unit != "UNIT_NATURALIST":
+                    return out + [f"ERR:NOT_NATURALIST|{self.unit}", lq.SENTINEL]
+                out += ["PT|38|23|0|3|Kwila", "PT|40|25|2|2|Kwila"][:self.total] + [f"PTN|{self.total}"]
+                return out + ([f"ERR:CANNOT_DESIGNATE_PARK|{self.refuse}"] if self.refuse else ["OK:PARK_SENT"]) + [lq.SENTINEL]
+            if "print('PA|'" in lua:
+                return [self.after, lq.SENTINEL]
+            if "print('IA|'" in lua:
+                return ["IA|2|4", lq.SENTINEL]
+            raise AssertionError(lua[:300])
+    GAME = types.SimpleNamespace(conn=ParkConn())
+    out = await ua.fn(CTX, unit_id=65545, action="designate_park")
+    check("designate_park: the park read back from the tile", out == "NATIONAL_PARK_CREATED|Kwila National Park at (38,23), "
+          "on the diamond of four tiles there. Its tourism equals the appeal of its tiles. The Naturalist was used up.", out)
+    pl = GAME.conn.writes[0]
+    check("designate_park Lua: the game's operation, checked first, for unit 9; the sites from GetPossibleParkTiles",
+          all(x in pl for x in ("FindID(9)", "ut.ParkCharges", "GameInfo.UnitOperations['UNITOPERATION_DESIGNATE_PARK']",
+                                "UnitManager.CanStartOperation(unit, op.Hash, nil, false, OperationResultsTypes.NO_TARGETS)",
+                                "UnitManager.RequestOperation(unit, op.Hash)", "Game.GetNationalParks():GetPossibleParkTiles(me)",
+                                "p:GetAppeal()", "FAILURE_REASONS"))
+          and pl.index("CanStartOperation") < pl.index("RequestOperation") and "PARAM_X" not in pl
+          and "IsNationalPark()" in GAME.conn.writes[1] and "FindID(9)" in GAME.conn.writes[1], pl)
+    GAME = types.SimpleNamespace(conn=ParkConn(refuse="Must be on a valid National Park tile"))
+    out = await ua.fn(CTX, unit_id=65545, action="designate_park")
+    check("designate_park refused on a site: the reason and the sites with appeal", out == "Error: CANNOT_DESIGNATE_PARK|The "
+          "game refused: Must be on a valid National Park tile. The Naturalist is at (38,23). Park sites, nearest first "
+          "(1 more further away): (38,23) here, appeal 3 (Charming), Kwila; (40,25) 2 tiles away, appeal 2 "
+          "(Charming), Kwila. Its tile is a park site, so the reason above is what blocks it.", out)
+    GAME = types.SimpleNamespace(conn=ParkConn(refuse="it gave no reason", total=0))
+    out = await ua.fn(CTX, unit_id=65545, action="designate_park")
+    d = bc.parse_park(["PK|51|18|UNIT_NATURALIST|0", "PT|51|18|0|5|Mbumbi", "PT|51|17|1|3|Mbumbi", "PTN|4",
+                       "ERR:CANNOT_DESIGNATE_PARK|it gave no reason"])
+    check("designate_park on a site with no moves (live, game 36 turn 164): told to send it next turn", bc.park_refused(d)
+          == "Error: CANNOT_DESIGNATE_PARK|The game refused: it gave no reason. The Naturalist is at (51,18), with no moves "
+          "left this turn. Park sites, nearest first (2 more further away): (51,18) here, appeal 5 (Breathtaking), Mbumbi; "
+          "(51,17) 1 tile away, appeal 3 (Charming), Mbumbi. Its tile is a park site, and the order needs moves: send "
+          "designate_park again next turn.", bc.park_refused(d))
+    check("designate_park with no site anywhere: said so, with the rules", "The game lists no park site in your territory "
+          "now: a park takes four tiles in a vertical diamond, all owned by one city" in out
+          and out.endswith("Moving the Naturalist will not help until a city has such a diamond."), out)
+    GAME = types.SimpleNamespace(conn=ParkConn(unit="UNIT_BUILDER"))
+    out = await ua.fn(CTX, unit_id=65545, action="designate_park")
+    check("designate_park on another unit: refused by name", out == "Error: NOT_A_NATURALIST|designate_park is a "
+          "Naturalist's order; this unit is UNIT_BUILDER.", out)
+    GAME = types.SimpleNamespace(conn=ParkConn(after="PA|0|0|"))
+    out = await ua.fn(CTX, unit_id=65545, action="designate_park")
+    check("designate_park taken but no park: said so", out.startswith("PARK_SENT|The game took the order at (38,23), but "
+          "the tile shows no park and the Naturalist is still there."), out)
+    seen_actions.clear()
+    async def naturalist(ctx=None, unit_id=None, action=None, improvement=None, **k):
+        seen_actions.append(action)
+        return {"activate": "Error: CANNOT_ACTIVATE|Naturalist (UNIT_NATURALIST) at (38,23) charges=0. No valid activation tiles found.",
+                "improve": "Error: CANNOT_IMPROVE|unknown reason. can build here: IMPROVEMENT_FARM. Builder at 43,32"}.get(action, "FORTIFIED")
+    GAME = types.SimpleNamespace(conn=ParkConn())
+    mp = ns["_makes_parks"](naturalist)
+    outs = [await mp(ctx=CTX, unit_id=65545, action="activate"),
+            await mp(ctx=CTX, unit_id=65545, action="improve", improvement="IMPROVEMENT_BEACH_RESORT"),
+            await mp(ctx=CTX, unit_id=65545, action="fortify")]
+    check("a Naturalist's activate makes the park; a refused resort gives the appeal; others pass through",
+          outs[0] == "A Naturalist's activate is its National Park order (designate_park). NATIONAL_PARK_CREATED|Kwila "
+          "National Park at (38,23), on the diamond of four tiles there. Its tourism equals the appeal of its tiles. The "
+          "Naturalist was used up." and outs[1] == "Error: CANNOT_IMPROVE|unknown reason. can build here: IMPROVEMENT_FARM. "
+          "Builder at 43,32. The tile's appeal is 2 (Charming), and IMPROVEMENT_BEACH_RESORT needs at least 4 (Breathtaking)."
+          and outs[2] == "FORTIFIED" and seen_actions == ["activate", "improve", "fortify"]
+          and "GameInfo.Improvements['IMPROVEMENT_BEACH_RESORT']" in GAME.conn.writes[-1], outs)
+    check("appeal note: only a real minimum, said when appeal is enough", bc.improve_appeal_note(["IA|none"], "X") == ""
+          and bc.improve_appeal_note(["IA|-2|0"], "X") == "" and bc.improve_appeal_note(["IA|5|4"], "IMPROVEMENT_BEACH_RESORT")
+          == " The tile's appeal is 5 (Breathtaking), which meets IMPROVEMENT_BEACH_RESORT's minimum of 4, so appeal is not "
+          "what blocks it." and bc.appeal_label(-1) == "Average" and bc.appeal_label(-4) == "Disgusting")
+    check("no park for other activates", not bc.naturalist_miss("Error: CANNOT_ACTIVATE|Galileo (UNIT_GREAT_SCIENTIST) at (1,1)")
+          and not bc.naturalist_miss(None))
+    GAME = saved
 
     # 22. Obsolete policies: not listed, and set_policies refuses them, naming the replacement.
     lua = lq.build_policies_query()

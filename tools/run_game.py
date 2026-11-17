@@ -49,6 +49,11 @@ GOALS = {
     "religious": "a Religious victory: make your religion the majority in every civilization",
 }
 LIMIT_TEXT = re.compile(r"hit your .*limit|usage limit|limit reached|out of (extra )?usage", re.I)
+# A login that can no longer be renewed fails every session in seconds ("Failed to authenticate: this login reached its
+# time limit"). Game 37 lost its first two sessions that way on one account, and the runner would have retried it
+# until --max-sessions: the account is now set aside like a limited one, for a day, and the session moves on.
+AUTH_TEXT = re.compile(r"Failed to authenticate|authentication_failed|claude auth login", re.I)
+AUTH_HOLD = 24 * 3600
 
 
 def now() -> str:
@@ -100,7 +105,8 @@ CONTINUE_PROMPT = "Continue"
 
 def usage_limit(events: list[dict]) -> tuple[str, float | None] | None:
     """(limit kind, reset unix time or None) when a usage limit stopped the session.
-    Same checks as the Kenso subagents runner: a rejected rate_limit_event, or the limit text in the result."""
+    Same checks as the Kenso subagents runner: a rejected rate_limit_event, or the limit text in the result. A failed
+    login counts too, as kind "login", held for AUTH_HOLD."""
     result = next((e for e in reversed(events) if e.get("type") == "result"), {})
     if result and not result.get("is_error"):
         return None
@@ -113,6 +119,8 @@ def usage_limit(events: list[dict]) -> tuple[str, float | None] | None:
             return str(info.get("rateLimitType") or "unknown"), reset
     if LIMIT_TEXT.search(str(result.get("result") or "")):
         return "unknown", None
+    if AUTH_TEXT.search(str(result.get("result") or "")) or any(e.get("error") == "authentication_failed" for e in events):
+        return "login", time.time() + AUTH_HOLD
     return None
 
 

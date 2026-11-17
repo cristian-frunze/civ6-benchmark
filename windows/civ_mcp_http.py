@@ -2050,6 +2050,58 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _tool.fn = _rushes_wonders(_tool.fn)
     _tool.description += bc.WONDER_RUSH_NOTE
 
+    # A Naturalist's National Park (bench_compat.PARK_NOTE has why). designate_park sends the game's
+    # UNITOPERATION_DESIGNATE_PARK and reads the tile back; on a refusal it lists the park sites with their appeal. A
+    # Naturalist's activate, which civ6-mcp sends as the Great Person command, does the same. A refused improve of an
+    # improvement that needs a minimum appeal (a Seaside Resort) gives the tile's appeal.
+    async def _park(ctx, uid):
+        conn = srv._get_game(ctx).conn
+        lines = await conn.execute_write(bc.national_park_lua(uid % 65536), timeout=10.0)
+        d = bc.parse_park(lines)
+        if d["status"] is None:
+            return _gsm._action_result(lines)
+        if d["status"] != "sent":
+            return bc.park_refused(d)
+        after = None
+        for _ in range(3):  # the order plays out a frame or more later
+            await asyncio.sleep(1.0)
+            try:
+                after = bc.parse_park_after(await conn.execute_write(
+                    bc.park_after_lua(uid % 65536, d["facts"]["x"], d["facts"]["y"]), timeout=10.0))
+            except Exception:
+                after = None
+            if after and (after["park"] or after["gone"]):
+                break
+        return bc.park_report(d, after)
+
+    def _makes_parks(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            action = str(kwargs.get("action") or "").lower()
+            if action not in ("designate_park", "activate", "improve"):
+                return await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+            if action == "designate_park":
+                return await srv._logged(ctx, "unit_action", {"unit_id": uid, "action": action}, lambda: _park(ctx, uid))
+            out = await fn(*args, **kwargs)
+            if action == "activate" and bc.naturalist_miss(out):
+                return "A Naturalist's activate is its National Park order (designate_park). " + await _park(ctx, uid)
+            if action == "improve" and isinstance(out, str) and out.startswith("Error:") and "CANNOT_IMPROVE" in out:
+                imp = str(kwargs.get("improvement") or "")
+                try:
+                    lines = await srv._get_game(ctx).conn.execute_write(bc.improve_appeal_lua(uid % 65536, imp), timeout=10.0)
+                except Exception:
+                    return out
+                note = bc.improve_appeal_note(lines, imp)
+                return out.rstrip() + ("" if not note or out.rstrip().endswith(".") else ".") + note
+            return out
+
+        return wrapper
+
+    _tool.fn = _makes_parks(_tool.fn)
+    _tool.description += bc.PARK_NOTE
+
     # The wonder advisor checks each tile with the game, and a wonder the city already placed passes on none of them:
     # in game 35 it answered "No valid placement tiles" for the Great Library Xi'an had placed. It now says where the
     # wonder stands and that set_city_production resumes it there (bench_compat.placed_wonder_lua has why).
