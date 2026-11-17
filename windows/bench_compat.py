@@ -1063,7 +1063,7 @@ RELIGIOUS_ORDERS_NOTE = (
 # each one was described only in an "Also:" note at the end of the description. In game 31 Opus bought an Apostle to
 # add a belief (turn 85), wrote "'evangelize' isn't among the unit_action options and I'm not sure how to trigger it",
 # and never used the order; Eastern Orthodoxy kept its two founding beliefs, as in game 29. The list names them now.
-ADDED_ACTIONS = "pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy"
+ADDED_ACTIONS = "pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy, rush_wonder"
 _ACTION_LIST_RE = re.compile(r"(action: One of: [^\n]*\bspread_religion)")
 
 
@@ -1071,7 +1071,7 @@ def action_list(desc: str) -> str | None:
     """unit_action's description with the harness's orders added to its list of actions, or None when it changed."""
     if len(_ACTION_LIST_RE.findall(desc)) != 1:
         return None
-    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these six: see Also: below)", desc)
+    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these seven: see Also: below)", desc)
 
 
 _BELIEF_STATE_LUA = (
@@ -1221,6 +1221,260 @@ def wonder_tiles_checked(lua: str) -> str | None:
     if lua.count(_WONDER_LOOP) != 1 or "brow.Hash" not in lua:
         return None
     return lua.replace(_WONDER_LOOP, _WONDER_CHECK, 1)
+
+
+# A wonder the city placed and then left could not be resumed. civ6-mcp asks for a tile for every wonder and sends
+# it with the order; the game's ProductionPanel.lua sends no tile once BuildQueue:HasBeenPlaced(hash) is true, and
+# the order with a tile does not take. In game 35 China placed the Great Library in Xi'an on turn 61 and switched to a
+# Settler on turn 64; on turn 81 set_city_production without a tile asked for one, with the tile it reported
+# SILENT_FAILURE, and the wonder advisor found no valid tile. India built the Great Library about two turns later.
+# The wonder's progress stays in the city's queue, and its tile shows the wonder (Plot:GetWonderType, not complete).
+_PLACED_LUA = (
+    "local function placed(pCity, b) "
+    "  local bq = pCity:GetBuildQueue() local ok, p = pcall(function() return bq:HasBeenPlaced(b.Hash) end) "
+    "  if not (ok and p) then return nil end "
+    "  local px, py = -1, -1 local cx, cy = pCity:GetX(), pCity:GetY() local W = Map.GetGridSize() "
+    "  for dx = -3, 3 do for dy = -3, 3 do "
+    "    local pl = Map.GetPlot((cx + dx) % W, cy + dy) "
+    "    if pl and Map.GetPlotDistance(cx, cy, pl:GetX(), pl:GetY()) <= 3 and pl:GetWonderType() == b.Index then "
+    "      px, py = pl:GetX(), pl:GetY() end "
+    "  end end "
+    "  local prog, cost = -1, -1 "
+    "  pcall(function() prog = bq:GetBuildingProgress(b.Index) or -1 end) pcall(function() cost = bq:GetBuildingCost(b.Index) or -1 end) "
+    "  return px, py, prog, cost "
+    "end "
+)
+
+
+def placed_wonder_lua(city_id: int, item_name: str) -> str:
+    """PLACED|x|y|progress|cost when the city has placed this wonder (and not finished it), else NOT_PLACED."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(item_name or "").upper())
+    return (
+        _PLACED_LUA +
+        f"local me = Game.GetLocalPlayer() local pCity = Players[me]:GetCities():FindID({int(city_id)} % 65536) "
+        f"local b = GameInfo.Buildings['{name}'] "
+        "if pCity == nil or b == nil or not b.IsWonder or pCity:GetBuildings():HasBuilding(b.Index) then "
+        "  print('NOT_PLACED') print('---END---') return end "
+        "local px, py, prog, cost = placed(pCity, b) "
+        "if px == nil then print('NOT_PLACED') else "
+        "  print('PLACED|' .. px .. '|' .. py .. '|' .. math.floor(prog) .. '|' .. math.floor(cost)) end "
+        "print('---END---')"
+    )
+
+
+def resume_wonder_lua(city_id: int, item_name: str) -> str:
+    """Set the city to the wonder it placed before, with no tile, as the game's production panel does."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(item_name or "").upper())
+    return (
+        f"local me = Game.GetLocalPlayer() local pCity = Players[me]:GetCities():FindID({int(city_id)} % 65536) "
+        f"local b = GameInfo.Buildings['{name}'] "
+        "if pCity == nil or b == nil then print('ERR:NOT_FOUND') print('---END---') return end "
+        "local t = {} t[CityOperationTypes.PARAM_BUILDING_TYPE] = b.Hash "
+        "t[CityOperationTypes.PARAM_INSERT_MODE] = CityOperationTypes.VALUE_EXCLUSIVE "
+        "CityManager.RequestOperation(pCity, CityOperationTypes.BUILD, t) "
+        "local ok, turns = pcall(function() return pCity:GetBuildQueue():GetTurnsLeft(b.Hash) end) "
+        "print('OK:RESUME_SENT|' .. ((ok and turns) and tostring(turns) or '?')) print('---END---')"
+    )
+
+
+def verify_production_lua(city_id: int, item_name: str) -> str:
+    """civ6-mcp's GameCore read-back of the city's current build (build_verify_production) without GetTurnsLeft(), which
+    the core answers "Not Implemented" for a building (a resumed wonder in game 35's replay); the error lost the
+    CONFIRMED line, so an order that had landed read as not set. CONFIRMED|<turns or ?> or NOT_SET|current=..."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(item_name or "").upper())
+    return (
+        f"local me = Game.GetLocalPlayer() local pCity = Players[me]:GetCities():FindID({int(city_id)} % 65536) "
+        "if pCity == nil then print('NOT_FOUND') print('---END---') return end "
+        "local bq = pCity:GetBuildQueue() local cur = bq:CurrentlyBuilding() "
+        f"if cur == '{name}' then local ok, t = pcall(function() return bq:GetTurnsLeft() end) "
+        "  print('CONFIRMED|' .. ((ok and t) and (tostring(t) .. ' turns') or '?')) "
+        f"else print('NOT_SET|current=' .. tostring(cur) .. '|expected={name}') end "
+        "print('---END---')"
+    )
+
+
+def resume_turns(lines) -> str:
+    """The turns left from resume_wonder_lua's OK:RESUME_SENT line, or '?'."""
+    for ln in lines or []:
+        if ln.startswith("OK:RESUME_SENT|"):
+            t = ln.split("|", 1)[1].strip()
+            return t if t.isdigit() else "?"
+    return "?"
+
+
+def parse_placed(lines) -> tuple[int, int, int, int] | None:
+    """(x, y, progress, cost) from placed_wonder_lua, or None when the wonder is not placed in the city."""
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "PLACED" and len(p) >= 5:
+            try:
+                return int(p[1]), int(p[2]), int(p[3]), int(p[4])
+            except ValueError:
+                return None
+    return None
+
+
+def resumed_note(placed: tuple[int, int, int, int]) -> str:
+    x, y, prog, cost = placed
+    where = f" at ({x},{y})" if x >= 0 else ""
+    done = f", {prog} of {cost} production done" if prog >= 0 and cost > 0 else ""
+    return f" (resumed on the tile this city placed it on{where}{done})"
+
+
+def wonder_placed_report(item_name: str, placed: tuple[int, int, int, int]) -> str:
+    """The wonder advisor's answer for a wonder this city already placed: no tile to pick, how to resume it."""
+    x, y, prog, cost = placed
+    where = f" at ({x},{y})" if x >= 0 else ""
+    done = f", with {prog} of {cost} production done" if prog >= 0 and cost > 0 else ""
+    return (f"{item_name} is already placed in this city{where}{done}. There is no tile to pick: "
+            f"set_city_production(city_id=<this city>, item_type='BUILDING', item_name='{item_name}') resumes it there, "
+            "with or without the tile.")
+
+
+# China's wonder rush. Qin Shi Huang's Builders can spend a charge to add 15% of an Ancient or Classical wonder's
+# cost (FIRST_EMPEROR_TRAIT: TRAIT_BUILDER_WONDER_PERCENT). The game's order is the unit command
+# UNITCOMMAND_WONDER_PRODUCTION (MaxEra 2), which UnitPanel.lua sends with UnitManager.RequestCommand(unit, hash).
+# civ6-mcp had no order for it. In game 35 (turn 64) Opus took a Builder to the Great Library's tile next to Xi'an and
+# tried activate ("charges=0. No valid activation tiles found"), sacrifice_charges ("Royal Society required") and
+# improve ("not in game database"), then moved Xi'an on to a Settler.
+WONDER_RUSH_NOTE = (
+    "\n\nAlso: rush_wonder = a Builder spends one of its charges to add production to the wonder on its tile (the "
+    "game's own order; China's Builders add 15% of an Ancient or Classical wonder's cost). Move the Builder onto the "
+    "tile where its city is building the wonder, then unit_action(unit_id=<the Builder>, action='rush_wonder'). The "
+    "order takes the Builder's moves, so each Builder adds one charge a turn (two Builders on the tile add two). The "
+    "result gives the wonder's production before and after, or the game's reasons when it refuses."
+)
+
+
+def _wonder_facts_body(unit_index: int) -> str:
+    """Lua printing WR|x|y|unit type|charges|wonder on the tile|city id|city name|progress|cost for the unit's tile,
+    with no end marker after it; each call that might not exist in a Lua context is in a pcall."""
+    return (
+        _PLACED_LUA +
+        f"local me = Game.GetLocalPlayer() local unit = Players[me]:GetUnits():FindID({int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local x, y = unit:GetX(), unit:GetY() local ut = GameInfo.Units[unit:GetType()] "
+        "local charges = -1 pcall(function() charges = unit:GetBuildCharges() or -1 end) "
+        "local mv = -1 pcall(function() mv = unit:GetMovesRemaining() or -1 end) "
+        "local plot = Map.GetPlot(x, y) local w = -1 pcall(function() w = plot:GetWonderType() end) "
+        "local wname, cid, cname, prog, cost = '', -1, '', -1, -1 "
+        "local b = (w ~= nil and w >= 0) and GameInfo.Buildings[w] or nil "
+        "if b then wname = b.BuildingType "
+        "  for _, c in Players[me]:GetCities():Members() do "
+        "    local px, py, pg, ct = placed(c, b) "
+        "    if px == x and py == y then cid, cname, prog, cost = c:GetID(), Locale.Lookup(c:GetName()), pg, ct end "
+        "  end "
+        "end "
+        "print('WR|' .. x .. '|' .. y .. '|' .. (ut and ut.UnitType or '?') .. '|' .. charges .. '|' .. wname .. '|' "
+        "  .. cid .. '|' .. cname:gsub('|', '/') .. '|' .. math.floor(prog) .. '|' .. math.floor(cost) .. '|' .. mv) "
+    )
+
+
+def wonder_rush_lua(unit_index: int) -> str:
+    """Send UNITCOMMAND_WONDER_PRODUCTION for the unit when the game allows it (OK:WONDER_RUSH_SENT), else
+    ERR:CANNOT_RUSH_WONDER with the game's reasons; the WR facts line comes first either way."""
+    return (
+        _wonder_facts_body(unit_index) +
+        f"unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "local cmd = GameInfo.UnitCommands['UNITCOMMAND_WONDER_PRODUCTION'] "
+        "if cmd == nil then print('ERR:NO_COMMAND|UNITCOMMAND_WONDER_PRODUCTION is not in this game') print('---END---') return end "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartCommand(unit, cmd.Hash, false, true) end) "
+        "if ok and can then UnitManager.RequestCommand(unit, cmd.Hash) print('OK:WONDER_RUSH_SENT') print('---END---') return end "
+        + _WHY_LUA +
+        "print('ERR:CANNOT_RUSH_WONDER|' .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason')) "
+        "print('---END---')"
+    )
+
+
+def wonder_after_lua(unit_index: int, city_id: int, wonder: str) -> str:
+    """WA|charges ('gone' when the unit is gone, -1 when unreadable)|progress|cost|complete (1 when built)."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(wonder or "").upper())
+    return (
+        _PLACED_LUA +
+        f"local me = Game.GetLocalPlayer() local unit = Players[me]:GetUnits():FindID({int(unit_index)}) "
+        "local charges = 'gone' if unit ~= nil then charges = -1 pcall(function() charges = unit:GetBuildCharges() or -1 end) end "
+        f"local pCity = Players[me]:GetCities():FindID({int(city_id)} % 65536) local b = GameInfo.Buildings['{name}'] "
+        "local prog, cost, complete = -1, -1, 0 "
+        "if pCity ~= nil and b ~= nil then "
+        "  if pCity:GetBuildings():HasBuilding(b.Index) then complete = 1 "
+        "  else local px, py, pg, ct = placed(pCity, b) if px ~= nil then prog, cost = pg, ct end end "
+        "end "
+        "print('WA|' .. tostring(charges) .. '|' .. math.floor(prog) .. '|' .. math.floor(cost) .. '|' .. complete) "
+        "print('---END---')"
+    )
+
+
+def parse_wonder_after(lines) -> dict | None:
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "WA" and len(p) >= 5:
+            try:
+                return {"charges": None if p[1] == "gone" else int(p[1]), "progress": int(p[2]), "cost": int(p[3]),
+                        "complete": p[4] == "1"}
+            except ValueError:
+                return None
+    return None
+
+
+def parse_wonder_facts(lines) -> dict | None:
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "WR" and len(p) >= 10:
+            try:
+                return {"x": int(p[1]), "y": int(p[2]), "unit": p[3], "charges": int(p[4]), "wonder": p[5],
+                        "city_id": int(p[6]), "city": p[7], "progress": int(p[8]), "cost": int(p[9]),
+                        "moves": float(p[10]) if len(p) >= 11 else -1.0}
+            except ValueError:
+                return None
+    return None
+
+
+RUSH_HINT = (" To spend a Builder's charge on a wonder (China's Builders, Ancient and Classical wonders), use "
+             "action='rush_wonder' with the Builder on the wonder's tile.")
+
+
+def builder_wonder_miss(out) -> bool:
+    """A Builder's activate, or an improve naming a building, that failed: the result then names rush_wonder."""
+    return isinstance(out, str) and out.startswith("Error:") and (
+        ("CANNOT_ACTIVATE|" in out and "(UNIT_BUILDER)" in out) or "IMPROVEMENT_NOT_FOUND|BUILDING_" in out)
+
+
+def wonder_rush_refused(f: dict | None, why: str) -> str:
+    """Why the game refused rush_wonder, with the facts of the unit's tile."""
+    if f is None:
+        return f"Error: CANNOT_RUSH_WONDER|The game refused: {why}."
+    unit = f"The unit is {f['unit']} at ({f['x']},{f['y']})" + (f" with {f['charges']} charges" if f["charges"] >= 0 else "")
+    if not f["wonder"]:
+        tile = "Its tile holds no wonder: move it onto the tile where your city is building the wonder."
+    elif f["city_id"] < 0:
+        tile = f"Its tile holds {f['wonder']}, which none of your cities is building there."
+    else:
+        tile = f"Its tile holds {f['wonder']}, placed by {f['city']} ({f['progress']} of {f['cost']} production)."
+    if f.get("moves", -1.0) == 0:
+        tile += (" It has no moves left this turn, and the order needs them: a rush takes the Builder's moves, so each "
+                 "Builder adds one charge a turn. Send it again next turn.")
+    return (f"Error: CANNOT_RUSH_WONDER|The game refused: {why}. {unit}. {tile} Only Ancient and Classical wonders "
+            "take Builder charges, and only for a civ with that ability (China).")
+
+
+def wonder_rush_report(before: dict, after: dict | None) -> str:
+    """The wonder's production and the Builder's charges before and after the order (after from wonder_after_lua)."""
+    w, city = before["wonder"] or "the wonder", before["city"] or "its city"
+    if after is None or (not after["complete"] and after["charges"] == before["charges"]
+                         and after["progress"] == before["progress"]):
+        return (f"WONDER_RUSH_SENT|The game took the order at ({before['x']},{before['y']}), but {w} in {city} still "
+                f"shows {before['progress']} of {before['cost']} production and the Builder {before['charges']} "
+                "charges. Check get_cities before you send it again.")
+    if after["charges"] is None:
+        charges = f"Builder charges {before['charges']} -> 0 (it used its last charge)"
+    elif after["charges"] >= 0:
+        charges = f"Builder charges {before['charges']} -> {after['charges']}"
+    else:
+        charges = "Builder charges unread"
+    if after["complete"]:
+        return f"WONDER_RUSHED|{w} in {city} is complete (it had {before['progress']} of {before['cost']}). {charges}."
+    return (f"WONDER_RUSHED|{w} in {city}: {before['progress']} -> {after['progress']} of {before['cost']} production. "
+            f"{charges}. The order took the Builder's moves; it can add another charge next turn.")
 
 
 CITY_ATTACK_NOTE = (

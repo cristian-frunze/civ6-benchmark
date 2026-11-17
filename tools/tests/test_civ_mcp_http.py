@@ -1732,7 +1732,7 @@ async def main():
     class ProdConn:
         def __init__(self, lands_after): self.lands_after, self.reads = lands_after, 0
         async def execute_read(self, lua, timeout=None):
-            assert 'cur == "BUILDING_WORKSHOP"' in lua and "FindID(65536 % 65536)" in lua, lua
+            assert "cur == 'BUILDING_WORKSHOP'" in lua and "FindID(65536 % 65536)" in lua, lua
             self.reads += 1
             if self.lands_after is not None and self.reads >= self.lands_after:
                 return ["CONFIRMED|5 turns", lq.SENTINEL]
@@ -1773,6 +1773,158 @@ async def main():
         out = await setprod(g, 65536, "BUILDING", "BUILDING_WORKSHOP")
         check(f"production: {name}", out == want and len(calls) == sends and g.dismissed == dismissed,
               (len(calls), g.dismissed, out))
+
+    # Game 35: Xi'an placed the Great Library (turn 61), left it (64) and could not resume it (81): civ6-mcp asked
+    # for a tile, and with one the order did not take. A placed wonder is resumed with no tile now.
+    class WonderConn:
+        def __init__(self, placed=True, lands=True): self.placed, self.lands, self.writes = placed, lands, []
+        async def execute_write(self, lua, timeout=None):
+            self.writes.append(lua)
+            if "print('PLACED|'" in lua:
+                assert "FindID(65536 % 65536)" in lua and "GameInfo.Buildings['BUILDING_GREAT_LIBRARY']" in lua, lua
+                return (["PLACED|63|34|66|400"] if self.placed else ["NOT_PLACED"]) + [lq.SENTINEL]
+            if "OK:RESUME_SENT" in lua:
+                return ["OK:RESUME_SENT|5", lq.SENTINEL]
+            raise AssertionError(lua[:300])
+        async def execute_read(self, lua, timeout=None):
+            assert "cur == 'BUILDING_GREAT_LIBRARY'" in lua and "pcall(function() return bq:GetTurnsLeft() end)" in lua, lua
+            return (["CONFIRMED|7 turns"] if self.lands
+                    else ["NOT_SET|current=NONE|expected=BUILDING_GREAT_LIBRARY"]) + [lq.SENTINEL]
+    calls = []
+    async def civ6mcp(self, cid, it, nm, tx=None, ty=None):
+        calls.append((cid, it, nm, tx, ty))
+        return f"PRODUCING|{nm}|9 turns"
+    ns["_original_set_production"] = civ6mcp
+    g = ProdGame(); g.conn = WonderConn()
+    out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY")
+    resume = g.conn.writes[-1]
+    check("placed wonder: resumed with no tile, civ6-mcp's order not sent", out == "PRODUCING|BUILDING_GREAT_LIBRARY|"
+          "5 turns (resumed on the tile this city placed it on at (63,34), 66 of 400 production done)" and calls == []
+          and "PARAM_X" not in resume and "t[CityOperationTypes.PARAM_BUILDING_TYPE] = b.Hash" in resume
+          and "CityOperationTypes.VALUE_EXCLUSIVE" in resume, (calls, out))
+    out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY", 63, 34)
+    check("placed wonder: a tile given is left out too", out.startswith("PRODUCING|BUILDING_GREAT_LIBRARY|5 turns (resumed")
+          and calls == [], out)
+    g = ProdGame(); g.conn = WonderConn(placed=False)
+    out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY", 63, 34)
+    check("wonder not placed yet: civ6-mcp's order, with its tile", out == "PRODUCING|BUILDING_GREAT_LIBRARY|9 turns"
+          and calls == [(65536, "BUILDING", "BUILDING_GREAT_LIBRARY", 63, 34)], (calls, out))
+    calls.clear()
+    out = await setprod(ProdGame(), 65536, "UNIT", "UNIT_SETTLER")
+    check("not a building: no placed check", out == "PRODUCING|UNIT_SETTLER|9 turns" and len(calls) == 1, out)
+    g = ProdGame(); g.conn = WonderConn(lands=False); calls.clear()
+    out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY")
+    check("placed wonder that does not take: the usual checks, then sent once more with no tile",
+          out.startswith("Error: SILENT_FAILURE|BUILDING_GREAT_LIBRARY appeared to set") and "with no tile" in out
+          and calls == [] and sum("OK:RESUME_SENT" in w for w in g.conn.writes) == 2 and g.dismissed == 1, out)
+    pl = bc.placed_wonder_lua(65536, "building_great_library'; os.exit()")
+    check("placed check Lua: the game's HasBeenPlaced, the wonder's tile, progress and cost; the name sanitised",
+          all(x in pl for x in ("bq:HasBeenPlaced(b.Hash)", "pl:GetWonderType() == b.Index", "GetBuildingProgress(b.Index)",
+                                "GetBuildingCost(b.Index)", "HasBuilding(b.Index)", "GameInfo.Buildings['BUILDING_GREAT_LIBRARYOSEXIT']"))
+          and "os.exit" not in pl, pl)
+    vp = bc.verify_production_lua(65536, "BUILDING_GREAT_LIBRARY")
+    check("read-back: no bare GetTurnsLeft() in the core (Not Implemented for a resumed wonder)", "bq:CurrentlyBuilding()" in vp
+          and "pcall(function() return bq:GetTurnsLeft() end)" in vp and "print('CONFIRMED|' .. ((ok and t)" in vp
+          and "NOT_SET|current=" in vp and "FindID(65536 % 65536)" in vp, vp)
+    check("resume turns", bc.resume_turns(["OK:RESUME_SENT|5"]) == "5" and bc.resume_turns(["OK:RESUME_SENT|?"]) == "?"
+          and bc.resume_turns([]) == "?")
+    check("placed parse", bc.parse_placed(["PLACED|63|34|66|400"]) == (63, 34, 66, 400)
+          and bc.parse_placed(["NOT_PLACED"]) is None and bc.parse_placed(["PLACED|x"]) is None)
+    check("resumed note without a tile or progress", bc.resumed_note((-1, -1, -1, -1)) == " (resumed on the tile this city placed it on)")
+
+    # The wonder advisor answered "No valid placement tiles" for the placed Great Library; it now says where it stands.
+    saved = GAME
+    GAME = types.SimpleNamespace(conn=WonderConn())
+    out = await mcp._tool_manager.get_tool("get_wonder_advisor").fn(CTX, city_id=65536, wonder_name="BUILDING_GREAT_LIBRARY")
+    check("wonder advisor: a placed wonder is named with its tile and how to resume it", out == "BUILDING_GREAT_LIBRARY "
+          "is already placed in this city at (63,34), with 66 of 400 production done. There is no tile to pick: "
+          "set_city_production(city_id=<this city>, item_type='BUILDING', item_name='BUILDING_GREAT_LIBRARY') resumes it "
+          "there, with or without the tile.", out)
+    GAME = types.SimpleNamespace(conn=WonderConn(placed=False))
+    seen = []
+    async def advisor(ctx=None, city_id=None, wonder_name=None):
+        seen.append(wonder_name)
+        return "ADVISOR"
+    out = await ns["_names_placed_wonder"](advisor)(ctx=CTX, city_id=65536, wonder_name="BUILDING_GREAT_LIBRARY")
+    check("wonder advisor: not placed, civ6-mcp's advisor", out == "ADVISOR" and seen == ["BUILDING_GREAT_LIBRARY"], out)
+
+    # China's Builders could not spend a charge on the Great Library (game 35, turn 64): rush_wonder sends the game's
+    # UNITCOMMAND_WONDER_PRODUCTION and reports the wonder's production and the Builder's charges after it.
+    FACTS = "WR|63|34|UNIT_BUILDER|3|BUILDING_GREAT_LIBRARY|65536|Xi’an|66|400"
+    class RushConn:
+        def __init__(self, facts=FACTS, refuse=None, core="WA|2|126|400|0", ui="WA|2|126|400|0"):
+            self.facts, self.refuse, self.core, self.ui, self.writes, self.reads = facts, refuse, core, ui, [], []
+        async def execute_write(self, lua, timeout=None):
+            self.writes.append(lua)
+            if "UNITCOMMAND_WONDER_PRODUCTION" in lua:
+                return [self.facts] + ([f"ERR:CANNOT_RUSH_WONDER|{self.refuse}"] if self.refuse
+                                       else ["OK:WONDER_RUSH_SENT"]) + [lq.SENTINEL]
+            if "print('WA|'" in lua:
+                return [self.ui, lq.SENTINEL]
+            raise AssertionError(lua[:300])
+        async def execute_read(self, lua, timeout=None):
+            self.reads.append(lua)
+            assert "print('WA|'" in lua and "FindID(65536 % 65536)" in lua and "FindID(9)" in lua \
+                and "GameInfo.Buildings['BUILDING_GREAT_LIBRARY']" in lua, lua
+            return [self.core, lq.SENTINEL]
+    ua = mcp._tool_manager.get_tool("unit_action")
+    GAME = types.SimpleNamespace(conn=RushConn())
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder: the wonder's production and the charges, before and after", out == "WONDER_RUSHED|"
+          "BUILDING_GREAT_LIBRARY in Xi’an: 66 -> 126 of 400 production. Builder charges 3 -> 2. The order took the "
+          "Builder's moves; it can add another charge next turn." and len(GAME.conn.reads) == 1, out)
+    rl = GAME.conn.writes[0]
+    check("rush_wonder Lua: the game's command, checked first, for unit 9",
+          all(x in rl for x in ("unit:GetMovesRemaining()", "GameInfo.UnitCommands['UNITCOMMAND_WONDER_PRODUCTION']", "FindID(9)", "GetUnit(me, 9)",
+                                "UnitManager.CanStartCommand(unit, cmd.Hash, false, true)", "UnitManager.RequestCommand(unit, cmd.Hash)",
+                                "unit:GetBuildCharges()", "plot:GetWonderType()", "FAILURE_REASONS"))
+          and rl.index("CanStartCommand") < rl.index("RequestCommand"), rl)
+    GAME = types.SimpleNamespace(conn=RushConn(core="WA|gone|186|400|0"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder: the last charge", "66 -> 186 of 400 production. Builder charges 3 -> 0 (it used its last charge)." in out, out)
+    GAME = types.SimpleNamespace(conn=RushConn(core="WA|gone|-1|-1|1"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder: the wonder completed", out == "WONDER_RUSHED|BUILDING_GREAT_LIBRARY in Xi’an is complete (it had 66 "
+          "of 400). Builder charges 3 -> 0 (it used its last charge).", out)
+    GAME = types.SimpleNamespace(conn=RushConn(core="WA|-1|-1|-1|0", ui="WA|2|126|400|0"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder: the core unread, the UI state's numbers", "66 -> 126 of 400 production. Builder charges 3 -> 2." in out, out)
+    GAME = types.SimpleNamespace(conn=RushConn(refuse="Not enough build charges"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder refused: the game's reason and the tile's facts", out == "Error: CANNOT_RUSH_WONDER|The game refused: "
+          "Not enough build charges. The unit is UNIT_BUILDER at (63,34) with 3 charges. Its tile holds BUILDING_GREAT_LIBRARY, "
+          "placed by Xi’an (66 of 400 production). Only Ancient and Classical wonders take Builder charges, and only for a "
+          "civ with that ability (China).", out)
+    GAME = types.SimpleNamespace(conn=RushConn(facts=FACTS + "|0", refuse="it gave no reason"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder refused with no moves left (game 35 replay: one charge a turn): said so", out.endswith("(66 of 400 "
+          "production). It has no moves left this turn, and the order needs them: a rush takes the Builder's moves, so each "
+          "Builder adds one charge a turn. Send it again next turn. Only Ancient and Classical wonders take Builder charges, "
+          "and only for a civ with that ability (China)."), out)
+    GAME = types.SimpleNamespace(conn=RushConn(facts="WR|60|30|UNIT_BUILDER|3||-1||-1|-1|2", refuse="it gave no reason"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder refused off the wonder's tile: told to move there", "Its tile holds no wonder: move it onto the tile" in out, out)
+    GAME = types.SimpleNamespace(conn=RushConn(core="WA|3|66|400|0", ui="WA|3|66|400|0"))
+    out = await ua.fn(CTX, unit_id=65545, action="rush_wonder")
+    check("rush_wonder taken but nothing changed: said so", out.startswith("WONDER_RUSH_SENT|The game took the order at (63,34), "
+          "but BUILDING_GREAT_LIBRARY in Xi’an still shows 66 of 400 production and the Builder 3 charges."), out)
+    GAME = saved
+    seen_actions.clear()
+    async def builder(ctx=None, unit_id=None, action=None, **k):
+        seen_actions.append(action)
+        return {"activate": "Error: CANNOT_ACTIVATE|Builder (UNIT_BUILDER) at (63,34) charges=0. No valid activation tiles found.",
+                "improve": "Error: IMPROVEMENT_NOT_FOUND|BUILDING_GREAT_LIBRARY not in game database"}.get(action, "FORTIFIED")
+    rw = ns["_rushes_wonders"](builder)
+    outs = [await rw(ctx=CTX, unit_id=7, action=a) for a in ("activate", "improve", "fortify")]
+    check("a Builder's failed activate or improve on a wonder names rush_wonder; other actions pass through",
+          outs[0].endswith(bc.RUSH_HINT) and outs[1].endswith(bc.RUSH_HINT) and outs[2] == "FORTIFIED"
+          and seen_actions == ["activate", "improve", "fortify"], outs)
+    check("no hint for other failures", not bc.builder_wonder_miss("Error: CANNOT_ACTIVATE|Galileo (UNIT_GREAT_SCIENTIST) at (1,1)")
+          and not bc.builder_wonder_miss("Error: IMPROVEMENT_NOT_FOUND|IMPROVEMENT_FOO not in game database")
+          and not bc.builder_wonder_miss(None))
+    uad = ua.description
+    check("unit_action lists rush_wonder and describes it", "remove_heresy, rush_wonder (these seven: see Also: below)" in uad
+          and "Also: rush_wonder = a Builder spends one of its charges" in uad, uad[:900])
 
     # 22. Obsolete policies: not listed, and set_policies refuses them, naming the replacement.
     lua = lq.build_policies_query()

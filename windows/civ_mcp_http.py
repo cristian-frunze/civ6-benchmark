@@ -826,13 +826,31 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     async def _production_now(game, city_id, item_name) -> str | None:
         try:
-            lines = await game.conn.execute_read(_lq.build_verify_production(city_id, item_name))
+            lines = await game.conn.execute_read(bc.verify_production_lua(city_id, item_name))
         except Exception:
             return None
         return next((l.split("|", 1)[1] for l in lines if l.startswith("CONFIRMED|")), None)
 
+    # A wonder the city already placed is resumed with no tile, as the game's production panel does
+    # (bench_compat.placed_wonder_lua has why); civ6-mcp's own order asked for a tile, and with one it did not take.
+    async def _set_production_or_resume(self, city_id, item_type, item_name, target_x=None, target_y=None):
+        if str(item_type or "").upper() == "BUILDING":
+            try:
+                placed = bc.parse_placed(await self.conn.execute_write(bc.placed_wonder_lua(city_id, item_name)))
+            except Exception:
+                placed = None
+            if placed is not None:
+                sent = await self.conn.execute_write(bc.resume_wonder_lua(city_id, item_name))
+                for _ in range(3):  # the core can take a moment to show the order
+                    if await _production_now(self, city_id, item_name):
+                        return f"PRODUCING|{item_name}|{bc.resume_turns(sent)} turns" + bc.resumed_note(placed)
+                    await asyncio.sleep(0.5)
+                return (f"Error: SILENT_FAILURE|{item_name} appeared to set but the game engine did not persist it "
+                        "(it was sent with no tile, since this city placed it before). Retry the same call.")
+        return await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
+
     async def _set_production_settled(self, city_id, item_type, item_name, target_x=None, target_y=None):
-        result = await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
+        result = await _set_production_or_resume(self, city_id, item_type, item_name, target_x, target_y)
         if not result.startswith("Error: SILENT_FAILURE|"):
             return result
         log = logging.getLogger("civ_mcp_http")
@@ -857,7 +875,7 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                 log.info("Production order %s landed %.1f s late (popups closed: %s)", item_name, waited, closed or "none")
                 why = f"after open popups were closed ({closed})" if closed else f"{waited:.1f} s late"
                 return f"PRODUCING|{item_name}|{turns} (the game applied the order {why})"
-        retry = await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
+        retry = await _set_production_or_resume(self, city_id, item_type, item_name, target_x, target_y)
         log.info("Production order %s still unset %.1f s later (popups closed: %s); sent again: %s",
                  item_name, waited, closed or "none", retry[:160])
         return retry
@@ -1980,6 +1998,82 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool.fn = _religious_orders(_tool.fn)
     _tool.description += bc.RELIGIOUS_ORDERS_NOTE
+
+    # unit_action had no order for China's wonder rush (bench_compat.WONDER_RUSH_NOTE has why). rush_wonder sends the
+    # game's UNITCOMMAND_WONDER_PRODUCTION and reads the wonder's production and the Builder's charges after it, from
+    # the game core first. A Builder's activate or improve that fails on a wonder names rush_wonder.
+    def _rushes_wonders(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            action = str(kwargs.get("action") or "").lower()
+            if action != "rush_wonder":
+                out = await fn(*args, **kwargs)
+                return out + bc.RUSH_HINT if action in ("activate", "improve") and bc.builder_wonder_miss(out) else out
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+
+            async def after_read(conn, before):
+                lua = bc.wonder_after_lua(uid % 65536, before["city_id"], before["wonder"])
+                for read in (conn.execute_read, conn.execute_write):  # core first; the UI state as a fallback
+                    try:
+                        after = bc.parse_wonder_after(await read(lua))
+                    except Exception:
+                        after = None
+                    if after is not None and (after["complete"] or after["progress"] >= 0):
+                        return after
+                return None
+
+            async def run():
+                conn = srv._get_game(ctx).conn
+                lines = await conn.execute_write(bc.wonder_rush_lua(uid % 65536), timeout=10.0)
+                before = bc.parse_wonder_facts(lines)
+                err = next((ln for ln in lines if ln.startswith("ERR:CANNOT_RUSH_WONDER|")), None)
+                if err:
+                    return bc.wonder_rush_refused(before, err.split("|", 1)[1])
+                if not any(ln.startswith("OK:WONDER_RUSH_SENT") for ln in lines):
+                    return _gsm._action_result(lines)
+                if before is None or before["city_id"] < 0:
+                    return "WONDER_RUSH_SENT|The game took the order. Check get_cities for the wonder's production."
+                after = None
+                for _ in range(3):  # the order plays out a frame or more later
+                    await asyncio.sleep(1.0)
+                    after = await after_read(conn, before)
+                    if after and (after["complete"] or after["progress"] != before["progress"]
+                                  or after["charges"] != before["charges"]):
+                        break
+                return bc.wonder_rush_report(before, after)
+
+            return await srv._logged(ctx, "unit_action", {"unit_id": uid, "action": action}, run)
+
+        return wrapper
+
+    _tool.fn = _rushes_wonders(_tool.fn)
+    _tool.description += bc.WONDER_RUSH_NOTE
+
+    # The wonder advisor checks each tile with the game, and a wonder the city already placed passes on none of them:
+    # in game 35 it answered "No valid placement tiles" for the Great Library Xi'an had placed. It now says where the
+    # wonder stands and that set_city_production resumes it there (bench_compat.placed_wonder_lua has why).
+    def _names_placed_wonder(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            city_id, name = kwargs.get("city_id"), str(kwargs.get("wonder_name") or "")
+            try:
+                placed = bc.parse_placed(await srv._get_game(ctx).conn.execute_write(bc.placed_wonder_lua(int(city_id), name)))
+            except Exception:
+                placed = None
+            if placed is None:
+                return await fn(*args, **kwargs)
+
+            async def run():
+                return bc.wonder_placed_report(name, placed)
+
+            return await srv._logged(ctx, "get_wonder_advisor", {"city_id": city_id, "wonder_name": name}, run)
+
+        return wrapper
+
+    _wa = mcp._tool_manager.get_tool("get_wonder_advisor")
+    _wa.fn = _names_placed_wonder(_wa.fn)
     _listed = bc.action_list(_tool.description)  # bench_compat.ADDED_ACTIONS has why
     if _listed is None:
         logging.getLogger("civ_mcp_http").warning("civ6-mcp's unit_action list of actions changed: added orders not named")
