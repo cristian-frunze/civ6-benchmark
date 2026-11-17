@@ -615,13 +615,18 @@ def settle_owned_lua(original):
 # tile: replayed from turn 58's save, a War-Cart's attack on Salvador took its garrison from 200 to 156. With no unit on
 # the tile, the attack now takes an enemy city centre or Encampment there (a district with garrison hit points) as its
 # target and goes on as civ6-mcp's attack does, with the district's hit points as the target's.
+# A city with units in it was the other way round: civ6-mcp named a unit inside as the target, with that unit's combat
+# estimate, while the game hit the city. In game 37 (turns 169 and 170) attacks on Sparta read "target:UNIT_MACHINE_GUN
+# ... est damage dealt:~33", then "vs UNIT_GREAT_MUSICIAN ... -> LIKELY KILL" and "enemy HP:100 -> 100", while the walls
+# went from 349 to 235. An enemy city centre or Encampment with garrison hit points is now the target whatever units
+# are in it, and the report drops the unit's estimate (city_attack_report).
 _NO_ENEMY_ANCHOR = 'if enemy == nil then\n    print("ERR:NO_ENEMY|No hostile unit at'
 
 
 def _district_target_lua(x: int, y: int) -> str:
     x, y = int(x), int(y)
     return (
-        "if enemy == nil then\n"
+        "do\n"
         f"    local plot = Map.GetPlot({x}, {y})\n"
         "    local owner = plot and plot:GetOwner() or -1\n"
         "    if owner >= 0 and owner ~= me and Players[owner] and plot:GetDistrictType() >= 0 then\n"
@@ -638,7 +643,7 @@ def _district_target_lua(x: int, y: int) -> str:
         "            }\n"
         f"            local c = Cities.GetPlotPurchaseCity({x}, {y})\n"
         "            enemyName = di.DistrictType .. (c and (' of ' .. Locale.Lookup(c:GetName())) or '')\n"
-        "        elseif di then\n"
+        "        elseif di and enemy == nil then\n"
         f"            print('ERR:NO_ENEMY|No unit at ({x},{y}), and its ' .. di.DistrictType .. ' has no defences to attack '\n"
         "              .. '(only a city centre or an Encampment has). A military unit on that tile can pillage it '\n"
         "              .. '(unit_action pillage).') print('---END---') return\n"
@@ -649,7 +654,7 @@ def _district_target_lua(x: int, y: int) -> str:
 
 
 def attack_lua(original):
-    """civ6-mcp's attack builder, which also takes an enemy city centre or Encampment with no unit on it."""
+    """civ6-mcp's attack builder, with an enemy city centre or Encampment on the tile as the target (units in it or not)."""
     def build(unit_index: int, target_x: int, target_y: int) -> str:
         lua = original(unit_index, target_x, target_y)
         if lua.count(_NO_ENEMY_ANCHOR) != 1:
@@ -1064,7 +1069,7 @@ RELIGIOUS_ORDERS_NOTE = (
 # add a belief (turn 85), wrote "'evangelize' isn't among the unit_action options and I'm not sure how to trigger it",
 # and never used the order; Eastern Orthodoxy kept its two founding beliefs, as in game 29. The list names them now.
 ADDED_ACTIONS = ("pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy, rush_wonder, "
-                 "designate_park")
+                 "designate_park, rebase")
 _ACTION_LIST_RE = re.compile(r"(action: One of: [^\n]*\bspread_religion)")
 
 
@@ -1072,7 +1077,7 @@ def action_list(desc: str) -> str | None:
     """unit_action's description with the harness's orders added to its list of actions, or None when it changed."""
     if len(_ACTION_LIST_RE.findall(desc)) != 1:
         return None
-    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these eight: see Also: below)", desc)
+    return _ACTION_LIST_RE.sub(lambda m: m[1] + ", " + ADDED_ACTIONS + " (these nine: see Also: below)", desc)
 
 
 _BELIEF_STATE_LUA = (
@@ -1659,6 +1664,144 @@ def improve_appeal_note(lines, improvement: str) -> str:
     return ""
 
 
+# Aircraft. civ6-mcp has an air attack but no order to move an aircraft: a move came back "CANNOT_MOVE|Unit cannot move
+# (invalid state)", since aircraft only rebase, to a city, Aerodrome or carrier in range. The game's order is the unit
+# operation REBASE with the target tile (WorldInput.lua: CanStartOperation, then RequestOperation), and the bases in
+# range are UnitManager.GetOperationTargets(unit, REBASE)[PLOTS]. In game 37 (turn 142) Opus tried to move an
+# aircraft twice, got that error both times, and deleted it.
+REBASE_NOTE = (
+    "\n\nAlso: rebase = move an aircraft to another base (a city, an Aerodrome or a carrier in its range): "
+    "unit_action(unit_id=<the aircraft>, action='rebase', target_x=..., target_y=...). Aircraft cannot use move, and "
+    "a move sent to one is sent as a rebase. When the game refuses, the result lists the bases in range, nearest to "
+    "the tile you asked for first."
+)
+
+
+def rebase_lua(unit_index: int, x: int, y: int) -> str:
+    """RB|x|y|unit type|moves, then for an aircraft up to 8 RT|x|y|distance from the target|city or district bases
+    nearest the target first and RTN|count (-1 when unreadable), then OK:REBASE_SENT or ERR:CANNOT_REBASE|reasons
+    (ERR:NOT_AIR|type for any other unit)."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = Players[me]:GetUnits():FindID({int(unit_index)}) "
+        "if unit == nil then print('ERR:UNIT_NOT_FOUND') print('---END---') return end "
+        "local ut = GameInfo.Units[unit:GetType()] local ux, uy = unit:GetX(), unit:GetY() "
+        "local mv = -1 pcall(function() mv = unit:GetMovesRemaining() or -1 end) "
+        "print('RB|' .. ux .. '|' .. uy .. '|' .. ut.UnitType .. '|' .. tostring(mv)) "
+        "if ut.Domain ~= 'DOMAIN_AIR' then print('ERR:NOT_AIR|' .. ut.UnitType) print('---END---') return end "
+        f"local tx, ty = {int(x)}, {int(y)} local bases, n = {{}}, -1 "
+        "pcall(function() local r = UnitManager.GetOperationTargets(unit, UnitOperationTypes.REBASE) "
+        "  local plots = r and r[UnitOperationResults.PLOTS] if plots == nil then return end n = 0 "
+        "  for _, i in ipairs(plots) do local p = Map.GetPlotByIndex(i) if p ~= nil then n = n + 1 "
+        "    local what = '' pcall(function() local c = Cities.GetCityInPlot(p:GetX(), p:GetY()) "
+        "      if c ~= nil and c:GetX() == p:GetX() and c:GetY() == p:GetY() then what = Locale.Lookup(c:GetName()) end end) "
+        "    if what == '' then pcall(function() local d = p:GetDistrictType() if d >= 0 then what = GameInfo.Districts[d].DistrictType end end) end "
+        "    bases[#bases + 1] = {Map.GetPlotDistance(tx, ty, p:GetX(), p:GetY()), p:GetX(), p:GetY(), what} end end end) "
+        "table.sort(bases, function(a, b) return a[1] < b[1] end) "
+        "for k = 1, math.min(8, #bases) do local b = bases[k] print('RT|' .. b[2] .. '|' .. b[3] .. '|' .. b[1] .. '|' .. b[4]) end "
+        "print('RTN|' .. n) "
+        "local params = {} params[UnitOperationTypes.PARAM_X] = tx params[UnitOperationTypes.PARAM_Y] = ty "
+        "local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, UnitOperationTypes.REBASE, nil, params, true) end) "
+        "if ok and can then UnitManager.RequestOperation(unit, UnitOperationTypes.REBASE, params) print('OK:REBASE_SENT') print('---END---') return end "
+        + _WHY_LUA +
+        "print('ERR:CANNOT_REBASE|' .. (#why > 0 and table.concat(why, '; ') or 'it gave no reason')) "
+        "print('---END---')"
+    )
+
+
+def unit_at_lua(unit_index: int) -> str:
+    """UA|x|y, or UA|gone."""
+    return (f"local u = Players[Game.GetLocalPlayer()]:GetUnits():FindID({int(unit_index)}) "
+            "if u == nil then print('UA|gone') else print('UA|' .. u:GetX() .. '|' .. u:GetY()) end print('---END---')")
+
+
+def parse_rebase(lines) -> dict:
+    d = {"facts": None, "bases": [], "total": None, "status": None, "why": ""}
+    for ln in lines or []:
+        p = ln.split("|")
+        try:
+            if p[0] == "RB" and len(p) >= 5:
+                d["facts"] = {"x": int(p[1]), "y": int(p[2]), "unit": p[3], "moves": float(p[4])}
+            elif p[0] == "RT" and len(p) >= 5:
+                d["bases"].append((int(p[1]), int(p[2]), int(p[3]), "|".join(p[4:])))
+            elif p[0] == "RTN" and len(p) >= 2:
+                d["total"] = int(p[1])
+        except ValueError:
+            continue
+        if ln.startswith("OK:REBASE_SENT"):
+            d["status"] = "sent"
+        elif ln.startswith("ERR:"):
+            d["status"], _, d["why"] = ln[4:].partition("|")
+    return d
+
+
+def parse_unit_at(lines) -> tuple[int, int] | str | None:
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] == "UA" and len(p) >= 2:
+            if p[1] == "gone":
+                return "gone"
+            try:
+                return int(p[1]), int(p[2])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def rebase_refused(d: dict, x: int, y: int) -> str:
+    """Why the game refused a rebase, with the bases in range nearest the tile asked for."""
+    if d["status"] == "NOT_AIR":
+        return f"Error: NOT_AN_AIRCRAFT|rebase is for aircraft; this unit is {d['why']}. Use action='move'."
+    if d["status"] != "CANNOT_REBASE" or d["facts"] is None:
+        return f"Error: {d['status']}|{d['why']}"
+    f = d["facts"]
+    here = f"{f['unit']} is at ({f['x']},{f['y']})" + (", with no moves left this turn" if f["moves"] == 0 else "")
+    total = d["total"]
+    if total is None or total < 0:
+        bases = "The game's list of bases in range could not be read."
+    elif total == 0:
+        bases = "It has no base in range now: a base is a city, an Aerodrome or a carrier within its range."
+    else:
+        def one(b):
+            bx, by, dist, what = b
+            return f"({bx},{by})" + (f" {what}" if what else "") + (" (the tile asked for)" if dist == 0 else f", {dist} from ({x},{y})")
+        more = f" ({total - len(d['bases'])} more)" if total > len(d["bases"]) else ""
+        bases = f"Bases in range, nearest to ({x},{y}) first{more}: " + "; ".join(one(b) for b in d["bases"]) + "."
+    return f"Error: CANNOT_REBASE|The game refused: {d['why']}. {here}. {bases}"
+
+
+def rebase_report(d: dict, x: int, y: int, at) -> str:
+    """The result of a rebase the game took, from the unit's position read back."""
+    f = d["facts"]
+    if at == (x, y):
+        return f"REBASED|{f['unit']} from ({f['x']},{f['y']}) to ({x},{y})."
+    if at == "gone":
+        return f"REBASE_SENT|The game took the order, but {f['unit']} is gone. Check get_units."
+    return (f"REBASE_SENT|The game took the order for ({x},{y}), but {f['unit']} still shows at "
+            f"({f['x']},{f['y']}). Check get_units next turn before you send it again.")
+
+
+def aircraft_move_miss(out) -> bool:
+    """civ6-mcp's refusal of a move for an aircraft (and any unit in that state): the move is then tried as a rebase."""
+    return isinstance(out, str) and out.startswith("Error: CANNOT_MOVE|Unit cannot move (invalid state)")
+
+
+# A Battering Ram could not join a combat unit. civ6-mcp's move checks the target tile before it sends the order, and
+# splits units into civilian and not: a support unit (Battering Ram, Siege Tower, Medic) or an aircraft in a city then
+# counts as the same class as a land combat unit, and the move is refused with STACKING_CONFLICT. The game allows one
+# unit of each formation class on a tile (land combat, support, civilian, naval, air). In game 37 Opus reported it on
+# turns 107 and 118 and moved its rams around the tile. The rewrite compares the formation class itself.
+_STACK_SELF = 'local isCivilian = (unitInfo and unitInfo.FormationClass == "FORMATION_CLASS_CIVILIAN")'
+_STACK_OTHER = 'local otherCivilian = (otherInfo and otherInfo.FormationClass == "FORMATION_CLASS_CIVILIAN")'
+
+
+def move_stacking_by_class(lua: str) -> str | None:
+    """civ6-mcp's move Lua with its stacking check by exact formation class (see above), or None when its Lua changed."""
+    if lua.count(_STACK_SELF) != 1 or lua.count(_STACK_OTHER) != 1 or "isCivilian == otherCivilian" not in lua:
+        return None
+    return (lua.replace(_STACK_SELF, 'local isCivilian = (unitInfo and unitInfo.FormationClass) or "?"', 1)
+            .replace(_STACK_OTHER, 'local otherCivilian = (otherInfo and otherInfo.FormationClass) or "?"', 1))
+
+
 CITY_ATTACK_NOTE = (
     "\n\nAlso: attack takes an enemy city centre or Encampment with no unit in it as its target too (melee or "
     "ranged, at war with its owner). A city falls to a melee unit's attack once its garrison is at 0 (walls take the "
@@ -1669,11 +1812,14 @@ CITY_ATTACK_NOTE = (
 # civ6-mcp's report after an attack counts the units left on the target tile, and with none it says the target was
 # killed: a city with no unit read "damage dealt:200 (killed) ... Target eliminated" after one hit.
 _KILLED_RE = re.compile(r"\|damage dealt:\d+ \(killed\)")
+_UNIT_EST_RE = re.compile(r"^Combat Estimate \([^)]*\):\n(?:  [^\n]*\n)*", re.M)
+_EST_RE = re.compile(r"\|est damage dealt:~\d+")
 
 
 def city_attack_report(out: str, def_line: str) -> str:
-    """Replace civ6-mcp's "killed" for a district target with what the district shows after the attack."""
-    out = _KILLED_RE.sub("", out)
+    """Replace civ6-mcp's "killed" for a district target with what the district shows after the attack, and drop the
+    combat estimate it made against a unit in the city (_district_target_lua has why)."""
+    out = _EST_RE.sub("", _UNIT_EST_RE.sub("", _KILLED_RE.sub("", out)))
     p = def_line.split("|")
     if len(p) >= 3 and p[2] == "true":
         now = "you hold the tile now: the city is yours (answer the keep or raze choice with city_action if asked)."
@@ -1688,6 +1834,11 @@ def city_attack_report(out: str, def_line: str) -> str:
         try:
             (gh, gm), (wh, wm) = (map(int, p[3].split("/")), map(int, p[4].split("/")))
             out = re.sub(r"enemy HP:(\d+) -> \d+/\d+", lambda m: f"enemy HP:{m[1]} -> {gh + wh}/{gm + wm}", out)
+            # civ6-mcp's damage takes a unit in the city for the city (game 37's Sparta: 594 -> "damage dealt:494",
+            # where garrison and walls had lost 46)
+            pre = re.search(r"\|pre_hp:(\d+)/\d+", out)
+            out = re.sub(r"\|damage dealt:\d+", (f"|damage dealt:{int(pre[1]) - gh - wh}"
+                                                  if pre and int(pre[1]) >= gh + wh else ""), out)
         except ValueError:
             pass
     return re.sub(r"\n  Post-combat: [^\n]*", "", out) + "\n  Post-combat: " + now
@@ -1949,6 +2100,28 @@ def accept_not_taken(action: str, chk: dict | None) -> str:
     what = "embassy" if a == "RESIDENT_EMBASSY" else "delegation"
     return (f"NOT_ACCEPTED|{name} did not accept your {what}: the game does not show it after the request. "
             "get_diplomacy shows each civ's attitude.")
+
+
+# Alliance proposals. civ6-mcp's form_alliance sends the deal and reads the AI's answer in the same Lua call, before
+# the AI has answered, so it reports REJECTED (or "status unclear") for an alliance the AI accepts a moment later. In
+# game 38 all four alliance proposals came back that way (Sumeria on turns 121 and 142, Rome on 126 and 148) and each
+# became an alliance; replayed on turn 148's save, the game showed the alliance with Rome 4 s after "REJECTED". The
+# state is now read again after the answer, as for friendships (accept_result).
+def alliance_result(out: str, chk: dict | None) -> str:
+    """civ6-mcp's REJECTED or FAILED for an alliance, settled by the state read after it: "" to read again."""
+    if chk is None or not str(out).startswith(("REJECTED|", "FAILED|")) or not chk.get("state"):
+        return out
+    if chk["state"] == "DIPLO_STATE_ALLIED":
+        return f"OK:ACCEPTED|Alliance formed with {chk['name']} (the game's state, read after the proposal)."
+    return ""
+
+
+def alliance_not_formed(chk: dict | None) -> str:
+    """The answer when the alliance still does not show after the second read."""
+    name = chk["name"] if chk else "that civ"
+    plain = (chk or {}).get("state", "").replace("DIPLO_STATE_", "").replace("_", " ").lower() or "unknown"
+    return (f"REJECTED|{name} did not accept the alliance: 3 s after the proposal the game shows your relation as "
+            f"{plain}. get_diplomacy shows each civ's attitude.")
 
 
 def parse_war_state(lines) -> dict | None:

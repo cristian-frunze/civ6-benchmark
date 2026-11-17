@@ -945,6 +945,14 @@ async def main():
           and "bench_n == 0" not in wl
           and wl.count("for _, pIdx in ipairs(plotIndices) do") == 2, wl[-2500:])
     check("wonder advisor: changed civ6-mcp Lua is left alone", bc.wonder_tiles_checked("print('x')") is None)
+    # 16d4b. The move's stacking check compares the formation class (game 37: a Battering Ram could not join a Legion).
+    ml = lq.build_move_unit(65555, 40, 31)
+    check("move: stacking checked by exact formation class, so a support unit or aircraft may share a combat unit's tile",
+          'local isCivilian = (unitInfo and unitInfo.FormationClass) or "?"' in ml
+          and 'local otherCivilian = (otherInfo and otherInfo.FormationClass) or "?"' in ml
+          and '== "FORMATION_CLASS_CIVILIAN"' not in ml and "if isCivilian == otherCivilian then" in ml
+          and "ERR:STACKING_CONFLICT" in ml and "UnitOperationTypes.MOVE_TO, params)" in ml, ml[:1500])
+    check("move: changed civ6-mcp Lua is left alone", bc.move_stacking_by_class("print('x')") is None)
     ua = mcp._tool_manager.get_tool("unit_action").description
     check("unit_action's list of actions names the harness's orders (game 31: evangelize was never found)",
           "teleport, spread_religion, pillage, pillage_route, excavate, evangelize, launch_inquisition, remove_heresy" in ua
@@ -1347,6 +1355,49 @@ async def main():
     check("friendship through the tool: refused after two reads", g7b.conn.reads == 2
           and r7b.startswith("NOT_ACCEPTED|Brazil did not accept"), r7b)
 
+    # 16o4. form_alliance answered REJECTED while the alliance formed seconds later (game 38: Rome on turns 126 and 148,
+    # Sumeria on 142; the turn-148 replay showed DIPLO_STATE_ALLIED 4 s after the REJECTED).
+    RJ = "REJECTED|Rome rejected the MILITARY alliance proposal"
+    al = lambda st: {"name": "Rome", "state": st, "delegation": "true", "embassy": "true"}
+    r = bcx.alliance_result(RJ, al("DIPLO_STATE_ALLIED"))
+    check("alliance that took: accepted", r.startswith("OK:ACCEPTED|Alliance formed with Rome"), r)
+    check("alliance not yet: read again", bcx.alliance_result(RJ, al("DIPLO_STATE_DECLARED_FRIEND")) == "")
+    check("alliance: unread state or other answers kept", bcx.alliance_result(RJ, None) == RJ
+          and bcx.alliance_result(RJ, al("")) == RJ
+          and bcx.alliance_result("OK:Alliance formed", al("DIPLO_STATE_FRIENDLY")) == "OK:Alliance formed")
+    r = bcx.alliance_not_formed(al("DIPLO_STATE_DECLARED_FRIEND"))
+    check("alliance refused: the relation named", r.startswith("REJECTED|Rome did not accept the alliance")
+          and "declared friend" in r, r)
+    check("alliance refused, nothing read", "that civ" in bcx.alliance_not_formed(None)
+          and "unknown" in bcx.alliance_not_formed(None))
+
+    class AllyConn:
+        def __init__(self, states): self.states, self.reads = list(states), 0
+        async def execute_write(self, lua, timeout=None):
+            self.reads += 1
+            return [f"ACCEPTCHK|Rome|{self.states.pop(0)}|true|true", "---END---"]
+    _vendor_ally = ns["_vendor_form_alliance"]
+    async def rejected_ally(self, other, kind): return RJ
+    async def formed_ally(self, other, kind): return "OK:Alliance formed with Rome"
+    ns["asyncio"].sleep = no_sleep_a
+    try:
+        ns["_vendor_form_alliance"] = rejected_ally
+        g8a = types.SimpleNamespace(conn=AllyConn(["DIPLO_STATE_DECLARED_FRIEND", "DIPLO_STATE_ALLIED"]))
+        r8a = await GameState.form_alliance(g8a, 1, "MILITARY")
+        g8b = types.SimpleNamespace(conn=AllyConn(["DIPLO_STATE_DECLARED_FRIEND", "DIPLO_STATE_DECLARED_FRIEND"]))
+        r8b = await GameState.form_alliance(g8b, 1, "MILITARY")
+        ns["_vendor_form_alliance"] = formed_ally
+        g8c = types.SimpleNamespace(conn=AllyConn([]))
+        r8c = await GameState.form_alliance(g8c, 1, "MILITARY")
+    finally:
+        ns["_vendor_form_alliance"], ns["asyncio"].sleep = _vendor_ally, _sleep
+    check("alliance through the tool: formed on the second read", g8a.conn.reads == 2
+          and r8a.startswith("OK:ACCEPTED|Alliance formed with Rome"), r8a)
+    check("alliance through the tool: refused after two reads", g8b.conn.reads == 2
+          and r8b.startswith("REJECTED|Rome did not accept"), r8b)
+    check("alliance through the tool: an accepted answer is not read again", g8c.conn.reads == 0
+          and r8c == "OK:Alliance formed with Rome", r8c)
+
     # 16p. set_research / set_civic ask the game's own CanResearch / CanProgress before the request (game 25: Economics
     # accepted on turn 115 before its prerequisites, and the game asked for a tech again the next turn).
     for _b, _n, _can in ((lq.build_set_research, "TECH_ECONOMICS", "GetTechs():CanResearch(idx)"),
@@ -1562,6 +1613,28 @@ async def main():
           and lua.index("DISTRICT_GARRISON") < lua.index("No hostile unit or city at (42,35)")
           and lua.index("No hostile unit or city at") < lua.index("IsAtWarWith(enemyOwner)"))
     check("attack: an undefended district says pillage", "has no defences to attack" in lua and "unit_action pillage" in lua)
+    # Game 37 (turns 169 and 170): Sparta with a Machine Gun, then a Great Musician, in it; the game hit the walls.
+    check("attack: a defended city is the target with units in it too", "do\n    local plot = Map.GetPlot(42, 35)" in lua
+          and "elseif di and enemy == nil then" in lua and "if enemy == nil then\n    local plot" not in lua
+          and lua.index("for other in tgtUnits:Units() do") < lua.index("DISTRICT_GARRISON"), lua[:3000])
+    rep = bc.city_attack_report(
+        "Combat Estimate (Melee):\n  UNIT_ROCKET_ARTILLERY (CS:77, HP:100) vs UNIT_MACHINE_GUN (CS:73, HP:100)\n"
+        "  Modifiers: hills +3\n  Est damage to defender: ~33\n  Est damage to attacker: ~18\n"
+        "RANGE_ATTACK|target:DISTRICT_CITY_CENTER of Sparta at (57,14)|pre_hp:600/600|your HP:100|range:3 dist:3"
+        "|est damage dealt:~33|city walls: 349/400, garrison: 199/200\n  Post-combat: ~567/600 (estimate — verify with "
+        "get_units)", "DEF|5|false|199/200|349/400")
+    check("city attack report: no combat estimate against a unit inside", rep.startswith("RANGE_ATTACK|target:DISTRICT_")
+          and "MACHINE_GUN" not in rep and "est damage" not in rep and "Combat Estimate" not in rep
+          and "garrison 199/200, walls 349/400" in rep, rep)
+    rep = bc.city_attack_report(  # live, game 37's turn-169 save after the fix: civ6-mcp's damage counted the unit
+        "RANGE_ATTACK|target:DISTRICT_CITY_CENTER of Sparta at (57,14)|pre_hp:594/600|your HP:100|range:3 dist:3|"
+        "damage dealt:494|city walls: 349/400, garrison: 199/200\n  Post-combat: Target eliminated",
+        "DEF|2|false|199/200|349/400")
+    check("city attack report: damage from the city's hit points", "|damage dealt:46|" in rep and "494" not in rep
+          and "enemy" not in rep.split("|damage")[0][-30:], rep)
+    sl0 = ns["_attack_state_lua"](13, 57, 14)
+    check("move-and-attack: a defended city read before the units in it", sl0.index("GetDistricts():Members()")
+          < sl0.index("Map.GetUnitsAt(57, 14)") and "if us and not any then" in sl0, sl0)
     check("attack: unchanged when civ6-mcp's text moves", bc.attack_lua(lambda u, x, y: "print('x')")(1, 2, 3) == "print('x')")
     rep = bc.city_attack_report("MELEE_ATTACK|target:DISTRICT_CITY_CENTER of Salvador at (42,35)|enemy HP:200 -> 200/200|"
                                 "your HP:100 -> 100 CS:30|damage dealt:200 (killed)\n  Post-combat: Target eliminated",
@@ -1600,7 +1673,7 @@ async def main():
     rep = ns["_attack_report"](before, ((42, 35, 0, 70, 0), None), 42, 35, 1.0)
     check("move-and-attack on a city: taken", "enemy HP:200 -> taken" in rep and "advanced into (42,35)" in rep, rep)
     sl = ns["_attack_state_lua"](13, 42, 35)
-    check("move-and-attack reads a city with no unit", "if not any and ow >= 0" in sl and "'|-1'" in sl)
+    check("move-and-attack reads a city with no unit", "if ow >= 0 and ow ~= me" in sl and "'|-1') any = true" in sl)
 
     # 16f. A dropped end-turn request is sent again (game 19, turn 86, replayed: the turn stayed open, nothing blocked
     #      it, and a second request ended it at once).
@@ -1924,7 +1997,8 @@ async def main():
           and not bc.builder_wonder_miss(None))
     uad = ua.description
     check("unit_action lists rush_wonder and designate_park and describes them",
-          "remove_heresy, rush_wonder, designate_park (these eight: see Also: below)" in uad
+          "remove_heresy, rush_wonder, designate_park, rebase (these nine: see Also: below)" in uad
+          and "Also: rebase = move an aircraft to another base" in uad
           and "Also: rush_wonder = a Builder spends one of its charges" in uad
           and "Also: designate_park = a Naturalist creates a National Park" in uad, uad[:900])
 
@@ -2008,6 +2082,67 @@ async def main():
           "what blocks it." and bc.appeal_label(-1) == "Average" and bc.appeal_label(-4) == "Disgusting")
     check("no park for other activates", not bc.naturalist_miss("Error: CANNOT_ACTIVATE|Galileo (UNIT_GREAT_SCIENTIST) at (1,1)")
           and not bc.naturalist_miss(None))
+
+    # Aircraft could not move (game 37, turn 142: "CANNOT_MOVE|Unit cannot move (invalid state)" twice, then deleted).
+    # rebase sends the game's REBASE operation with the tile and reads the aircraft's tile back; a refused move of an
+    # aircraft is sent as a rebase.
+    class AirConn:
+        def __init__(self, unit="UNIT_BOMBER", refuse=None, total=3, at="UA|45|24"):
+            self.unit, self.refuse, self.total, self.at, self.writes = unit, refuse, total, at, []
+        async def execute_write(self, lua, timeout=None):
+            self.writes.append(lua)
+            if "UnitOperationTypes.REBASE" in lua:
+                out = [f"RB|32|39|{self.unit}|1"]
+                if self.unit != "UNIT_BOMBER":
+                    return out + [f"ERR:NOT_AIR|{self.unit}", lq.SENTINEL]
+                out += ["RT|45|24|0|Rio de Janeiro", "RT|46|26|2|DISTRICT_AERODROME"][:self.total] + [f"RTN|{self.total}"]
+                return out + ([f"ERR:CANNOT_REBASE|{self.refuse}"] if self.refuse else ["OK:REBASE_SENT"]) + [lq.SENTINEL]
+            if "print('UA|'" in lua:
+                return [self.at, lq.SENTINEL]
+            raise AssertionError(lua[:300])
+    GAME = types.SimpleNamespace(conn=AirConn())
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=45, target_y=24)
+    check("rebase: the aircraft's new tile read back", out == "REBASED|UNIT_BOMBER from (32,39) to (45,24).", out)
+    rl = GAME.conn.writes[0]
+    check("rebase Lua: the game's operation with the tile, checked first; the bases from GetOperationTargets",
+          all(x in rl for x in ("FindID(19)", "ut.Domain ~= 'DOMAIN_AIR'", "UnitManager.GetOperationTargets(unit, UnitOperationTypes.REBASE)",
+                                "UnitOperationResults.PLOTS", "params[UnitOperationTypes.PARAM_X] = tx",
+                                "UnitManager.CanStartOperation(unit, UnitOperationTypes.REBASE, nil, params, true)",
+                                "UnitManager.RequestOperation(unit, UnitOperationTypes.REBASE, params)", "local tx, ty = 45, 24"))
+          and rl.index("CanStartOperation") < rl.index("RequestOperation"), rl)
+    GAME = types.SimpleNamespace(conn=AirConn(refuse="Target is out of range"))
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=50, target_y=20)
+    check("rebase refused: the reason and the bases in range", out == "Error: CANNOT_REBASE|The game refused: Target is out of "
+          "range. UNIT_BOMBER is at (32,39). Bases in range, nearest to (50,20) first (1 more): (45,24) Rio de Janeiro, 0 from "
+          "(50,20); (46,26) DISTRICT_AERODROME, 2 from (50,20).".replace(", 0 from (50,20)", " (the tile asked for)"), out)
+    GAME = types.SimpleNamespace(conn=AirConn(refuse="it gave no reason", total=0))
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=50, target_y=20)
+    check("rebase with no base in range: said so", out.endswith("It has no base in range now: a base is a city, an Aerodrome or "
+          "a carrier within its range."), out)
+    GAME = types.SimpleNamespace(conn=AirConn(unit="UNIT_WARRIOR"))
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=45, target_y=24)
+    check("rebase on a land unit: refused by name", out == "Error: NOT_AN_AIRCRAFT|rebase is for aircraft; this unit is "
+          "UNIT_WARRIOR. Use action='move'.", out)
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase")
+    check("rebase with no tile: asked for one", out.startswith("Error: rebase needs target_x and target_y"), out)
+    seen_actions.clear()
+    async def plane(ctx=None, unit_id=None, action=None, target_x=None, target_y=None, **k):
+        seen_actions.append(action)
+        return "Error: CANNOT_MOVE|Unit cannot move (invalid state)" if action == "move" else "FORTIFIED"
+    GAME = types.SimpleNamespace(conn=AirConn())
+    rb = ns["_rebases_aircraft"](plane)
+    outs = [await rb(ctx=CTX, unit_id=8650771, action="move", target_x=45, target_y=24),
+            await rb(ctx=CTX, unit_id=8650771, action="fortify")]
+    check("an aircraft's move is sent as a rebase; other actions pass through", outs[0] == "Aircraft move by rebasing "
+          "(action='rebase'). REBASED|UNIT_BOMBER from (32,39) to (45,24)." and outs[1] == "FORTIFIED"
+          and seen_actions == ["move", "fortify"], outs)
+    GAME = types.SimpleNamespace(conn=AirConn(unit="UNIT_WARRIOR"))
+    out = await rb(ctx=CTX, unit_id=8650771, action="move", target_x=45, target_y=24)
+    check("a land unit's refused move keeps civ6-mcp's refusal", out == "Error: CANNOT_MOVE|Unit cannot move (invalid state)", out)
+    GAME = types.SimpleNamespace(conn=AirConn(at="UA|32|39"))
+    out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=45, target_y=24)
+    check("rebase taken but the aircraft still there: said so", out.startswith("REBASE_SENT|The game took the order for (45,24), "
+          "but UNIT_BOMBER still shows at (32,39)."), out)
     GAME = saved
 
     # 22. Obsolete policies: not listed, and set_policies refuses them, naming the replacement.

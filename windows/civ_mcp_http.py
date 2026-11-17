@@ -370,15 +370,11 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             f"  print('ME|' .. u:GetX() .. '|' .. u:GetY() .. '|' .. Map.GetPlotDistance(u:GetX(), u:GetY(), {int(tx)}, "
             f"{int(ty)}) .. '|' .. (u:GetMaxDamage() - u:GetDamage()) .. '|' .. u:GetMovesRemaining()) "
             "end "
-            f"local us = Map.GetUnitsAt({int(tx)}, {int(ty)}) local any = false "
-            "if us then for o in us:Units() do if o:GetOwner() ~= me then "
-            "  local e = GameInfo.Units[o:GetType()] any = true "
-            "  print('FOE|' .. (e and e.UnitType or '?') .. '|' .. (o:GetMaxDamage() - o:GetDamage()) .. '|' "
-            "    .. (e and e.Combat or 0)) "
-            "end end end "
-            # no unit: an enemy city centre or Encampment (bench_compat.attack_lua), its hit points, strength -1
+            # an enemy city centre or Encampment is the target, units in it or not (bench_compat.attack_lua): its
+            # hit points, strength -1
+            "local any = false "
             f"local pl = Map.GetPlot({int(tx)}, {int(ty)}) local ow = pl and pl:GetOwner() or -1 "
-            "if not any and ow >= 0 and ow ~= me and Players[ow] and pl:GetDistrictType() >= 0 then "
+            "if ow >= 0 and ow ~= me and Players[ow] and pl:GetDistrictType() >= 0 then "
             "  for _, d in Players[ow]:GetDistricts():Members() do "
             f"    if d:GetX() == {int(tx)} and d:GetY() == {int(ty)} then "
             "      local function hp(k) local a, m = pcall(function() return d:GetMaxDamage(k) end) "
@@ -388,11 +384,17 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
             f"        local c = Cities.GetPlotPurchaseCity({int(tx)}, {int(ty)}) "
             "        print('FOE|' .. GameInfo.Districts[d:GetType()].DistrictType .. (c and (' of ' .. "
             "          Locale.Lookup(c:GetName())) or '') .. '|' .. (hp(DefenseTypes.DISTRICT_GARRISON) "
-            "          + hp(DefenseTypes.DISTRICT_OUTER)) .. '|-1') "
+            "          + hp(DefenseTypes.DISTRICT_OUTER)) .. '|-1') any = true "
             "      end "
             "    end "
             "  end "
             "end "
+            f"local us = Map.GetUnitsAt({int(tx)}, {int(ty)}) "
+            "if us and not any then for o in us:Units() do if o:GetOwner() ~= me then "
+            "  local e = GameInfo.Units[o:GetType()] "
+            "  print('FOE|' .. (e and e.UnitType or '?') .. '|' .. (o:GetMaxDamage() - o:GetDamage()) .. '|' "
+            "    .. (e and e.Combat or 0)) "
+            "end end end "
             "print('---END---')"
         )
 
@@ -719,6 +721,27 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return bc.war_not_declared(str(action).upper(), st)
 
     _gsm.GameState.send_diplomatic_action = _send_diplomatic_action_checked
+    _vendor_form_alliance = _gsm.GameState.form_alliance
+
+    async def _form_alliance_checked(self, other_player_id, alliance_type):  # bench_compat.alliance_result has why
+        out = await _vendor_form_alliance(self, other_player_id, alliance_type)
+        if not str(out).startswith(("REJECTED|", "FAILED|")):
+            return out
+        chk = None
+        for wait in (1.0, 2.0):
+            await asyncio.sleep(wait)
+            try:
+                chk = bc.parse_accept_check(await self.conn.execute_write(bc.accept_check_lua(other_player_id),
+                                                                          timeout=10.0))
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("reading the diplomatic state failed", exc_info=True)
+                return out
+            settled = bc.alliance_result(out, chk)
+            if settled:
+                return settled
+        return bc.alliance_not_formed(chk)
+
+    _gsm.GameState.form_alliance = _form_alliance_checked
     _vendor_attack_unit = _gsm.GameState.attack_unit
 
     async def _attack_unit_districts(self, unit_index, target_x, target_y):
@@ -1367,6 +1390,18 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return wrapped
 
     _lq.build_wonder_advisor_query = _checks_wonder_tiles(_lq.build_wonder_advisor_query)
+
+    def _stacks_by_class(build):  # bench_compat.move_stacking_by_class has why
+        def wrapped(*args, **kwargs):
+            lua = build(*args, **kwargs)
+            fixed = bc.move_stacking_by_class(lua)
+            if fixed is None:
+                logging.getLogger("civ_mcp_http").warning("civ6-mcp's move Lua changed: stacking check not rewritten")
+                return lua
+            return fixed
+        return wrapped
+
+    _lq.build_move_unit = _stacks_by_class(_lq.build_move_unit)
     _original_narrate_wonder = nr.narrate_wonder_advisor
 
     def _narrate_wonder_none(placements, wonder_name):  # server looks it up at call time
@@ -2101,6 +2136,70 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _tool.fn = _makes_parks(_tool.fn)
     _tool.description += bc.PARK_NOTE
+
+    # Aircraft rebase (bench_compat.REBASE_NOTE has why): rebase sends the game's REBASE operation and reads the
+    # aircraft's tile back; on a refusal it lists the bases in range. A move that civ6-mcp refuses with "invalid
+    # state" is tried as a rebase, which is what a move means for an aircraft; any other unit keeps the refusal.
+    async def _rebase(ctx, uid, x, y):
+        conn = srv._get_game(ctx).conn
+        lines = await conn.execute_write(bc.rebase_lua(uid % 65536, x, y), timeout=10.0)
+        d = bc.parse_rebase(lines)
+        if d["status"] is None:
+            return _gsm._action_result(lines)
+        if d["status"] != "sent":
+            return bc.rebase_refused(d, x, y)
+        at = None
+        for _ in range(3):  # the order plays out a frame or more later
+            await asyncio.sleep(1.0)
+            try:
+                at = bc.parse_unit_at(await conn.execute_write(bc.unit_at_lua(uid % 65536), timeout=10.0))
+            except Exception:
+                at = None
+            if at == (x, y) or at == "gone":
+                break
+        return bc.rebase_report(d, x, y, at)
+
+    def _rebases_aircraft(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            action = str(kwargs.get("action") or "").lower()
+            if action not in ("rebase", "move"):
+                return await fn(*args, **kwargs)
+            ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+            uid = int(kwargs["unit_id"])
+            tx, ty = kwargs.get("target_x"), kwargs.get("target_y")
+            if action == "rebase":
+                if tx is None or ty is None:
+                    return "Error: rebase needs target_x and target_y (the city, Aerodrome or carrier to fly to)."
+                return await srv._logged(ctx, "unit_action", {"unit_id": uid, "action": action, "target_x": tx,
+                                                              "target_y": ty}, lambda: _rebase(ctx, uid, int(tx), int(ty)))
+            out = await fn(*args, **kwargs)
+            if not bc.aircraft_move_miss(out) or tx is None or ty is None:
+                return out
+            try:
+                d = bc.parse_rebase(await srv._get_game(ctx).conn.execute_write(bc.rebase_lua(uid % 65536, int(tx), int(ty)),
+                                                                                timeout=10.0))
+            except Exception:
+                return out
+            if d["status"] == "NOT_AIR" or d["status"] is None:
+                return out
+            if d["status"] != "sent":
+                return "Aircraft move by rebasing (action='rebase'). " + bc.rebase_refused(d, int(tx), int(ty))
+            at = None
+            for _ in range(3):
+                await asyncio.sleep(1.0)
+                try:
+                    at = bc.parse_unit_at(await srv._get_game(ctx).conn.execute_write(bc.unit_at_lua(uid % 65536), timeout=10.0))
+                except Exception:
+                    at = None
+                if at == (int(tx), int(ty)) or at == "gone":
+                    break
+            return "Aircraft move by rebasing (action='rebase'). " + bc.rebase_report(d, int(tx), int(ty), at)
+
+        return wrapper
+
+    _tool.fn = _rebases_aircraft(_tool.fn)
+    _tool.description += bc.REBASE_NOTE
 
     # The wonder advisor checks each tile with the game, and a wonder the city already placed passes on none of them:
     # in game 35 it answered "No valid placement tiles" for the Great Library Xi'an had placed. It now says where the

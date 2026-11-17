@@ -69,10 +69,10 @@ All five won. Each civ had its own start and rivals, so the games compare loosel
 
 From the run log and the agent's tool results and tooling notes:
 
-- **War declarations that did not take.** On turn 90 two surprise-war declarations on Brazil came back `WAR_NOT_DECLARED` (the game still showed peace a few seconds later), a formal war was refused for lack of a denouncement, and a third surprise war took. The log does not show why the first two did not; it is on the list of open harness items.
-- **No order to rebase aircraft.** On turn 142 Opus found its air units could not move ("CANNOT_MOVE invalid state"): civ6-mcp has no rebase order, so an aircraft could only fight from the city that built it. Open.
-- **The stacking check.** Opus reported on turns 107 and 118 that the move tool refused to put a Battering Ram on a tile with a combat unit, which the game allows. Open, to check against the game.
-- **A ranged attack on a city** named the garrison unit as the target while the damage went to the walls (turn 169).
+- **War declarations that did not take.** On turn 90 two surprise-war declarations on Brazil came back `WAR_NOT_DECLARED` (the game still showed peace a few seconds later), a formal war was refused for lack of a denouncement, and a third surprise war took. The log does not show why the first two did not. Replayed after the game from the turn-90 save, with the same orders, the first declaration took. Open.
+- **No order to rebase aircraft.** On turn 142 Opus found its air units could not move ("CANNOT_MOVE invalid state"): civ6-mcp has no rebase order, so an aircraft could only fight from the city that built it. Fixed after this game: `unit_action` has `rebase`, and a move sent to an aircraft is sent as one ([setup](../../docs/setup.md)).
+- **The stacking check.** Opus reported on turns 107 and 118 that the move tool refused to put a Battering Ram on a tile with a combat unit, which the game allows: one unit of each formation class can share a tile, and a ram is a support unit, which civ6-mcp counted as a combat unit. Fixed after this game.
+- **A ranged attack on a city** named the garrison unit as the target while the damage went to the walls (turn 169), and gave the damage dealt as the city's HP before the shot less the attacker's HP. Fixed after this game: the city is the target, and the damage dealt is what the city lost.
 - **Turns that ended during a session.** 42 times a turn ended while Opus answered an AI civ (peace offers, deals, denunciations); each time the harness reported that the turn had ended and the next was open, as intended.
 - **Moves that stopped short.** 74 results reported moves left instead of civ6-mcp's "moves exhausted", read from the game core.
 - No AI-turn hangs, no tool errors and no outside action during the game. The National Park and wonder orders added for this game were not needed.
