@@ -120,7 +120,7 @@ class Seat(rg.Run):
         slot = None
         if not self.a.accounts and not self.slot_held:
             slot = self.fleet.take_slot()
-            self.fleet.stagger()
+            self.fleet.pace()
         try:
             row = self.run_session(self.acct, prompt, resume)
         finally:
@@ -246,7 +246,7 @@ class Game:
             # start one after another, and queueing behind every other launch on the box cost about 3 minutes a turn.
             fleet = next(iter(self.seats.values())).fleet
             game_slot = fleet.take_slot()
-            fleet.stagger()
+            fleet.pace()
             for s in self.seats.values():
                 s.slot_held = True
         try:

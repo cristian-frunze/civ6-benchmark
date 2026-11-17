@@ -403,7 +403,7 @@ class Run:
                 slot = None
                 if not self.a.accounts:
                     slot = self.fleet.take_slot()
-                    self.fleet.stagger()
+                    self.fleet.pace()
                 try:
                     row = self.run_session(acct, prompt, resume)
                 finally:
@@ -449,6 +449,8 @@ def load_fleet():
         raise SystemExit(f"run_game: no ken-internal subagents runner under {base}; pass --accounts")
     sys.path.insert(0, str(found[-1].parent))
     import run_on_account
+    if not hasattr(run_on_account, "pace"):  # the launch pacing was stagger() before ken-internal 0.1.144
+        run_on_account.pace = run_on_account.stagger
     return run_on_account
 
 
