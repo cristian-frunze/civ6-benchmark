@@ -585,7 +585,7 @@ def trade_none_note(st: dict | None) -> str:
     """Why a Trader has no destination, after civ6-mcp's "No valid trade route destinations"."""
     if not st:
         return ""
-    why = f"The game says: {st['why']}." if st["why"] else "The game gave no reason."
+    why = f"The game says: {st['why'].rstrip('. ')}." if st["why"] else "The game gave no reason."
     where = (f"It is in {st['city']}." if st["city"] else
              f"It is at ({st['at']}), not in a city: a route starts from the city the Trader is in, so move it or "
              "teleport it to one first.")
@@ -1607,6 +1607,11 @@ def parse_production_reasons(lines) -> tuple[list[str], tuple[int, int, list[str
     return None if why is None else (why, traders)
 
 
+def _said(reasons) -> str:
+    """The game's own sentences joined into one, each without its closing period (the caller adds one)."""
+    return "; ".join(r.rstrip(". ") for r in reasons)
+
+
 def production_refusal(out: str, item_name: str, found) -> str:
     """civ6-mcp's CANNOT_START refusal with the game's reasons in place of its guess."""
     if not out.startswith("Error: CANNOT_START|") or found is None:
@@ -1619,7 +1624,7 @@ def production_refusal(out: str, item_name: str, found) -> str:
                   ", none in production")
         extra = f" You have {have} Trader{'s' if have != 1 else ''}{inprod}, and your trade route capacity is {cap}."
     if why:
-        return f"Error: CANNOT_START|{item_name} cannot start here. The game says: {'; '.join(why)}.{extra}"
+        return f"Error: CANNOT_START|{item_name} cannot start here. The game says: {_said(why)}.{extra}"
     return f"{out.rstrip()} The game gave no reason.{extra}"
 
 
@@ -2347,7 +2352,8 @@ def policy_state_lua() -> str:
         "local me = Game.GetLocalPlayer() local p = Players[me] local c = p:GetCulture() "
         "local civ = c:GetProgressingCivic() local civName = '' local left = -1 "
         "if civ and civ >= 0 and GameInfo.Civics[civ] then civName = Locale.Lookup(GameInfo.Civics[civ].Name) "
-        "  left = c:GetTurnsLeftOnCurrentCivic() end "
+        "  local ok, n = pcall(function() return c:GetTurnsToProgressCivic(civ) end) "  # CivicsTree.lua's call
+        "  if ok and type(n) == 'number' then left = n end end "
         "print('POLSTATE|' .. Game.GetCurrentGameTurn() .. '|' .. c:GetCostToUnlockPolicies() .. '|' "
         "  .. math.floor(p:GetTreasury():GetGoldBalance()) .. '|' .. math.floor(p:GetReligion():GetFaithBalance()) "
         "  .. '|' .. tostring(GlobalParameters.GOVERNMENT_UNLOCK_WITH_FAITH) .. '|' "

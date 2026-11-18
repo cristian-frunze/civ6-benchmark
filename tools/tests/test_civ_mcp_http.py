@@ -1583,7 +1583,7 @@ async def main():
           "Policy changes are free") and bcx.policy_cost_line(None) == "")
     lua = bcx.policy_state_lua()
     check("policy state Lua: reads the game's price", "c:GetCostToUnlockPolicies()" in lua
-          and "GetTurnsLeftOnCurrentCivic()" in lua and "GetGoldBalance()" in lua and "PolicyChangeMade()" in lua)
+          and "c:GetTurnsToProgressCivic(civ)" in lua and "GetGoldBalance()" in lua and "PolicyChangeMade()" in lua)
 
     pol = {"t": 226, "cost": 430, "gold": 900}
 
@@ -2148,6 +2148,10 @@ async def main():
           "Error: CANNOT_START|BUILDING_FACTORY cannot start. Hint: FACTORY may require a completed district or "
           "prerequisite building.", "BUILDING_FACTORY", (["Requires an Industrial Zone"], None))
           == "Error: CANNOT_START|BUILDING_FACTORY cannot start here. The game says: Requires an Industrial Zone.")
+    check("refusal: the game's own periods are not doubled (game 41 replay)", bcx.production_refusal(
+          base, "UNIT_MUSKETMAN", (["Your civilization needs 2 Niter.", "If this city has a Encampment, you only "
+                                    "need 1 Niter."], None)).endswith("needs 2 Niter; If this city has a Encampment, "
+                                                                       "you only need 1 Niter."))
     check("refusal: no reason, with the Traders", bcx.production_refusal(base, "UNIT_TRADER", ([], (3, 4, ["Leeds"])))
           == base + " The game gave no reason. You have 3 Traders, 1 more in production (Leeds), and your trade route "
           "capacity is 4.")
