@@ -74,7 +74,7 @@ From the run log and the agent's tool results and tooling notes:
 - **Aircraft rebased.** Five rebases went through and one was refused with the bases in range listed, as the game 37 fix intended.
 - **War declarations on full civs settled.** All five (Brazil twice, Russia, Sumeria and Germany) came back `WAR_DECLARED` from the game's war state.
 - **Refusals by the game's rules.** 50 orders were refused because a unit of the same formation class held the tile or the city (a purchase of Artillery in Karmøy was blocked by an AT Crew), each naming the unit; 88 moves reported moves left instead of "moves exhausted".
-- **Still open:** production refusals give no reason (turn 117: "UNIT_LINE_INFANTRY cannot start", while upgrades to Line Infantry worked), four trade routes were refused with no reason, and a deal summary listed "Joint War (20 turns)" without the target (turn 176; Opus turned the deal down for that reason).
+- **Open after this game:** production refusals give no reason (turn 117: "UNIT_LINE_INFANTRY cannot start", while upgrades to Line Infantry worked), four trade routes were refused with no reason, and a deal summary listed "Joint War (20 turns)" without the target (turn 176; Opus turned the deal down for that reason). After game 41 the production refusals and the joint war got fixes ([setup](../../docs/setup.md)).
 - No skipped turns, no AI-turn hangs, no tool errors and no outside action during the game.
 
 ## Files

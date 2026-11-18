@@ -2696,7 +2696,24 @@ DEAL_LISTENER = (
     "d[d.n] = 'E|' .. tostring(a) .. '|' .. tostring(b) end) "
     "end "
 )
-DEAL_TERMS_FN = (
+# A joint war with no target. A Joint War deal item names the civ to fight in its value (the game's deal view shows it:
+# DiplomacyDealView.lua, Locale.Lookup(GetValueTypeNameID())). civ6-mcp's deal listings and the trade results here wrote
+# only "Joint War (20 turns)". In game 40, turn 176, Opus turned down Egypt's deal (Great Works and a Joint War for
+# Sugar, 4 gold and 10 a turn) because it could not tell whom the war was against. The target now follows the name.
+JOINT_WAR_FN = (
+    "function benchJointWar(it) local ok, n = pcall(function() return Locale.Lookup(it:GetValueTypeNameID()) end) "
+    "if ok and type(n) == 'string' and n ~= '' then return ' against ' .. n end return '' end "
+)
+
+
+def joint_war_named(lua: str) -> str:
+    """civ6-mcp's deal listing Lua with each Joint War item's target after its name."""
+    out = lua.replace('itemName = "Joint War"', 'itemName = "Joint War" .. benchJointWar(item)')
+    out = out.replace('desc = "Joint War"', 'desc = "Joint War" .. benchJointWar(item)')
+    return JOINT_WAR_FN + out if out != lua else lua
+
+
+DEAL_TERMS_FN = JOINT_WAR_FN + (
     "local function benchTerms(d, me) local give, get = {}, {} "
     "if d then for it in d:Items() do "
     "local ty, amt, dur = it:GetType(), it:GetAmount() or 0, it:GetDuration() or 0 local s = 'an item' "
@@ -2705,7 +2722,7 @@ DEAL_TERMS_FN = (
     "s = (r and Locale.Lookup(r.Name) or 'a resource') .. (dur > 0 and (' (' .. dur .. ' turns)') or '') "
     "elseif ty == DealItemTypes.AGREEMENTS then local st = it:GetSubType() "
     "s = (st == DealAgreementTypes.MAKE_PEACE and 'a peace treaty') "
-    "or (st == DealAgreementTypes.OPEN_BORDERS and 'Open Borders') or (st == DealAgreementTypes.JOINT_WAR and 'Joint War') "
+    "or (st == DealAgreementTypes.OPEN_BORDERS and 'Open Borders') or (st == DealAgreementTypes.JOINT_WAR and ('Joint War' .. benchJointWar(it))) "
     "or (st == DealAgreementTypes.ALLIANCE and 'Alliance') or 'an agreement' "
     "if dur > 0 and st ~= DealAgreementTypes.MAKE_PEACE then s = s .. ' (' .. dur .. ' turns)' end "
     "elseif ty == DealItemTypes.FAVOR then s = amt .. ' Diplomatic Favor' "

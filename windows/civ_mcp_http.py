@@ -1483,6 +1483,14 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     _lq.build_diplomacy_session_query = _names_peace(_lq.build_diplomacy_session_query)
     _lq.build_pending_deals_query = _names_peace(_lq.build_pending_deals_query)
 
+    def _names_joint_war(build):  # bench_compat.joint_war_named has why
+        def wrapped(*args, **kwargs):
+            return bc.joint_war_named(build(*args, **kwargs))
+        return wrapped
+
+    _lq.build_diplomacy_session_query = _names_joint_war(_lq.build_diplomacy_session_query)
+    _lq.build_pending_deals_query = _names_joint_war(_lq.build_pending_deals_query)
+
     async def _gs_end_turn_recorded(self, *args, **kwargs):
         out = await _with_player_ids(self, await _original_gs_end_turn(self, *args, **kwargs))
         seen = _END_TURN_RESULTS.get()

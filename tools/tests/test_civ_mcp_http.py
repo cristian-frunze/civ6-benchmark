@@ -485,6 +485,15 @@ async def main():
           "turn x48 (30 turns)", got)
     check("accepted terms name the peace treaty", "'a peace treaty'" in ns["bc"].DEAL_TERMS_FN
           and "st ~= DealAgreementTypes.MAKE_PEACE" in ns["bc"].DEAL_TERMS_FN)
+    # Game 40, turn 176: Egypt's deal listed "Joint War (20 turns)" with no target, and Opus turned it down for that.
+    for name in ("build_diplomacy_session_query", "build_pending_deals_query"):
+        lua = getattr(lq, name)()
+        check(f"{name}: a joint war names its target", lua.startswith(ns["bc"].JOINT_WAR_FN)
+              and lua.count("benchJointWar(item)") == 1 and 'itemName = "Joint War" .. benchJointWar(item)' in lua)
+    check("joint war: the game's own name for the target", "Locale.Lookup(it:GetValueTypeNameID())" in ns["bc"].JOINT_WAR_FN)
+    check("accepted terms name the joint war's target", "('Joint War' .. benchJointWar(it))" in ns["bc"].DEAL_TERMS_FN
+          and ns["bc"].DEAL_TERMS_FN.startswith(ns["bc"].JOINT_WAR_FN))
+    check("joint war: Lua without one is left alone", ns["bc"].joint_war_named("print(1)") == "print(1)")
     # Every tool's outermost wrapper binds the call log (_bound_first); the one inside it is checked.
     bound = ns["_bound_first"](stock).__code__
     for name in ("respond_to_diplomacy", "respond_to_trade", "propose_trade", "send_diplomatic_action",
