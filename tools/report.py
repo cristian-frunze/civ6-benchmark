@@ -82,7 +82,8 @@ LABELS = {"g1-standard": "Game 1, playbook", "g2-baseline": "Game 2, rules only"
           "g38-opus-spain-religious": "Game 38, Spain, Religious goal",
           "g39-opus-egypt-culture": "Game 39, Egypt, Culture goal",
           "g40-opus-norway-domination-emperor": "Game 40, Norway, Domination goal, Emperor",
-          "g41-opus-england-domination-king": "Game 41, England, Domination goal, King"}
+          "g41-opus-england-domination-king": "Game 41, England, Domination goal, King",
+          "g42-opus-america-culture-emperor": "Game 42, America, Culture goal, Emperor"}
 
 
 def _rows(path: Path) -> list[dict]:
