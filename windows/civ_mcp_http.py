@@ -628,6 +628,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     nr.narrate_victory_progress = _narrate_victory_culture
     _lq.build_make_trade_route = bc.trade_route_lua(_lq.build_make_trade_route)  # the refusal's reasons
+    # no list of every city, unmet civs' included, for a Trader refused everywhere (bench_compat.trade_none_note)
+    _lq.build_trade_destinations_query = bc.trade_destinations_lua(_lq.build_trade_destinations_query)
     _lq.build_cities_query = bc.city_targets_lua(_lq.build_cities_query)  # the game's own attack targets
     _lq.build_send_envoy = bc.send_envoy_lua(_lq.build_send_envoy)  # says how many envoys are left
     for _name in ("build_settle_advisor_query", "build_global_settle_scan"):  # no sites on another civ's land
@@ -670,6 +672,34 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         return out + bc.gov_after_note(await _gov_state(self, gov))
 
     _gsm.GameState.change_government = _change_government_checked
+
+    # Policy changes, priced as the game's Government screen prices them (bench_compat.policy_change_refusal has why):
+    # a change that costs gold is refused once with the price and made when the agent asks again that turn, one the
+    # treasury cannot pay for is refused, and a paid change says what it cost.
+    _vendor_set_policies = _gsm.GameState.set_policies
+    _policy_warned: dict = {}  # "turn" -> the turn the agent was told the price
+
+    async def _policy_state(self):
+        try:
+            return bc.parse_policy_state(await self.conn.execute_write(bc.policy_state_lua(), timeout=10.0))
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("reading the policy state failed", exc_info=True)
+            return None
+
+    async def _set_policies_priced(self, assignments):
+        st = await _policy_state(self)
+        refusal = bc.policy_change_refusal(st, st is not None and _policy_warned.get("turn") == st["turn"])
+        if refusal:
+            if refusal.startswith("Error: POLICY_COST_WARNING"):
+                _policy_warned["turn"] = st["turn"]
+            return refusal
+        out = await _vendor_set_policies(self, assignments)
+        if st is None or st["cost"] <= 0 or out.startswith("Error"):
+            return out
+        return out + bc.policy_paid_note(st, await _policy_state(self))
+
+    _gsm.GameState.set_policies = _set_policies_priced
+    _gsm.GameState.policy_state = _policy_state
 
     # War declarations, settled by the war state read again after the declaration (bench_compat.war_result has why).
     _vendor_send_diplomatic_action = _gsm.GameState.send_diplomatic_action
@@ -902,8 +932,19 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
                         "(it was sent with no tile, since this city placed it before). Retry the same call.")
         return await _original_set_production(self, city_id, item_type, item_name, target_x, target_y)
 
+    async def _production_reasons(self, city_id, item_type, item_name, target_x=None, target_y=None):
+        try:
+            return bc.parse_production_reasons(await self.conn.execute_write(
+                bc.production_reasons_lua(city_id, item_type, item_name, target_x, target_y), timeout=10.0))
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("reading why production cannot start failed", exc_info=True)
+            return None
+
     async def _set_production_settled(self, city_id, item_type, item_name, target_x=None, target_y=None):
         result = await _set_production_or_resume(self, city_id, item_type, item_name, target_x, target_y)
+        if result.startswith("Error: CANNOT_START|"):  # with the game's reasons (bench_compat.production_refusal)
+            return bc.production_refusal(result, item_name, await _production_reasons(
+                self, city_id, item_type, item_name, target_x, target_y))
         if not result.startswith("Error: SILENT_FAILURE|"):
             return result
         log = logging.getLogger("civ_mcp_http")
@@ -2515,6 +2556,57 @@ _tool = mcp._tool_manager.get_tool("change_government")
 if _tool is not None:
     _tool.description = re.sub(r"\s*First switch after\s+unlocking a new tier is free \(no anarchy\)\.", "",
                                _tool.description or "") + bc.NO_FREE_SWITCH_NOTE
+
+# set_policies says the price of a change between civics (_set_policies_priced), and get_policies says it up front.
+_tool = mcp._tool_manager.get_tool("set_policies")
+if _tool is not None:
+    _tool.description = (_tool.description or "") + bc.POLICY_COST_NOTE
+
+
+def _says_policy_price(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        out = await fn(*args, **kwargs)
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        game = getattr(getattr(getattr(ctx, "request_context", None), "lifespan_context", None), "game", None)
+        if isinstance(out, str) and not out.startswith("Error") and hasattr(game, "policy_state"):
+            out += bc.policy_cost_line(await game.policy_state())
+        return out
+
+    return wrapper
+
+
+_tool = mcp._tool_manager.get_tool("get_policies")
+if _tool is not None:
+    _tool.fn = _says_policy_price(_tool.fn)
+
+
+# A Trader the game refuses everywhere gets the reasons in place of civ6-mcp's list of every city
+# (bench_compat.trade_destinations_lua and trade_none_note).
+def _says_why_no_route(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        out = await fn(*args, **kwargs)
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        game = getattr(getattr(getattr(ctx, "request_context", None), "lifespan_context", None), "game", None)
+        unit_id = kwargs.get("unit_id")
+        if isinstance(out, str) and out.startswith("No valid trade route destinations") and game is not None \
+                and isinstance(unit_id, int):
+            try:
+                st = bc.parse_trade_none(await game.conn.execute_write(bc.trade_none_lua(unit_id % 65536),
+                                                                       timeout=10.0))
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("reading why no route starts failed", exc_info=True)
+                st = None
+            out += bc.trade_none_note(st)
+        return out
+
+    return wrapper
+
+
+_tool = mcp._tool_manager.get_tool("get_trade_destinations")
+if _tool is not None:
+    _tool.fn = _says_why_no_route(_tool.fn)
 
 # civ6-mcp binds its call log, diary and heartbeat to the game only inside get_game_overview. An agent resumed
 # after a server restart can play for turns from end_turn results alone, and until it asks for the overview every

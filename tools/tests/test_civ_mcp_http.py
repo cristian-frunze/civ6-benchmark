@@ -1032,6 +1032,50 @@ async def main():
           and "CityManager.GetCityAt(unit:GetX(), unit:GetY())" in lua and lua.count("UnitManager.RequestOperation") == 1
           and "ERR:CAPACITY_FULL" in lua)
 
+    # Game 41, turn 85: a Trader refused everywhere got a list of 51 cities, six unmet civs' among them.
+    lua = lq.build_trade_destinations_query(24)
+    check("trade destinations: no every-city fallback", "if found == 0 then" not in lua and "WARN:CANNOT_START" not in lua
+          and lua.count("enrichDest(i, city, cx, cy, i == me)") == 1 and lua.rstrip().endswith('print("---END---")')
+          and "UnitManager.GetUnit(me, 24)" in lua, lua[-400:])
+    check("trade destinations: unchanged when civ6-mcp changes", bc.trade_destinations_lua(lambda u: "x")(1) == "x")
+    lua = bc.trade_none_lua(3276824 % 65536)
+    check("no-route probe Lua: the game's reasons for your own cities", "UnitManager.CanStartOperation(unit, op, nil, t, true)"
+          in lua and "UnitManager.GetUnit(me, 24)" in lua and "GetOutgoingRouteCapacity()" in lua, lua)
+    st = bc.parse_trade_none(["TDNONE|0|1|Portsmouth|2|4|20,39|"])
+    check("no-route probe parsed", st == {"moves": 0.0, "max_moves": 1.0, "city": "Portsmouth", "routes": 2, "capacity": 4,
+          "at": "20,39", "why": ""}, st)
+    check("no-route probe: missing or bad is None", bc.parse_trade_none(["---END---"]) is None
+          and bc.parse_trade_none(["TDNONE|x|1|P|2|4|1,2|"]) is None)
+    check("no-route note: no reason, in a city", bc.trade_none_note(st) == "\nThe game refuses every destination for "
+          "this Trader now. The game gave no reason. It is in Portsmouth. It has 0 of 1 moves left, and 2 of your 4 "
+          "trade routes are in use.", bc.trade_none_note(st))
+    out_city = bc.trade_none_note(dict(st, city="", why="Not enough movement", moves=0.5))
+    check("no-route note: reasons, outside a city", "The game says: Not enough movement." in out_city
+          and "It is at (20,39), not in a city" in out_city and "0.5 of 1 moves" in out_city, out_city)
+    check("no-route note: nothing when unread", bc.trade_none_note(None) == "")
+
+    class TdConn:
+        def __init__(self): self.lua = []
+        async def execute_write(self, lua, timeout=None):
+            self.lua.append(lua)
+            return ["TDNONE|1|1|Portsmouth|2|4|20,39|", "---END---"]
+    _tdc = TdConn()
+    _tdctx = type("C", (), {"request_context": type("R", (), {"lifespan_context": type("L", (), {
+        "game": type("G", (), {"conn": _tdc})()})()})()})()
+
+    async def _no_dest(ctx, unit_id):
+        return "No valid trade route destinations. Check that your trader is in a city and has moves."
+
+    async def _some_dest(ctx, unit_id):
+        return "3 trade route destinations:"
+    _td1 = await ns["_says_why_no_route"](_no_dest)(ctx=_tdctx, unit_id=3276824)
+    _td2 = await ns["_says_why_no_route"](_some_dest)(ctx=_tdctx, unit_id=3276824)
+    check("get_trade_destinations: none, with why", _td1.endswith("It is in Portsmouth. It has 1 of 1 moves left, and 2 "
+          "of your 4 trade routes are in use.") and "UnitManager.GetUnit(me, 24)" in _tdc.lua[0], _td1)
+    check("get_trade_destinations: a list is left alone", _td2 == "3 trade route destinations:" and len(_tdc.lua) == 1)
+    _t = mcp._tool_manager.get_tool("get_trade_destinations")
+    check("get_trade_destinations: wrapped", _t.fn.__wrapped__.__code__ is ns["_says_why_no_route"](lambda: None).__code__)
+
     # 16i. A city's CAN ATTACK list is the game's own target list (game 20: a Builder on turn 77, units of a civ at
     # peace on turn 172).
     lua = lq.build_cities_query()
@@ -1494,6 +1538,103 @@ async def main():
     _t = mcp._tool_manager.get_tool("change_government")
     check("change_government: description says the game's rules", "First switch after" not in _t.description
           and "at least 3 turns of Anarchy" in _t.description, _t.description)
+
+    # 16p. Policy changes priced as the game's Government screen prices them (game 41, turn 226: a swap cost about 430
+    #      gold with about 172 in the treasury, and the tool said only "Policies updated").
+    st = bcx.parse_policy_state(["junk", "POLSTATE|226|430|172|55|0|false|false|0|4|Ideology"])
+    check("policy state parsed", st == {"turn": 226, "cost": 430, "gold": 172, "faith": 55, "by_faith": False,
+          "civic_done": False, "change_made": False, "open_slots": 0, "civic_turns": 4, "civic": "Ideology"}, st)
+    check("policy state: missing, short or bad is None", bcx.parse_policy_state(["OK"]) is None
+          and bcx.parse_policy_state(["POLSTATE|1|2"]) is None
+          and bcx.parse_policy_state(["POLSTATE|x|430|172|55|0|false|false|0|4|Ideology"]) is None)
+    check("policy state: faith flag", bcx.parse_policy_state(["POLSTATE|1|9|1|50|1|false|false|0|4|X"])["by_faith"]
+          and not bcx.parse_policy_state(["POLSTATE|1|9|1|50|nil|false|false|0|4|X"])["by_faith"])
+    poor = bcx.policy_change_refusal(st, True)
+    check("cannot pay: refused even when confirmed", poor.startswith("Error: POLICY_COST|Changing policies now costs "
+          "430 gold and you have 172.") and "Nothing changed." in poor and "Ideology completes in 4 turns" in poor, poor)
+    rich = dict(st, gold=900)
+    warn = bcx.policy_change_refusal(rich, False)
+    check("can pay: warned first with the price", warn.startswith("Error: POLICY_COST_WARNING|Changing policies now "
+          "costs 430 gold of your 900.") and "call set_policies again this turn" in warn, warn)
+    check("can pay and confirmed: allowed", bcx.policy_change_refusal(rich, True) == "")
+    check("free (civic turn): allowed", bcx.policy_change_refusal(dict(st, cost=0, civic_done=True), False) == "")
+    check("unknown state: allowed as before", bcx.policy_change_refusal(None, False) == "")
+    check("next civic tomorrow", "Ideology completes next turn" in bcx.policy_change_refusal(dict(st, civic_turns=1),
+          False))
+    check("no civic in progress: says pick one", "choose one with set_research" in
+          bcx.policy_change_refusal(dict(st, civic="", civic_turns=-1), False))
+    check("by faith: priced in faith", "costs 430 faith and you have 55." in
+          bcx.policy_change_refusal(dict(st, by_faith=True), False))
+    check("paid note: before and after", bcx.policy_paid_note(rich, dict(rich, gold=470, cost=0))
+          == "\nPaid 430 gold to change policies between civics: 900 before, 470 now.")
+    check("paid note: none when free or unknown", bcx.policy_paid_note(dict(st, cost=0), st) == ""
+          and bcx.policy_paid_note(None, st) == "" and "(900 before)" in bcx.policy_paid_note(rich, None))
+    check("cost line: free and priced", bcx.policy_cost_line(dict(st, cost=0)) == "\nChanging policies now: free this "
+          "turn." and bcx.policy_cost_line(st).startswith("\nChanging policies now: costs 430 gold (you have 172). "
+          "Policy changes are free") and bcx.policy_cost_line(None) == "")
+    lua = bcx.policy_state_lua()
+    check("policy state Lua: reads the game's price", "c:GetCostToUnlockPolicies()" in lua
+          and "GetTurnsLeftOnCurrentCivic()" in lua and "GetGoldBalance()" in lua and "PolicyChangeMade()" in lua)
+
+    pol = {"t": 226, "cost": 430, "gold": 900}
+
+    class PolConn:
+        async def execute_write(self, lua, timeout=None):
+            return [f"POLSTATE|{pol['t']}|{pol['cost']}|{pol['gold']}|0|0|false|false|0|4|Ideology", "---END---"]
+
+    class PolGame:
+        conn = PolConn()
+
+    _vendor_sp = ns["_vendor_set_policies"]
+    set_calls = []
+    async def fake_set(self, a):
+        set_calls.append(dict(a))
+        pol["gold"] -= pol["cost"]  # the game takes the price
+        return "POLICIES_SET|Policies updated. Use get_policies to verify."
+    ns["_vendor_set_policies"] = fake_set
+    try:
+        ns["_policy_warned"].clear()
+        p1 = await GameState.set_policies(PolGame(), {2: "POLICY_TRIANGULAR_TRADE"})
+        p2 = await GameState.set_policies(PolGame(), {2: "POLICY_TRIANGULAR_TRADE"})
+        pol["t"] = 227
+        p3 = await GameState.set_policies(PolGame(), {2: "POLICY_LIBERALISM"})
+        pol["gold"] = 100
+        ns["_policy_warned"]["turn"] = 227
+        p4 = await GameState.set_policies(PolGame(), {2: "POLICY_LIBERALISM"})
+        pol["cost"] = 0
+        p5 = await GameState.set_policies(PolGame(), {2: "POLICY_LIBERALISM"})
+    finally:
+        ns["_vendor_set_policies"] = _vendor_sp
+        ns["_policy_warned"].clear()
+    check("set_policies: priced change warned, then paid on the second call", p1.startswith("Error: POLICY_COST_WARNING|")
+          and p2.startswith("POLICIES_SET|") and p2.endswith("900 before, 470 now."), (p1, p2))
+    check("set_policies: a new turn warns again", p3.startswith("Error: POLICY_COST_WARNING|"), p3)
+    check("set_policies: unaffordable refused though warned", p4.startswith("Error: POLICY_COST|"), p4)
+    check("set_policies: free change goes through untouched", p5 == "POLICIES_SET|Policies updated. Use get_policies "
+          "to verify.", p5)
+    check("set_policies: the vendor ran only for the paid and free changes", set_calls == [{2: "POLICY_TRIANGULAR_TRADE"},
+          {2: "POLICY_LIBERALISM"}], set_calls)
+    _t = mcp._tool_manager.get_tool("set_policies")
+    check("set_policies: description says the price rule", "Unlock policies for N gold" in _t.description, _t.description)
+    _t = mcp._tool_manager.get_tool("get_policies")
+    check("get_policies: wrapped to say the price",
+          _t.fn.__wrapped__.__code__ is ns["_says_policy_price"](lambda: None).__code__, _t.fn)
+
+    class _Lc:
+        game = type("G", (), {"policy_state": lambda self: _aval(dict(st))})()
+
+    async def _aval(v):
+        return v
+
+    _pctx = type("C", (), {"request_context": type("R", (), {"lifespan_context": _Lc()})()})()
+
+    async def _fake_get(ctx):
+        return "Government: Merchant Republic"
+
+    _g = await ns["_says_policy_price"](_fake_get)(ctx=_pctx)
+    check("get_policies: the price line follows", _g == "Government: Merchant Republic\nChanging policies now: costs "
+          "430 gold (you have 172). Policy changes are free on the turn you complete a civic: Ideology completes in 4 "
+          "turns.", _g)
 
     # 16h. Theological combat (game 25, turns 91 and 127: an Apostle's attack on another civ's religious unit came back
     #      "NO_ENEMY|No hostile unit or city at (x,y)", and civ6-mcp would refuse a civ at peace anyway).
@@ -1976,6 +2117,50 @@ async def main():
     out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY", 63, 34)
     check("placed wonder: a tile given is left out too", out.startswith("PRODUCING|BUILDING_GREAT_LIBRARY|5 turns (resumed")
           and calls == [], out)
+
+    # Game 41: 21 production orders came back "CANNOT_START|X cannot start." with no reason, 15 of them Traders.
+    lua = bcx.production_reasons_lua(131073, "UNIT", "UNIT_TRADER")
+    check("production reasons Lua: the panel's CanProduce results and the Trader count",
+          "bq:CanProduce(item.Hash, false, true)" in lua and "CityCommandResults.FAILURE_REASONS" in lua
+          and "GameInfo.Units['UNIT_TRADER']" in lua and "GetOutgoingRouteCapacity()" in lua
+          and "FindID(131073 % 65536)" in lua and "PARAM_X" not in lua, lua)
+    lua = bcx.production_reasons_lua(65536, "district", "district_campus'] os.exit() --", 3, 4)
+    check("production reasons Lua: district with its tile, name cleaned", "GameInfo.Districts['DISTRICT_CAMPUSOSEXIT']"
+          in lua and "t[CityOperationTypes.PARAM_X] = 3 t[CityOperationTypes.PARAM_Y] = 4" in lua
+          and "PARAM_DISTRICT_TYPE" in lua and "TRADERS" in lua and "'DISTRICT_CAMPUSOSEXIT' == 'UNIT_TRADER'" in lua)
+    found = bcx.parse_production_reasons(["x", "PRODWHY|[COLOR:Red]Requires  a [ICON_Niter] Niter[ENDCOLOR]||Second",
+                                          "TRADERS|3|4|Leeds, York", "---END---"])
+    check("production reasons parsed, markup stripped", found == (["Requires a Niter", "Second"], (3, 4, ["Leeds", "York"])),
+          found)
+    check("production reasons: none read is None", bcx.parse_production_reasons(["---END---"]) is None
+          and bcx.parse_production_reasons(["PRODWHY|"]) == ([], None))
+    base = "Error: CANNOT_START|UNIT_TRADER cannot start."
+    check("refusal: the game's reasons replace the guess", bcx.production_refusal(
+          "Error: CANNOT_START|BUILDING_FACTORY cannot start. Hint: FACTORY may require a completed district or "
+          "prerequisite building.", "BUILDING_FACTORY", (["Requires an Industrial Zone"], None))
+          == "Error: CANNOT_START|BUILDING_FACTORY cannot start here. The game says: Requires an Industrial Zone.")
+    check("refusal: no reason, with the Traders", bcx.production_refusal(base, "UNIT_TRADER", ([], (3, 4, ["Leeds"])))
+          == base + " The game gave no reason. You have 3 Traders, 1 more in production (Leeds), and your trade route "
+          "capacity is 4.")
+    check("refusal: one Trader, none in production", bcx.production_refusal(base, "UNIT_TRADER", ([], (1, 2, [])))
+          .endswith("You have 1 Trader, none in production, and your trade route capacity is 2."))
+    check("refusal: probe failed or not a refusal: unchanged", bcx.production_refusal(base, "UNIT_TRADER", None) == base
+          and bcx.production_refusal("PRODUCING|X|3 turns", "X", (["a"], None)) == "PRODUCING|X|3 turns")
+
+    class ReasonConn:
+        async def execute_write(self, lua, timeout=None):
+            assert "PRODWHY" in lua, lua[:200]
+            return ["PRODWHY|", "TRADERS|3|4|Leeds", lq.SENTINEL]
+    async def refused(self, cid, it, nm, tx=None, ty=None):
+        return "Error: CANNOT_START|UNIT_TRADER cannot start."
+    _prev_prod, ns["_original_set_production"] = ns["_original_set_production"], refused
+    g = ProdGame(); g.conn = ReasonConn()
+    try:
+        out = await setprod(g, 131073, "UNIT", "UNIT_TRADER")
+    finally:
+        ns["_original_set_production"] = _prev_prod
+    check("set_city_production: a refusal carries the game's reasons", out == base + " The game gave no reason. You "
+          "have 3 Traders, 1 more in production (Leeds), and your trade route capacity is 4." and g.dismissed == 0, out)
     g = ProdGame(); g.conn = WonderConn(placed=False)
     out = await setprod(g, 65536, "BUILDING", "BUILDING_GREAT_LIBRARY", 63, 34)
     check("wonder not placed yet: civ6-mcp's order, with its tile", out == "PRODUCING|BUILDING_GREAT_LIBRARY|9 turns"

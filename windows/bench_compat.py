@@ -516,6 +516,84 @@ def trade_route_lua(original):
     return build
 
 
+# Trade destinations of civs not yet met. When the game refused a Trader every destination, civ6-mcp's
+# get_trade_destinations listed every city of every civ not at war with you instead, unmet civs and city-states
+# included, under "N trade route destinations", and dropped its own WARN line on the way. In game 41, turn 85, it
+# listed 51 cities, with the positions of six civs England had not met; Opus wrote their capitals into its notes
+# ("The trade destination list revealed all rival cities"), and the routes it then tried there were refused with no
+# reason. The same list named cities of unmet major civs in 21 of games 1 to 41. A Trader the game refuses everywhere
+# now gets no list but the reasons: the game's own, its moves, where it stands and the routes in use.
+_TDEST_FALLBACK = "\nif found == 0 then\n"
+
+
+def trade_destinations_lua(original):
+    """civ6-mcp's destination query without its every-city fallback."""
+    def build(unit_index: int) -> str:
+        lua = original(unit_index)
+        i = lua.find(_TDEST_FALLBACK)
+        j = lua.rfind('print("---END---")')
+        if i < 0 or j < i:
+            return lua  # civ6-mcp changed: unchanged
+        return lua[:i + 1] + lua[j:]
+    return build
+
+
+def trade_none_lua(unit_index: int) -> str:
+    """TDNONE|moves|maxMoves|city here|routes in use|capacity|reasons, for a Trader with no destination."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('---END---') return end "
+        "local op = GameInfo.UnitOperations['UNITOPERATION_MAKE_TRADE_ROUTE'].Hash "
+        "local ux, uy = unit:GetX(), unit:GetY() local here = CityManager.GetCityAt(ux, uy) "
+        "local why, seen = {}, {} "
+        "for _, c in Players[me]:GetCities():Members() do if c:GetX() ~= ux or c:GetY() ~= uy then "
+        "  local t = {} t[UnitOperationTypes.PARAM_X0] = c:GetX() t[UnitOperationTypes.PARAM_Y0] = c:GetY() "
+        "  t[UnitOperationTypes.PARAM_X1] = ux t[UnitOperationTypes.PARAM_Y1] = uy "
+        "  local ok, can, res = pcall(function() return UnitManager.CanStartOperation(unit, op, nil, t, true) end) "
+        "  if ok and type(res) == 'table' then "
+        "    local fr = (UnitOperationResults and res[UnitOperationResults.FAILURE_REASONS]) or res.FailureReasons "
+        "    if type(fr) == 'table' then for _, r in ipairs(fr) do "
+        "      local s = (string.gsub(Locale.Lookup(tostring(r)), '%.%s*$', '')):gsub('[|\\r\\n]', ' ') "
+        "      if not seen[s] then seen[s] = true why[#why + 1] = s end end end end end end "
+        "local tr = Players[me]:GetTrade() "
+        "print('TDNONE|' .. unit:GetMovesRemaining() .. '|' .. unit:GetMaxMoves() .. '|' "
+        "  .. (here and Locale.Lookup(here:GetName()) or '') .. '|' .. tr:GetNumOutgoingRoutes() .. '|' "
+        "  .. tr:GetOutgoingRouteCapacity() .. '|' .. ux .. ',' .. uy .. '|' .. table.concat(why, '; ')) "
+        "print('---END---')"
+    )
+
+
+def parse_trade_none(lines) -> dict | None:
+    for ln in lines or []:
+        if ln.startswith("TDNONE|"):
+            p = ln.split("|", 7)
+            if len(p) < 8:
+                return None
+            try:
+                return {"moves": float(p[1]), "max_moves": float(p[2]), "city": p[3], "routes": int(p[4]),
+                        "capacity": int(p[5]), "at": p[6], "why": p[7].strip()}
+            except ValueError:
+                return None
+    return None
+
+
+def _moves(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:g}"
+
+
+def trade_none_note(st: dict | None) -> str:
+    """Why a Trader has no destination, after civ6-mcp's "No valid trade route destinations"."""
+    if not st:
+        return ""
+    why = f"The game says: {st['why']}." if st["why"] else "The game gave no reason."
+    where = (f"It is in {st['city']}." if st["city"] else
+             f"It is at ({st['at']}), not in a city: a route starts from the city the Trader is in, so move it or "
+             "teleport it to one first.")
+    return (f"\nThe game refuses every destination for this Trader now. {why} {where} It has "
+            f"{_moves(st['moves'])} of {_moves(st['max_moves'])} moves left, and {st['routes']} of your "
+            f"{st['capacity']} trade routes are in use.")
+
+
 
 # A city's attack list named units it could not attack. get_cities lists "CAN ATTACK" targets for a city with walls:
 # every unit within 3 tiles that is not the player's, at war or not, seen or not, civilians included, though a city
@@ -1470,6 +1548,81 @@ def verify_production_lua(city_id: int, item_name: str) -> str:
     )
 
 
+# Production refused with no reason. When CanStartOperation says no and the order does not land, civ6-mcp answers
+# "CANNOT_START|X cannot start." with at most a guess ("may require a completed district or prerequisite building").
+# Game 41 had 21 of these, 15 for Traders, and game 40 one more (turn 117). The game's production panel shows why an
+# item is greyed out from CanProduce's failure reasons (ProductionPanel.lua, ComposeFailureReasonStrings); those
+# reasons now follow the refusal, and for a Trader the Traders you have, the ones in production and your route
+# capacity.
+_PROD_TABLES = {"UNIT": "Units", "BUILDING": "Buildings", "DISTRICT": "Districts", "PROJECT": "Projects"}
+
+
+def production_reasons_lua(city_id: int, item_type: str, item_name: str, target_x=None, target_y=None) -> str:
+    """PRODWHY|<reason>; <reason>... from CanProduce and CanStartOperation, and for a Trader TRADERS|have|cap|cities."""
+    name = re.sub(r"[^A-Z0-9_]", "", str(item_name or "").upper())
+    table = _PROD_TABLES.get(str(item_type or "").upper(), "Units")
+    xy = (f"t[CityOperationTypes.PARAM_X] = {int(target_x)} t[CityOperationTypes.PARAM_Y] = {int(target_y)} "
+          if target_x is not None and target_y is not None else "")
+    param = {"UNIT": "PARAM_UNIT_TYPE", "BUILDING": "PARAM_BUILDING_TYPE", "DISTRICT": "PARAM_DISTRICT_TYPE",
+             "PROJECT": "PARAM_PROJECT_TYPE"}.get(str(item_type or "").upper(), "PARAM_UNIT_TYPE")
+    return (
+        f"local me = Game.GetLocalPlayer() local pCity = Players[me]:GetCities():FindID({int(city_id)} % 65536) "
+        f"local item = GameInfo.{table}['{name}'] "
+        "if pCity == nil or item == nil then print('---END---') return end "
+        "local bq = pCity:GetBuildQueue() local why, seen = {}, {} "
+        "local function add(res) if res == nil then return end "
+        "  local fr = res[CityCommandResults.FAILURE_REASONS] or res[CityOperationResults.FAILURE_REASONS] "
+        "  if fr then for _, v in ipairs(fr) do local s = Locale.Lookup(v):gsub('[|\\r\\n]', ' ') "
+        "    if s ~= '' and not seen[s] then seen[s] = true table.insert(why, s) end end end end "
+        "pcall(function() local ok, res = bq:CanProduce(item.Hash, false, true) add(res) end) "
+        f"pcall(function() local t = {{}} t[CityOperationTypes.{param}] = item.Hash {xy}"
+        "  local ok, res = CityManager.CanStartOperation(pCity, CityOperationTypes.BUILD, t, true) add(res) end) "
+        "print('PRODWHY|' .. table.concat(why, '|')) "
+        f"if '{name}' == 'UNIT_TRADER' then pcall(function() "
+        "  local have, building = 0, {} "
+        "  for _, u in Players[me]:GetUnits():Members() do "
+        "    if GameInfo.Units[u:GetType()].UnitType == 'UNIT_TRADER' then have = have + 1 end end "
+        "  for _, c in Players[me]:GetCities():Members() do "
+        "    if c:GetBuildQueue():GetCurrentProductionTypeHash() == item.Hash then "
+        "      table.insert(building, Locale.Lookup(c:GetName())) end end "
+        "  print('TRADERS|' .. have .. '|' .. Players[me]:GetTrade():GetOutgoingRouteCapacity() .. '|' "
+        "    .. table.concat(building, ', ')) end) end "
+        "print('---END---')"
+    )
+
+
+def parse_production_reasons(lines) -> tuple[list[str], tuple[int, int, list[str]] | None] | None:
+    """(the game's reasons, (Traders, route capacity, cities building one) or None), or None when the probe failed."""
+    why, traders = None, None
+    for ln in lines or []:
+        if ln.startswith("PRODWHY|"):
+            why = [r for r in (re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", "", s)).strip()
+                               for s in ln[len("PRODWHY|"):].split("|")) if r]
+        elif ln.startswith("TRADERS|"):
+            p = ln.split("|", 3)
+            try:
+                traders = (int(p[1]), int(p[2]), [c for c in p[3].split(", ") if c] if len(p) > 3 else [])
+            except (ValueError, IndexError):
+                traders = None
+    return None if why is None else (why, traders)
+
+
+def production_refusal(out: str, item_name: str, found) -> str:
+    """civ6-mcp's CANNOT_START refusal with the game's reasons in place of its guess."""
+    if not out.startswith("Error: CANNOT_START|") or found is None:
+        return out
+    why, traders = found
+    extra = ""
+    if traders is not None:
+        have, cap, building = traders
+        inprod = (f", {len(building)} more in production ({', '.join(building)})" if building else
+                  ", none in production")
+        extra = f" You have {have} Trader{'s' if have != 1 else ''}{inprod}, and your trade route capacity is {cap}."
+    if why:
+        return f"Error: CANNOT_START|{item_name} cannot start here. The game says: {'; '.join(why)}.{extra}"
+    return f"{out.rstrip()} The game gave no reason.{extra}"
+
+
 def resume_turns(lines) -> str:
     """The turns left from resume_wonder_lua's OK:RESUME_SENT line, or '?'."""
     for ln in lines or []:
@@ -2172,6 +2325,103 @@ def gov_after_note(st: dict | None) -> str:
         return (f". ANARCHY until turn {st['anarchy_end']}: no government, and no gold, science, culture or faith "
                 "until then.")
     return ""
+
+
+# Policy changes. The game's Government screen lets you change policies for free on a turn you complete a civic
+# (GovernmentScreen.lua, IsAbleToChangePolicies). On any other turn it shows "Unlock policies for N gold"
+# (GetCostToUnlockPolicies) and disables that button when the treasury holds less. civ6-mcp's set_policies sent the
+# game's UNLOCK_POLICIES operation before every change with neither check, and answered only "Policies updated". In
+# game 41, turn 226, Opus swapped one card with about 172 gold in the treasury: the change cost about 430, the
+# treasury went to -257, and the debt brought rebels. Its own note: "Policy changes outside civic completion cost gold
+# (not warned by the tool)". The price is now read first. A change you cannot pay for is refused, as the game refuses
+# it. One you can pay for is refused once with the price, and the same call again that turn pays it.
+POLICY_COST_NOTE = (
+    "\n\nChanging policies is free on a turn you complete a civic. On other turns the game charges gold for it, as "
+    "its Government screen does (\"Unlock policies for N gold\"). When a change costs gold, this tool first changes "
+    "nothing and says the price; calling it again on the same turn pays it. A change you cannot pay for is refused.")
+
+
+def policy_state_lua() -> str:
+    """One POLSTATE| line: turn|cost|gold|faith|byFaith|civicDone|changeMade|openSlots|civicTurnsLeft|civicName."""
+    return (
+        "local me = Game.GetLocalPlayer() local p = Players[me] local c = p:GetCulture() "
+        "local civ = c:GetProgressingCivic() local civName = '' local left = -1 "
+        "if civ and civ >= 0 and GameInfo.Civics[civ] then civName = Locale.Lookup(GameInfo.Civics[civ].Name) "
+        "  left = c:GetTurnsLeftOnCurrentCivic() end "
+        "print('POLSTATE|' .. Game.GetCurrentGameTurn() .. '|' .. c:GetCostToUnlockPolicies() .. '|' "
+        "  .. math.floor(p:GetTreasury():GetGoldBalance()) .. '|' .. math.floor(p:GetReligion():GetFaithBalance()) "
+        "  .. '|' .. tostring(GlobalParameters.GOVERNMENT_UNLOCK_WITH_FAITH) .. '|' "
+        "  .. tostring(c:CivicCompletedThisTurn()) .. '|' .. tostring(c:PolicyChangeMade()) .. '|' "
+        "  .. c:GetNumPolicySlotsOpen() .. '|' .. left .. '|' .. civName) "
+        "print('---END---')"
+    )
+
+
+def parse_policy_state(lines) -> dict | None:
+    for ln in lines or []:
+        if ln.startswith("POLSTATE|"):
+            p = ln.split("|", 10)
+            if len(p) < 11:
+                return None
+            try:
+                return {"turn": int(p[1]), "cost": int(float(p[2])), "gold": int(float(p[3])),
+                        "faith": int(float(p[4])), "by_faith": p[5] not in ("0", "nil", ""),
+                        "civic_done": p[6] == "true", "change_made": p[7] == "true", "open_slots": int(p[8]),
+                        "civic_turns": int(p[9]), "civic": p[10]}
+            except ValueError:
+                return None
+    return None
+
+
+def _policy_price(st: dict) -> tuple[str, int]:
+    return ("faith", st["faith"]) if st["by_faith"] else ("gold", st["gold"])
+
+
+def _next_free_policy_change(st: dict) -> str:
+    if st["civic"] and st["civic_turns"] >= 0:
+        n = st["civic_turns"]
+        when = "next turn" if n <= 1 else f"in {n} turns"
+        return f"Policy changes are free on the turn you complete a civic: {st['civic']} completes {when}."
+    return ("Policy changes are free on the turn you complete a civic, and no civic is in progress: choose one with "
+            "set_research (category civic).")
+
+
+def policy_change_refusal(st: dict | None, confirmed: bool) -> str:
+    """Why set_policies changes nothing yet: the price, unpaid or unaffordable. "" when the change is free, confirmed
+    and affordable, or the state is unknown."""
+    if not st or st["cost"] <= 0:
+        return ""
+    unit, have = _policy_price(st)
+    if have < st["cost"]:
+        return (f"Error: POLICY_COST|Changing policies now costs {st['cost']} {unit} and you have {have}. The game "
+                f"charges for a policy change except on a turn you complete a civic, and refuses one you cannot pay "
+                f"for. Nothing changed. {_next_free_policy_change(st)}")
+    if confirmed:
+        return ""
+    return (f"Error: POLICY_COST_WARNING|Changing policies now costs {st['cost']} {unit} of your {have}. Nothing "
+            f"changed yet. {_next_free_policy_change(st)} To pay {st['cost']} {unit} now, call set_policies again "
+            "this turn.")
+
+
+def policy_paid_note(before: dict | None, after: dict | None) -> str:
+    if not before or before["cost"] <= 0:
+        return ""
+    unit, have = _policy_price(before)
+    if after:
+        now = _policy_price(after)[1]
+        return f"\nPaid {before['cost']} {unit} to change policies between civics: {have} before, {now} now."
+    return f"\nPaid {before['cost']} {unit} to change policies between civics ({have} before)."
+
+
+def policy_cost_line(st: dict | None) -> str:
+    """The get_policies line that says what a change costs this turn."""
+    if not st:
+        return ""
+    if st["cost"] <= 0:
+        return "\nChanging policies now: free this turn."
+    unit, have = _policy_price(st)
+    return (f"\nChanging policies now: costs {st['cost']} {unit} (you have {have}). "
+            f"{_next_free_policy_change(st)}")
 
 
 # War declarations. civ6-mcp reads the war state in the same Lua call that sends the declaration, before the game has
