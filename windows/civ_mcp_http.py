@@ -463,7 +463,8 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # game still refuses, the unit stays where it is and the agent is told. civ6-mcp's combat estimate also counted an
     # adjacent shot as melee (melee strength, river and flanking modifiers, damage to the attacker), so the estimate
     # treats every attack by a ranged unit as ranged.
-    _RANGED_UNIT = '(unitInfo ~= nil and (unitInfo.RangedCombat or 0) > 0 and unitInfo.Domain ~= "DOMAIN_AIR")'
+    _RANGED_UNIT = ('(unitInfo ~= nil and ((unitInfo.RangedCombat or 0) > 0 or (unitInfo.Bombard or 0) > 0) '
+                    'and unitInfo.Domain ~= "DOMAIN_AIR")')  # siege units too (game 40: bench_compat.siege_shot_lua)
     _IS_RANGED = "local isRanged = UnitManager.CanStartOperation(unit, UnitOperationTypes.RANGE_ATTACK, nil, true)\n"
     _MELEE_FALLBACK = ("    elseif dist <= 1 then\n"
                        "        -- Ranged failed at melee range: fall through to melee attack below\n"
@@ -591,6 +592,11 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
     # It sits under _attack_unit_settled, which retries and re-reads the attack.
     _lq.build_attack_unit = bc.attack_lua(_lq.build_attack_unit)  # GameState.attack_unit looks it up at call time
     _lq.build_attack_unit = bc.theological_lua(_lq.build_attack_unit, _lq.SENTINEL)  # religious attackers (bench_compat)
+    _lq.build_attack_unit = bc.air_attack_lua(_lq.build_attack_unit, _lq.SENTINEL)  # refused air strikes (bench_compat)
+    _lq.build_attack_unit = bc.siege_shot_lua(_lq.build_attack_unit)  # why a shot was refused (bench_compat)
+    _lq.build_combat_estimate_query = bc.game_estimate_lua(_lq.build_combat_estimate_query)  # the game's own preview
+    _lq.parse_combat_estimate = bc.game_estimate(_lq.parse_combat_estimate)
+    _gsm.narrate_combat_estimate = bc.game_estimate_narration(_gsm.narrate_combat_estimate)
 
     # The culture victory count (bench_compat.victory_query has why): the victory query also prints CULTOT rows, the
     # parse keeps them on the result, civ6-mcp's verdict compares your visiting tourists with each civ's domestic
@@ -670,6 +676,30 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     async def _send_diplomatic_action_checked(self, other_player_id, action):
         a = str(action).upper()
+        if a.replace("DIPLOACTION_", "").startswith("DECLARE_") and a.endswith("_WAR"):
+            # a city-state takes the game's player operation, not a session (bench_compat.city_state_war_lua has why)
+            try:
+                cs = bc.parse_city_state_war(await self.conn.execute_write(bc.city_state_war_lua(other_player_id),
+                                                                          timeout=10.0))
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("the city-state war check failed", exc_info=True)
+                cs = None
+            if cs and cs[0] in ("ALREADY", "CANNOT"):
+                return bc.city_state_war_refused(*cs)
+            if cs and cs[0] == "SENT":
+                st = None
+                for wait in (1.0, 2.0):
+                    await asyncio.sleep(wait)
+                    try:
+                        st = bc.parse_war_state(await self.conn.execute_write(bc.war_state_lua(other_player_id),
+                                                                              timeout=10.0))
+                    except Exception:
+                        logging.getLogger("civ_mcp_http").warning("reading the war state failed", exc_info=True)
+                        return f"WARN:WAR_UNCERTAIN|War on the city-state {cs[1]} was sent; check get_city_states."
+                    settled = bc.war_result("WARN:WAR_UNCERTAIN|", st)
+                    if settled:
+                        return settled
+                return bc.war_not_declared(a, st or {"name": cs[1]})
         if a.startswith("DECLARE_") and a.endswith("_WAR"):  # the war type, before civ6-mcp sends it (war_type_refused)
             try:
                 lines = await self.conn.execute_write(bc.war_type_lua(other_player_id, a), timeout=10.0)

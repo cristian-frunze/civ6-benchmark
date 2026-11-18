@@ -740,6 +740,177 @@ def theological_lua(original, sentinel: str = "---END---"):
     return build
 
 
+# Air strikes the game refused. civ6-mcp tries AIR_ATTACK only when the game's CanStartOperation allows it, and an air
+# unit it refuses falls through to the melee path, which answered "ATTACK_BLOCKED|Cannot attack ... at
+# ({target_x},{target_y}) ... Unit not adjacent" (the coordinates were never filled in: the message sits outside its
+# f-string). In game 40 (turns 174 and 183 to 185) bombers 4 to 10 tiles from Rio, Cologne and Ulm got that five
+# times. Replayed from turn 184's save, the game refused each strike on a tile Norway could not see (Cologne and Ulm
+# were revealed but not visible; CanStartOperation gave no failure reason), and allowed strikes on visible tiles in
+# range. An air unit the game refuses now gets the reason it can be told: no moves left, out of range, the tile not
+# visible, or none given. The melee message gets its coordinates.
+_AIR_ANCHOR = ("local isAir = (not isRanged) and UnitManager.CanStartOperation(unit, UnitOperationTypes.AIR_ATTACK, "
+               "nil, params)\n")
+_BLOCKED_XY = " at ({target_x},{target_y}) (map dist="
+
+
+def _air_refused_lua(x: int, y: int, sentinel: str) -> str:
+    x, y = int(x), int(y)
+    return (
+        'if (not isRanged) and (not isAir) and unitInfo and unitInfo.Domain == "DOMAIN_AIR" then\n'
+        "    local rng = unitInfo.Range or 0\n"
+        f"    local seen = PlayersVisibility[me] and PlayersVisibility[me]:IsVisible({x}, {y})\n"
+        "    local why\n"
+        "    if unit:GetMovesRemaining() <= 0 then\n"
+        "        why = 'it has no moves left this turn (an aircraft that has attacked or rebased waits for the next turn)'\n"
+        "    elseif dist > rng then\n"
+        "        why = 'the target is ' .. dist .. ' tiles away and its range is ' .. rng .. ': rebase it closer first '\n"
+        "          .. '(unit_action rebase)'\n"
+        "    elseif not seen then\n"
+        "        why = 'you cannot see that tile now (it is on your map, but no unit or city of yours has it in sight), and '\n"
+        "          .. 'aircraft strike only tiles in sight: move a unit within sight of it first'\n"
+        "    else\n"
+        "        why = 'the game gives no reason (it is in range and in sight; a war declared this turn takes effect for '\n"
+        "          .. 'attacks next turn)'\n"
+        "    end\n"
+        "    print('ERR:AIR_ATTACK_REFUSED|The game will not let ' .. unitInfo.UnitType .. ' at (' .. ux .. ',' .. uy\n"
+        f"      .. ') strike ' .. enemyName .. ' at ({x},{y}), ' .. dist .. ' tiles away: ' .. why .. '. Nothing was sent.')\n"
+        f"    print('{sentinel}') return\n"
+        "end\n"
+    )
+
+
+def air_attack_lua(original, sentinel: str = "---END---"):
+    """civ6-mcp's attack builder, with the game's refusal of an air strike said instead of a melee attempt."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        lua = lua.replace(_BLOCKED_XY, f" at ({int(target_x)},{int(target_y)}) (map dist=")
+        if lua.count(_AIR_ANCHOR) != 1:
+            return lua  # civ6-mcp changed: its own attack, unchanged
+        return lua.replace(_AIR_ANCHOR, _AIR_ANCHOR + _air_refused_lua(target_x, target_y, sentinel))
+    return build
+
+
+# Siege units (Catapult, Bombard, Artillery, Rocket Artillery) fire with their Bombard strength and have no
+# RangedCombat, which is all civ6-mcp reads. In game 40 every Artillery attack was estimated as melee, with the
+# unit's melee strength and a damage to the attacker ("Est damage to attacker: ~191 -> WARNING: attacker likely dies!"
+# for an Artillery firing at a helicopter two tiles away on turn 177; it took no damage), and on turn 142 an Artillery
+# that had moved, so could not fire, was sent into St. Petersburg as a melee move ("NOT_MOVED ... no combat has
+# happened"). The estimate now adds the game's own preview (UnitPanel.lua's CombatManager.SimulateAttackVersus, with
+# BOMBARD when bombard strength beats ranged, as the game's attack cursor does): the strengths with every modifier and
+# the damage each side takes. A refused shot says why when it can tell: a siege unit that moved, or a tile out of sight.
+_NO_LOS_RE = re.compile(r'print\("ERR:NO_LOS\|Cannot ranged-attack target at \((-?\d+),(-?\d+)\) from \(" \.\. ux \.\. '
+                        r'"," \.\. uy \.\. "\)\. LOS blocked or unit already attacked this turn\."\); '
+                        r'print\("([^"]*)"\); return\n')
+
+
+def _no_shot_lua(m) -> str:
+    x, y, sentinel = int(m.group(1)), int(m.group(2)), m.group(3)
+    return (
+        "local why = 'line of sight is blocked (hills, woods or a city in between), or it already attacked this turn'\n"
+        "        local mv, mx = unit:GetMovesRemaining(), -1\n"
+        "        pcall(function() mx = unit:GetMaxMoves() end)\n"
+        "        if unitInfo and (unitInfo.Bombard or 0) > (unitInfo.RangedCombat or 0) and mx > 0 and mv < mx then\n"
+        "            why = 'it moved this turn (' .. mv .. ' of ' .. mx .. ' moves left), and siege units fire only '\n"
+        "              .. 'before they move (the Expert Crew promotion lifts this): fire from here next turn before '\n"
+        "              .. 'moving it'\n"
+        f"        elseif PlayersVisibility[me] and not PlayersVisibility[me]:IsVisible({x}, {y}) then\n"
+        "            why = 'you cannot see that tile now, and units fire only at tiles in sight'\n"
+        "        end\n"
+        f'        print("ERR:NO_LOS|Cannot ranged-attack the target at ({x},{y}) from (" .. ux .. "," .. uy .. "): " '
+        f'.. why .. ". Nothing was sent."); print("{sentinel}"); return\n')
+
+
+def siege_shot_lua(original):
+    """civ6-mcp's attack builder, with the reason a ranged or siege unit could not fire, when the game shows it."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        return _NO_LOS_RE.sub(lambda m: _no_shot_lua(m), lua, count=1)
+    return build
+
+
+_EST_TAIL = '.. "|" .. myHP .. "|" .. enemyHP)\n'
+_GAMESIM_LUA = """pcall(function()
+    local ct = nil
+    local bc, rc = 0, 0
+    pcall(function() bc = unit:GetBombardCombat() or 0 end)
+    pcall(function() rc = unit:GetRangedCombat() or 0 end)
+    if not (unitInfo and unitInfo.Domain == "DOMAIN_AIR") then
+        if bc > rc then ct = CombatTypes.BOMBARD elseif rc > 0 then ct = CombatTypes.RANGED end
+    end
+    local r = CombatManager.SimulateAttackVersus(unit:GetComponentID(), enemy:GetComponentID(), ct)
+    if r == nil then return end
+    local a, d = r[CombatResultParameters.ATTACKER], r[CombatResultParameters.DEFENDER]
+    if a == nil or d == nil then return end
+    local t, tn = r[CombatResultParameters.COMBAT_TYPE], "?"
+    for k, v in pairs(CombatTypes) do if v == t then tn = k end end
+    local function n(x) return math.floor(tonumber(x) or 0) end
+    print("GAMESIM|" .. tn .. "|" .. n(a[CombatResultParameters.COMBAT_STRENGTH]) + n(a[CombatResultParameters.STRENGTH_MODIFIER])
+      .. "|" .. n(d[CombatResultParameters.COMBAT_STRENGTH]) + n(d[CombatResultParameters.STRENGTH_MODIFIER])
+      .. "|" .. n(d[CombatResultParameters.DAMAGE_TO]) .. "|" .. n(a[CombatResultParameters.DAMAGE_TO]))
+end)
+"""
+
+
+_ATT_RS = "local attRS = unitInfo and unitInfo.RangedCombat or 0\n"
+
+
+def game_estimate_lua(original):
+    """civ6-mcp's combat estimate query, plus the game's own preview of the same attack (GAMESIM line). Its own
+    arithmetic, used when the game gives no preview (a siege unit that cannot fire now), counts bombard strength as
+    ranged, so a siege unit is never estimated as melee."""
+    def build(unit_index: int, target_x: int, target_y: int) -> str:
+        lua = original(unit_index, target_x, target_y)
+        if lua.count(_EST_TAIL) != 1:
+            return lua  # civ6-mcp changed: its own estimate only
+        lua = lua.replace(_ATT_RS, "local attRS = unitInfo and math.max(unitInfo.RangedCombat or 0, unitInfo.Bombard or 0) "
+                                   "or 0\n")
+        return lua.replace(_EST_TAIL, _EST_TAIL + _GAMESIM_LUA)
+    return build
+
+
+def parse_game_estimate(lines) -> dict | None:
+    for ln in lines or []:
+        if str(ln).startswith("GAMESIM|"):
+            p = str(ln).split("|")
+            try:
+                return {"type": p[1], "att": int(p[2]), "def": int(p[3]), "to_def": int(p[4]), "to_att": int(p[5])}
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+_GAME_TYPES = {"MELEE": "Melee", "RANGED": "Ranged", "BOMBARD": "Bombard", "AIR": "Air", "RELIGIOUS": "Religious"}
+
+
+def game_estimate(original):
+    """civ6-mcp's estimate parser, with the game's preview in place of its own arithmetic when the game gave one."""
+    def parse(lines, att_cs, def_cs):
+        est = original(lines, att_cs, def_cs)
+        g = parse_game_estimate(lines)
+        if est is None or g is None or g["type"] == "?" or g["att"] <= 0:
+            return est
+        est.attacker_cs, est.defender_cs = g["att"], g["def"]
+        est.est_damage_to_defender, est.est_damage_to_attacker = g["to_def"], g["to_att"]
+        est.is_ranged = g["type"] in ("RANGED", "BOMBARD")
+        est.modifiers = ["all counted by the game"]
+        est.game_type = g["type"]
+        return est
+    return parse
+
+
+def game_estimate_narration(original):
+    """civ6-mcp's estimate text, labelled with the game's combat type when the numbers are the game's."""
+    def narrate(est) -> str:
+        text = original(est)
+        t = getattr(est, "game_type", None)
+        if not t:
+            return text
+        label = _GAME_TYPES.get(t, t.title())
+        return re.sub(r"^Combat Estimate \([^)]*\):", f"Combat Estimate ({label}, the game's own preview):", text,
+                      count=1)
+    return narrate
+
+
 def religious_state_lua(unit_index: int, ref: str) -> str:
     """Both sides of a theological attack after it: REL|<your HP or GONE>|<target HP or GONE> (one line)."""
     owner, uid = (int(v) for v in ref.split(":"))
@@ -2204,6 +2375,48 @@ def war_type_refused(action: str, lines) -> str | None:
             + (f": {why}" if why else " and gives no reason") + ". Nothing was sent. War types it accepts on "
             f"{name} now: {', '.join(can)}. A formal war needs an earlier denouncement; a surprise war costs more "
             "grievances and war weariness.")
+
+
+# War on a city-state. civ6-mcp declares every war through a diplomacy session (RequestSession "DECLARE_SURPRISE_WAR"),
+# which is how the game's DeclareWarPopup.lua declares war on a full civ. For anyone else it sends the player operation
+# DIPLOMACY_DECLARE_WAR instead, and a session with a city-state does nothing. In game 40 (turns 107, 108 and 133) the
+# agent declared war on Jerusalem five times and got WAR_NOT_DECLARED each time. Replayed from turn 107's save, the
+# player operation put Norway at war with Jerusalem by the next read. A war declaration on a city-state is now sent
+# that way, after the game's CanDeclareWarOn (what greys out the city-state screen's button), and the war state is read
+# again as for a civ.
+def city_state_war_lua(other_player_id: int) -> str:
+    """CSWAR|FULL for a full civ (nothing sent); for a city-state CSWAR|ALREADY|name, CSWAR|CANNOT|name or
+    CSWAR|SENT|name after the game's own war request."""
+    t = int(other_player_id)
+    return (
+        f"local me = Game.GetLocalPlayer() local t = {t} local cfg = PlayerConfigurations[t] "
+        "if cfg == nil or Players[t] == nil then print('CSWAR|NONE') print('---END---') return end "
+        "if cfg:GetCivilizationLevelTypeID() == CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then "
+        "  print('CSWAR|FULL') print('---END---') return end "
+        "local name = Locale.Lookup(cfg:GetCivilizationShortDescription()) local d = Players[me]:GetDiplomacy() "
+        "if d:IsAtWarWith(t) then print('CSWAR|ALREADY|' .. name) print('---END---') return end "
+        "if not d:CanDeclareWarOn(t) then print('CSWAR|CANNOT|' .. name) print('---END---') return end "
+        "local p = {} p[PlayerOperations.PARAM_PLAYER_ONE] = me p[PlayerOperations.PARAM_PLAYER_TWO] = t "
+        "UI.RequestPlayerOperation(me, PlayerOperations.DIPLOMACY_DECLARE_WAR, p) "
+        "print('CSWAR|SENT|' .. name) print('---END---')"
+    )
+
+
+def parse_city_state_war(lines) -> tuple[str, str] | None:
+    """(kind, name) from city_state_war_lua's line, or None when it did not answer."""
+    for ln in lines or []:
+        if ln.startswith("CSWAR|"):
+            p = ln.split("|")
+            return p[1], (p[2] if len(p) > 2 else "")
+    return None
+
+
+def city_state_war_refused(kind: str, name: str) -> str:
+    if kind == "ALREADY":
+        return f"Error: ALREADY_AT_WAR|You are already at war with the city-state {name}."
+    return (f"Error: CANNOT_DECLARE_WAR|The game will not let you declare war on the city-state {name} now (its "
+            "city-state screen would grey out the button) and gives no reason. A peace deal with it blocks war for "
+            "10 turns. Nothing was sent.")
 
 
 def war_not_declared(action: str, st: dict) -> str:

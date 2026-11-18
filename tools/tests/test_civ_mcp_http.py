@@ -1193,6 +1193,8 @@ async def main():
     class WarConn:
         def __init__(self, states): self.states, self.reads = list(states), 0
         async def execute_write(self, lua, timeout=None):
+            if "CSWAR|" in lua:  # the city-state check: a full civ, left to civ6-mcp
+                return ["CSWAR|FULL", "---END---"]
             if "WARVALID|" in lua:  # the war type check before the declaration: accepted
                 return ["WARNAME|America", "WARVALID|true", "---END---"]
             self.reads += 1
@@ -1221,9 +1223,57 @@ async def main():
           "peace with America") and "DECLARE_SURPRISE_WAR did not take effect" in r3 and g3.conn.reads == 2, r3)
     check("other actions: untouched", r4 == "OK:SENT|DENOUNCE sent to America" and g4.conn.reads == 0, r4)
 
+    # 16n1. War on a city-state (game 40, turns 107, 108 and 133: five declarations on Jerusalem, all WAR_NOT_DECLARED).
+    # The game's DeclareWarPopup.lua sends the player operation for anyone but a full civ; replayed from turn 107's save,
+    # that put Norway at war with Jerusalem.
+    cl = bcx.city_state_war_lua(8)
+    check("city-state war Lua: full civs left alone, CanDeclareWarOn, then the game's operation", "local t = 8 " in cl
+          and cl.index("CIVILIZATION_LEVEL_FULL_CIV") < cl.index("CanDeclareWarOn(t)")
+          < cl.index("UI.RequestPlayerOperation(me, PlayerOperations.DIPLOMACY_DECLARE_WAR, p)")
+          and "PARAM_PLAYER_ONE] = me" in cl and "PARAM_PLAYER_TWO] = t" in cl and "IsAtWarWith(t)" in cl)
+    check("city-state war: parsed", bcx.parse_city_state_war(["x", "CSWAR|SENT|Jerusalem"]) == ("SENT", "Jerusalem")
+          and bcx.parse_city_state_war(["CSWAR|FULL"]) == ("FULL", "") and bcx.parse_city_state_war(["x"]) is None)
+    check("city-state war: refusals", "already at war with the city-state Jerusalem" in bcx.city_state_war_refused(
+          "ALREADY", "Jerusalem") and bcx.city_state_war_refused("CANNOT", "Jerusalem").startswith(
+          "Error: CANNOT_DECLARE_WAR|The game will not let you declare war on the city-state Jerusalem"))
+
+    class CsConn:
+        def __init__(self, kind, states): self.kind, self.states, self.reads, self.lua = kind, list(states), 0, []
+        async def execute_write(self, lua, timeout=None):
+            self.lua.append(lua)
+            if "CSWAR|" in lua:
+                return [f"CSWAR|{self.kind}|Jerusalem" if self.kind != "FULL" else "CSWAR|FULL", "---END---"]
+            if "WARVALID|" in lua:
+                return ["WARNAME|America", "WARVALID|true", "---END---"]
+            self.reads += 1
+            return [f"WARSTATE|{self.states.pop(0)}|Jerusalem", "---END---"]
+    sent = []
+    async def count_diplo(self, other, action): sent.append(action); return uncertain
+    ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = count_diplo, no_sleep
+    try:
+        c1, c2, c3, c4 = (types.SimpleNamespace(conn=CsConn(k, st)) for k, st in
+                          (("SENT", ["false", "true"]), ("SENT", ["false", "false"]), ("CANNOT", []), ("FULL", ["true"])))
+        q1 = await GameState.send_diplomatic_action(c1, 8, "DECLARE_SURPRISE_WAR")
+        q2 = await GameState.send_diplomatic_action(c2, 8, "DECLARE_SURPRISE_WAR")
+        q3 = await GameState.send_diplomatic_action(c3, 8, "declare_surprise_war")
+        n_before_full = len(sent)
+        q4 = await GameState.send_diplomatic_action(c4, 5, "DECLARE_SURPRISE_WAR")
+    finally:
+        ns["_vendor_send_diplomatic_action"], ns["asyncio"].sleep = _vendor_diplo, _sleep
+    check("city-state war: sent the game's way, war on at the second look", n_before_full == 0
+          and q1.startswith("OK:WAR_DECLARED|At war with Jerusalem") and c1.conn.reads == 2, q1)
+    check("city-state war: still peace says so", q2.startswith("Error: WAR_NOT_DECLARED|The game still shows peace "
+          "with Jerusalem") and c2.conn.reads == 2, q2)
+    check("city-state war: refused before anything is sent", q3.startswith("Error: CANNOT_DECLARE_WAR|")
+          and c3.conn.reads == 0, q3)
+    check("a full civ: civ6-mcp's session, as before", sent == ["DECLARE_SURPRISE_WAR"]
+          and q4.startswith("OK:WAR_DECLARED|") and any("CSWAR|" in x for x in c4.conn.lua), q4)
+
     class AllyConn:
         def __init__(self): self.reads = 0
         async def execute_write(self, lua, timeout=None):
+            if "CSWAR|" in lua:
+                return ["CSWAR|FULL", "---END---"]
             if "WARVALID|" in lua:  # no war of any type open: civ6-mcp's own check refuses it
                 return ["WARNAME|Greece", "WARVALID|false", "---END---"]
             self.reads += 1
@@ -1264,6 +1314,8 @@ async def main():
     class FormalConn:
         def __init__(self): self.luas = []
         async def execute_write(self, lua, timeout=None):
+            if "CSWAR|" in lua:
+                return ["CSWAR|FULL", "---END---"]
             self.luas.append(lua)
             return FORMAL_NO
     sent = []
@@ -1605,14 +1657,60 @@ async def main():
 
     # 16g. Attacks on a city with no unit in it (game 20, turn 58: Salvador, "No hostile unit at (42,35)").
     lua = lq.build_attack_unit(13, 42, 35)
-    check("attack builder replaced", lq.build_attack_unit.__qualname__.startswith("theological_lua")
-          and lq.build_attack_unit.__closure__ and any(getattr(c.cell_contents, "__qualname__", "").startswith("attack_lua")
-                                                       for c in lq.build_attack_unit.__closure__))
+    def _chain(fn, seen=None):
+        seen = seen if seen is not None else []
+        seen.append(getattr(fn, "__qualname__", ""))
+        for c in (getattr(fn, "__closure__", None) or ()):
+            if callable(c.cell_contents) and getattr(c.cell_contents, "__qualname__", "").endswith(".build"):
+                _chain(c.cell_contents, seen)
+        return seen
+    _names = _chain(lq.build_attack_unit)
+    check("attack builder replaced", _names[0].startswith("siege_shot_lua")
+          and all(any(n.startswith(w) for n in _names) for w in ("air_attack_lua", "theological_lua", "attack_lua")), _names)
     check("attack: city centre or Encampment taken as the target", "DISTRICT_GARRISON" in lua
           and "Players[owner]:GetDistricts():Members()" in lua and "enemyName = di.DistrictType" in lua
           and lua.index("DISTRICT_GARRISON") < lua.index("No hostile unit or city at (42,35)")
           and lua.index("No hostile unit or city at") < lua.index("IsAtWarWith(enemyOwner)"))
     check("attack: an undefended district says pillage", "has no defences to attack" in lua and "unit_action pillage" in lua)
+    # Game 40 (turns 174, 183 to 185): bombers refused at Rio, Cologne and Ulm got "ATTACK_BLOCKED ... at
+    # ({target_x},{target_y}) ... not adjacent"; replayed from turn 184's save, the game refused strikes on tiles not in sight.
+    check("attack: the melee refusal has its coordinates", "({target_x}" not in lua and "at (42,35) (map dist=" in lua)
+    ia = lua.find("UnitOperationTypes.AIR_ATTACK, nil, params)\n")
+    check("attack: a refused air strike is said, not tried as melee", 0 < ia < lua.find("ERR:AIR_ATTACK_REFUSED")
+          < lua.find("if isAir then") and 'unitInfo.Domain == "DOMAIN_AIR"' in lua
+          and "PlayersVisibility[me]:IsVisible(42, 35)" in lua and "aircraft strike only tiles in sight" in lua
+          and "rebase it closer first" in lua and "no moves left this turn" in lua, lua[ia:ia + 1600])
+    check("attack: the air refusal ends the call", lua.count("ERR:AIR_ATTACK_REFUSED") == 1
+          and "Nothing was sent.')\n    print('---END---') return\nend\n" in lua)
+    # Game 40, turn 142: an Artillery that had moved could not fire, was taken for melee and sent into St. Petersburg.
+    check("attack: siege units take the ranged path", "(unitInfo.Bombard or 0) > 0" in lua.split("local isAir")[0])
+    check("attack: a refused shot says why", "LOS blocked or unit already attacked" not in lua
+          and "siege units fire only '" in lua and "'before they move" in lua and "PlayersVisibility[me]:IsVisible(42, 35)" in lua
+          and lua.count("ERR:NO_LOS|Cannot ranged-attack the target at (42,35)") == 1, lua[lua.find("local why = 'line"):][:900])
+    # Game 40: every Artillery attack was estimated as melee ("WARNING: attacker likely dies!" on turn 177).
+    el = lq.build_combat_estimate_query(13, 42, 35)
+    check("estimate: the game's own preview after civ6-mcp's line", el.index('print("ESTIMATE|') < el.index(
+          "CombatManager.SimulateAttackVersus(unit:GetComponentID(), enemy:GetComponentID(), ct)") < el.rindex("---END---")
+          and "ct = CombatTypes.BOMBARD" in el and 'print("GAMESIM|"' in el, el[-1400:])
+    check("estimate without the preview: bombard strength counts as ranged", "math.max(unitInfo.RangedCombat or 0, "
+          "unitInfo.Bombard or 0)" in el and "local attRS = unitInfo and unitInfo.RangedCombat or 0\n" not in el)
+    EST = ["ESTIMATE|UNIT_ARTILLERY|UNIT_HELICOPTER|64|91|0|flank +4|100|82"]
+    e0 = lq.parse_combat_estimate(EST, 0, 0)
+    e1 = lq.parse_combat_estimate(EST + ["GAMESIM|BOMBARD|68|74|17|0", "---END---"], 0, 0)
+    check("estimate: civ6-mcp's arithmetic without the preview", not e0.is_ranged and e0.est_damage_to_attacker > 100
+          and not hasattr(e0, "game_type"))
+    check("estimate: the game's numbers when it gave them", e1.is_ranged and (e1.attacker_cs, e1.defender_cs,
+          e1.est_damage_to_defender, e1.est_damage_to_attacker) == (68, 74, 17, 0) and e1.game_type == "BOMBARD")
+    t1 = ns["_gsm"].narrate_combat_estimate(e1)
+    check("estimate text: the game's type, no attacker damage", t1.startswith("Combat Estimate (Bombard, the game's own "
+          "preview):\n  UNIT_ARTILLERY (CS:68, HP:100) vs UNIT_HELICOPTER (CS:74, HP:82)") and "attacker" not in t1
+          and "likely dies" not in t1, t1)
+    e2 = lq.parse_combat_estimate(EST + ["GAMESIM|AIR|85|60|45|12"], 0, 0)
+    t2 = ns["_gsm"].narrate_combat_estimate(e2)
+    check("estimate text: an air strike shows the damage the plane takes", t2.startswith("Combat Estimate (Air, the "
+          "game's own preview)") and "Est damage to attacker: ~12" in t2, t2)
+    check("estimate: a bad or empty preview is ignored", not hasattr(lq.parse_combat_estimate(EST + ["GAMESIM|?|0|0|0|0"],
+          0, 0), "game_type") and bcx.parse_game_estimate(["GAMESIM|BOMBARD|x"]) is None)
     # Game 37 (turns 169 and 170): Sparta with a Machine Gun, then a Great Musician, in it; the game hit the walls.
     check("attack: a defended city is the target with units in it too", "do\n    local plot = Map.GetPlot(42, 35)" in lua
           and "elseif di and enemy == nil then" in lua and "if enemy == nil then\n    local plot" not in lua
