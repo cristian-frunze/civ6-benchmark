@@ -103,6 +103,7 @@ Results land in [`results/`](results/); `tools/report.py` builds one page compar
 - `tools/archive.py` - keep the full record of a running game (see above)
 - `tools/timeline.py` - join a run's transcripts and civ6-mcp records into a per-turn timeline
 - `tools/results.py` and `tools/report.py` - copy a finished game's public files into `results/`, and build one HTML page comparing the games (cost, pace, tech lead, standings)
+- `tools/overview/` - build the overview page: the difficulty ladder, tech-lead small multiples, cost per game and a ledger of every game
 - `tools/warroom/` and `warroom/` - the live war room page: map, standings, each agent's latest moves, thoughts and API cost
 - `remote/` - run PowerShell on the game PC over SSH, in session 0 (`zps.sh`) or in the desktop session (`zexec.sh`), copy files, and keep the SSH tunnel to the MCP server (`tunnel.sh`). `CIV_HOST` defaults to `zenbook`.
 - `tools/tuner_exec.py` - run Lua in any named Civ 6 Lua state over FireTuner (only while no MCP server holds the connection)
