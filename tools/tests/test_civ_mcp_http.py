@@ -5,7 +5,7 @@ network needed.
 
     cd vendor/civ6-mcp && uv run --frozen python ../../tools/tests/test_civ_mcp_http.py
 """
-import asyncio, inspect as _inspect, logging, os, shutil, sys, tempfile, types
+import asyncio, inspect as _inspect, json, logging, os, shutil, sys, tempfile, types
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ["CIV_MCP_BASE_GAME"] = "1"
 # On the PC the Lua prelude sits next to the module, as here.
@@ -471,6 +471,31 @@ async def main():
         gs = WarGS(None)
         msg, adv = await ns["_mid_turn_leader_screen_first"](gs, "lua", 105)
         check("wars unknown: civ6-mcp's reading, as before", msg.startswith("WAR DECLARED by India"), msg)
+        # Game 42, turns 112 and 145: a second session waited behind the war declaration, and the game took no orders
+        # until it was answered.
+        china = lq.DiplomacySession(session_id=3, other_player_id=3, other_civ_name="China",
+                                    other_leader_name="Qin Shi Huang", choices=[],
+                                    dialogue_text="Will you allow us to establish an embassy in your capital?")
+        calls = []
+        async def war_then_china(self):
+            calls.append(1)
+            return india() if len(calls) == 1 else [china]
+        ns["_original_get_sessions"] = war_then_china
+        gs = WarGS(set())
+        msg, adv = await ns["_mid_turn_leader_screen_first"](gs, "lua", 105)
+        check("war declared with a second session behind it: listed, answer it first",
+              msg.startswith("WAR DECLARED by India (Gandhi)! Session dismissed.")
+              and "Another diplomacy session is open behind the war declaration. Answer it first" in msg
+              and "China (Qin Shi Huang)" in msg and "Will you allow us to establish an embassy" in msg
+              and adv is False, msg)
+        calls.clear()
+        async def war_only(self):
+            calls.append(1)
+            return india() if len(calls) == 1 else []
+        ns["_original_get_sessions"] = war_only
+        msg, adv = await ns["_mid_turn_leader_screen_first"](WarGS(set()), "lua", 105)
+        check("war declared, nothing behind it: civ6-mcp's result unchanged", msg.startswith("WAR DECLARED by India")
+              and "Another diplomacy session" not in msg and len(calls) == 3, (msg, len(calls)))
     finally:
         ns["_original_get_sessions"], ns["_turn_active"], etm._get_turn_number, ns["asyncio"].sleep = saved
     # India's offer on game 28's turn 120 (live): a peace treaty both ways and 48 gold a turn, listed as gold alone.
@@ -845,7 +870,8 @@ async def main():
     GAME = types.SimpleNamespace(conn=DigConn())
     out = await ua.fn(CTX, unit_id=65543, action="excavate")
     check("excavate: lists the two sides to pick from", out.startswith("EXCAVATED|(60,27): the site is gone")
-          and "improvement='Barbarians'" in out and "GetUnit(me, 7)" in GAME.conn.sent[0], out)
+          and "improvement='Barbarians'" in out
+          and "GetUnit(me, 7)" in next(l for l in GAME.conn.sent if "UNITOPERATION_EXCAVATE" in l), out)
     out = await ua.fn(CTX, unit_id=65543, action="excavate")
     check("excavate again: the artifact still waits", out.startswith("ARTIFACT_WAITING|"), out)
     out = await ua.fn(CTX, unit_id=65543, action="excavate", improvement="nope")
@@ -1083,7 +1109,8 @@ async def main():
           "of your 4 trade routes are in use.") and "UnitManager.GetUnit(me, 24)" in _tdc.lua[0], _td1)
     check("get_trade_destinations: a list is left alone", _td2 == "3 trade route destinations:" and len(_tdc.lua) == 1)
     _t = mcp._tool_manager.get_tool("get_trade_destinations")
-    check("get_trade_destinations: wrapped", _t.fn.__wrapped__.__code__ is ns["_says_why_no_route"](lambda: None).__code__)
+    check("get_trade_destinations: wrapped", _t.fn.__wrapped__.__code__ is ns["_checks_unit_id"](lambda: None).__code__
+          and _t.fn.__wrapped__.__wrapped__.__code__ is ns["_says_why_no_route"](lambda: None).__code__)
 
     # 16i. A city's CAN ATTACK list is the game's own target list (game 20: a Builder on turn 77, units of a civ at
     # peace on turn 172).
@@ -1574,6 +1601,15 @@ async def main():
           bcx.policy_change_refusal(dict(st, civic="", civic_turns=-1), False))
     check("by faith: priced in faith", "costs 430 faith and you have 55." in
           bcx.policy_change_refusal(dict(st, by_faith=True), False))
+    war = "WAR DECLARED by Russia (Peter)! Session dismissed.\nTurn did not advance — call end_turn again."
+    check("war note: open sessions listed after a war declared at the turn end",
+          bcx.war_then_sessions_note(war, "1 pending diplomacy session(s):\n  China").startswith(war + "\nAnother "
+                                                                                                   "diplomacy session")
+          and bcx.war_then_sessions_note(war, "1 pending diplomacy session(s):\n  China").endswith("  China"))
+    check("war note: unchanged with nothing open, or another result", bcx.war_then_sessions_note(war, "") == war
+          and bcx.war_then_sessions_note(war, "No pending diplomacy sessions.") == war
+          and bcx.war_then_sessions_note("Turn paused", "x") == "Turn paused" and bcx.war_then_sessions_note(None, "x")
+          is None)
     check("paid note: before and after", bcx.policy_paid_note(rich, dict(rich, gold=470, cost=0))
           == "\nPaid 430 gold to change policies between civics: 900 before, 470 now.")
     check("paid note: none when free or unknown", bcx.policy_paid_note(dict(st, cost=0), st) == ""
@@ -2242,7 +2278,7 @@ async def main():
     check("rush_wonder: the wonder's production and the charges, before and after", out == "WONDER_RUSHED|"
           "BUILDING_GREAT_LIBRARY in Xi’an: 66 -> 126 of 400 production. Builder charges 3 -> 2. The order took the "
           "Builder's moves; it can add another charge next turn." and len(GAME.conn.reads) == 1, out)
-    rl = GAME.conn.writes[0]
+    rl = next(w for w in GAME.conn.writes if "print('SLOT|" not in w)
     check("rush_wonder Lua: the game's command, checked first, for unit 9",
           all(x in rl for x in ("unit:GetMovesRemaining()", "GameInfo.UnitCommands['UNITCOMMAND_WONDER_PRODUCTION']", "FindID(9)", "GetUnit(me, 9)",
                                 "UnitManager.CanStartCommand(unit, cmd.Hash, false, true)", "UnitManager.RequestCommand(unit, cmd.Hash)",
@@ -2321,14 +2357,15 @@ async def main():
     out = await ua.fn(CTX, unit_id=65545, action="designate_park")
     check("designate_park: the park read back from the tile", out == "NATIONAL_PARK_CREATED|Kwila National Park at (38,23), "
           "on the diamond of four tiles there. Its tourism equals the appeal of its tiles. The Naturalist was used up.", out)
-    pl = GAME.conn.writes[0]
+    pws = [w for w in GAME.conn.writes if "print('SLOT|" not in w]
+    pl = pws[0]
     check("designate_park Lua: the game's operation, checked first, for unit 9; the sites from GetPossibleParkTiles",
           all(x in pl for x in ("FindID(9)", "ut.ParkCharges", "GameInfo.UnitOperations['UNITOPERATION_DESIGNATE_PARK']",
                                 "UnitManager.CanStartOperation(unit, op.Hash, nil, false, OperationResultsTypes.NO_TARGETS)",
                                 "UnitManager.RequestOperation(unit, op.Hash)", "Game.GetNationalParks():GetPossibleParkTiles(me)",
                                 "p:GetAppeal()", "FAILURE_REASONS"))
           and pl.index("CanStartOperation") < pl.index("RequestOperation") and "PARAM_X" not in pl
-          and "IsNationalPark()" in GAME.conn.writes[1] and "FindID(9)" in GAME.conn.writes[1], pl)
+          and "IsNationalPark()" in pws[1] and "FindID(9)" in pws[1], pl)
     GAME = types.SimpleNamespace(conn=ParkConn(refuse="Must be on a valid National Park tile"))
     out = await ua.fn(CTX, unit_id=65545, action="designate_park")
     check("designate_park refused on a site: the reason and the sites with appeal", out == "Error: CANNOT_DESIGNATE_PARK|The "
@@ -2399,7 +2436,7 @@ async def main():
     GAME = types.SimpleNamespace(conn=AirConn())
     out = await ua.fn(CTX, unit_id=8650771, action="rebase", target_x=45, target_y=24)
     check("rebase: the aircraft's new tile read back", out == "REBASED|UNIT_BOMBER from (32,39) to (45,24).", out)
-    rl = GAME.conn.writes[0]
+    rl = next(w for w in GAME.conn.writes if "print('SLOT|" not in w)
     check("rebase Lua: the game's operation with the tile, checked first; the bases from GetOperationTargets",
           all(x in rl for x in ("FindID(19)", "ut.Domain ~= 'DOMAIN_AIR'", "UnitManager.GetOperationTargets(unit, UnitOperationTypes.REBASE)",
                                 "UnitOperationResults.PLOTS", "params[UnitOperationTypes.PARAM_X] = tx",
@@ -2527,6 +2564,41 @@ async def main():
     g = moves_game(0)
     check("activate that worked: unchanged, no query", await GameState.activate_great_person(g, 1)
           == "GP_ACTIVATED|Isaac Newton at 42,40" and g.conn.reads == [])
+    # Game 42: Boris Orlovsky placed one of his three works per activation, and each result said only GP_ACTIVATED.
+    class WorksConn:
+        def __init__(self, replies): self.replies, self.sent = list(replies), []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            return [self.replies.pop(0) if self.replies else "GPW|gone", lq.SENTINEL]
+    art = "GREAT_PERSON_CLASS_ARTIST"
+    async def fake_art(self, i): return "GP_ACTIVATED|Boris Orlovsky (UNIT_GREAT_ARTIST) at 36,21"
+    ns["_original_activate"] = fake_art
+    saved_sleep = ns["asyncio"].sleep
+    async def no_sleep_gp(_): return None
+    ns["asyncio"].sleep = no_sleep_gp
+    try:
+        g = SimpleNamespace(conn=WorksConn([f"GPW|{art}|3|3|A;B;C", f"GPW|{art}|3|3|A;B;C", f"GPW|{art}|3|2|B;C"]))
+        out = await GameState.activate_great_person(g, 7)
+        check("activate a work-holding Great Person: placed one, still holds two, named",
+              out.startswith("GP_ACTIVATED|Boris Orlovsky") and "It placed 1 Great Work and still holds 2 of its 3 (B, C)"
+              in out and "activate it again" in out and len(g.conn.sent) == 3, (out, len(g.conn.sent)))
+        g = SimpleNamespace(conn=WorksConn([f"GPW|{art}|3|1|C", "GPW|gone"]))
+        out = await GameState.activate_great_person(g, 7)
+        check("activate the last work: used up", out.endswith(" It placed its last Great Work and is used up."), out)
+        g = SimpleNamespace(conn=WorksConn([f"GPW|{art}|3|2|B;C"] + [f"GPW|{art}|3|2|B;C"] * 5))
+        out = await GameState.activate_great_person(g, 7)
+        check("activate, nothing placed after 3 s: said so", "The game has not placed a Great Work yet: it still "
+              "holds 2 of its 3 (B, C)" in out and len(g.conn.sent) == 6, (out, len(g.conn.sent)))
+        g = SimpleNamespace(conn=WorksConn(["GPW|GREAT_PERSON_CLASS_SCIENTIST|0|0|"]))
+        out = await GameState.activate_great_person(g, 7)
+        check("activate another class: unchanged, one probe", out == "GP_ACTIVATED|Boris Orlovsky (UNIT_GREAT_ARTIST) "
+              "at 36,21" and len(g.conn.sent) == 1, (out, len(g.conn.sent)))
+    finally:
+        ns["asyncio"].sleep = saved_sleep
+    check("gp works: parse", bc.parse_gp_works(["GPW|gone"]) == {"gone": True}
+          and bc.parse_gp_works([f"GPW|{art}|2|1|Starry"]) == {"gone": False, "cls": art, "total": 2, "held": 1,
+                                                                "names": ["Starry"]}
+          and bc.parse_gp_works(["GPW|none"]) is None and bc.parse_gp_works([]) is None)
 
     # 25. A turn that ends after civ6-mcp closes a session from a civ at war: the report names the new turn and the
     #     advisor budget resets (game 9, turn 144: "Turn 144 -> 144"); the autosave is named for the turn it holds.
@@ -2764,6 +2836,146 @@ async def main():
     while f is not None:
         chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
     check("unit_action carries the explorer tracking", ns["_tracks_explorers"](stock).__code__ in chain)
+
+    # Game 43, turns 26-27: Slinger 589829 (slot 5) was upgraded to Archer 851977, a new Settler took slot 5 (id
+    # 917509), and an order to 589829 moved the Settler. Unit orders check the whole id; upgrade_unit names the new id.
+    idcheck = ns["_checks_unit_id"](stock).__code__
+    for name in ("unit_action", "upgrade_unit", "promote_unit", "get_unit_promotions", "get_pathing_estimate",
+                 "get_trade_destinations"):
+        chain, f = [], tools.get_tool(name).fn
+        while f is not None:
+            chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+        check(f"{name} checks the unit id", idcheck in chain and chain[0] is bound)
+    chain, f = [], tools.get_tool("end_turn").fn
+    while f is not None:
+        chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+    check("end_turn has no unit id check", idcheck not in chain)
+    class SlotConn:
+        def __init__(self, slot, uat=()): self.slot, self.uat, self.sent = slot, list(uat), []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            if "print('SLOT|" in lua: return [self.slot, lq.SENTINEL]
+            if "print('UAT|" in lua: return [*(self.uat.pop(0) if self.uat else []), lq.SENTINEL]
+            raise AssertionError(lua[:200])
+    calls = []
+    async def inner(ctx=None, unit_id=None, **kw):
+        calls.append(unit_id); return "MOVING_TO|36,16"
+    checked = ns["_checks_unit_id"](inner)
+    GAME = types.SimpleNamespace(conn=SlotConn("SLOT|917509|UNIT_SETTLER|35|13|Settler"))
+    out = await checked(ctx=CTX, unit_id=589829, action="move")
+    check("stale id: refused, names the unit now in the slot, nothing ordered", out == "Error: UNIT_NOT_FOUND|No unit "
+          "has id 589829 now, so nothing was done. The id's slot (5) now holds another unit, your Settler (UNIT_SETTLER) "
+          "at (35,13), id 917509. A unit gets a new id when it is upgraded, and the next new unit takes the old one's "
+          "slot. get_units lists the current ids." and calls == [], out)
+    check("slot probe: the id's slot", "UnitManager.GetUnit(Game.GetLocalPlayer(), 5)" in GAME.conn.sent[0])
+    out = await checked(ctx=CTX, unit_id=917509, action="move")
+    check("the id that holds the slot: ordered", out == "MOVING_TO|36,16" and calls == [917509], out)
+    GAME = types.SimpleNamespace(conn=SlotConn("SLOT|none"))
+    out = await checked(ctx=CTX, unit_id=589829, action="move")
+    check("empty slot, no upgrade known: the tool says it", out == "MOVING_TO|36,16" and calls[-1] == 589829)
+    GAME.conn.sent.clear()
+    out = await checked(ctx=CTX, unit_id=5, action="move")
+    check("a bare slot number: no probe, as before", out == "MOVING_TO|36,16" and GAME.conn.sent == [])
+    GAME = types.SimpleNamespace(conn=SlotConn("SLOT|bad"))
+    out = await checked(ctx=CTX, unit_id=589829, action="move")
+    check("unreadable probe: the order goes ahead", out == "MOVING_TO|36,16")
+    async def up_inner(ctx=None, unit_id=None): return "UPGRADED|UNIT_SLINGER -> UNIT_ARCHER"
+    up = ns["_checks_unit_id"](up_inner, upgrade=True)
+    saved_sleep = ns["asyncio"].sleep
+    async def no_sleep_up(_): return None
+    ns["asyncio"].sleep = no_sleep_up
+    try:
+        GAME = types.SimpleNamespace(conn=SlotConn("SLOT|589829|UNIT_SLINGER|36|20|Slinger",
+                                                   [["UAT|589829|UNIT_SLINGER"], ["UAT|851977|UNIT_ARCHER", "UAT|1|UNIT_BUILDER"]]))
+        out = await up(ctx=CTX, unit_id=589829)
+        check("upgrade: the new id named", out == "UPGRADED|UNIT_SLINGER -> UNIT_ARCHER The upgraded unit has a new id, "
+              "851977 (UNIT_ARCHER at (36,20)); id 589829 no longer exists, and the next new unit may take its slot.", out)
+        check("upgrade: looked on the unit's tile", "u:GetX() == 36 and u:GetY() == 20" in GAME.conn.sent[1])
+        GAME = types.SimpleNamespace(conn=SlotConn("SLOT|917509|UNIT_SETTLER|35|13|Settler"))
+        ncalls = len(calls)
+        out = await checked(ctx=CTX, unit_id=589829, action="move")
+        check("an upgraded unit's old id: refused, names the new one", out.startswith("Error: UNIT_NOT_FOUND|No unit has "
+              "id 589829 now, so nothing was done. That unit was upgraded and is now UNIT_ARCHER id 851977: give the "
+              "order to that id. The id's slot (5) now holds another unit, your Settler") and len(calls) == ncalls, out)
+        GAME = types.SimpleNamespace(conn=SlotConn("SLOT|none"))
+        out = await checked(ctx=CTX, unit_id=589829, action="move")
+        check("an upgraded unit's old id, empty slot: refused, names the new one", out == "Error: UNIT_NOT_FOUND|No unit "
+              "has id 589829 now, so nothing was done. That unit was upgraded and is now UNIT_ARCHER id 851977: give the "
+              "order to that id. get_units lists the current ids.", out)
+        GAME = types.SimpleNamespace(conn=SlotConn("SLOT|720903|UNIT_SLINGER|30|10|Slinger", [[]] * 6))
+        out = await up(ctx=CTX, unit_id=720903)
+        check("upgrade, new unit not seen in 3 s: said so", out.endswith(" The upgraded unit has a new id, which the game "
+              "had not shown yet: get_units lists it. Id 720903 no longer exists.") and len(GAME.conn.sent) == 7,
+              (out, len(GAME.conn.sent)))
+        async def up_refused(ctx=None, unit_id=None): return "Error: CANNOT_UPGRADE|Must be in friendly territory."
+        GAME = types.SimpleNamespace(conn=SlotConn("SLOT|786440|UNIT_SLINGER|38|19|Slinger"))
+        out = await ns["_checks_unit_id"](up_refused, upgrade=True)(ctx=CTX, unit_id=786440)
+        check("upgrade refused: unchanged, one probe", out == "Error: CANNOT_UPGRADE|Must be in friendly territory."
+              and len(GAME.conn.sent) == 1)
+    finally:
+        ns["asyncio"].sleep = saved_sleep
+        ns["_UPGRADED"].clear()
+    check("upgrade target", bc.upgrade_target("UPGRADED|UNIT_SLINGER -> UNIT_ARCHER") == "UNIT_ARCHER"
+          and bc.upgrade_target("UPGRADED|X -> UNKNOWN") is None and bc.upgrade_target("Error: x") is None)
+    check("slot parse", bc.parse_unit_slot(["SLOT|917509|UNIT_SETTLER|35|13|Settler"]) == {
+        "none": False, "id": 917509, "type": "UNIT_SETTLER", "x": 35, "y": 13, "name": "Settler"}
+          and bc.parse_unit_slot(["SLOT|none"]) == {"none": True} and bc.parse_unit_slot([]) is None)
+    # Through issue_orders as well: _call runs the same wrapped tool.
+    GAME = types.SimpleNamespace(conn=SlotConn("SLOT|917509|UNIT_SETTLER|35|13|Settler"))
+    out = await ns["issue_orders"](CTX, json.dumps([{"tool": "unit_action", "args": {"unit_id": 589829, "action": "move",
+                                                                                      "target_x": 36, "target_y": 16}}]))
+    check("issue_orders: the stale id refused", out.startswith("1. unit_action(unit_id=589829, action=move, target_x=36, "
+          "target_y=16): Error: UNIT_NOT_FOUND|No unit has id 589829 now") and len(GAME.conn.sent) == 1, out)
+
+    # Game 42, turn 145: with India's deal open behind Russia's war declaration the game refused a Field Cannon's
+    # attack ("ranged units cannot melee") and took it once the deal was answered. A refused order names the session.
+    sess = ns["_says_session_open"](stock).__code__
+    for name in ("unit_action", "upgrade_unit", "promote_unit", "city_action", "purchase_item", "purchase_tile"):
+        chain, f = [], tools.get_tool(name).fn
+        while f is not None:
+            chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+        check(f"{name} names an open session when refused", sess in chain and chain[0] is bound)
+    for name in ("end_turn", "get_units", "respond_to_trade"):
+        chain, f = [], tools.get_tool(name).fn
+        while f is not None:
+            chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+        check(f"{name}: no session note", sess not in chain)
+    from civ_mcp.lua.models import DiplomacySession
+    india = DiplomacySession(session_id=2, other_player_id=2, other_civ_name="India", other_leader_name="Gandhi",
+                             choices=[], deal_summary="You offer: RESOURCE_IVORY x1 (30 turns); They offer: Gold per turn x1 (30 turns)")
+    class SessGame:
+        def __init__(self, sessions): self.sessions, self.reads = sessions, 0
+        async def get_diplomacy_sessions(self):
+            self.reads += 1
+            if isinstance(self.sessions, Exception): raise self.sessions
+            return self.sessions
+    refused = "Est damage to defender: ~28\nError: RANGED_REFUSED|The game would not let UNIT_FIELD_CANNON fire"
+    async def refuses(ctx=None, **kw): return refused
+    async def obeys(ctx=None, **kw): return "RANGE_ATTACK|target:UNIT_RUSSIAN_COSSACK at (36,14)"
+    GAME = SessGame([india])
+    out = await ns["_says_session_open"](refuses)(ctx=CTX, unit_id=5111808, action="attack")
+    check("refused with a deal open: the session named", out.startswith(refused + "\nA diplomacy session is open, and "
+          "the game refuses orders while one is (replayed on game 42's turn 145") and "Answer it, then send the order again.\n1 pending diplomacy "
+          "session(s):\n  India (Gandhi)" in out and "use respond_to_trade(other_player_id=2" in out, out)
+    GAME = SessGame([india])
+    out = await ns["_says_session_open"](obeys)(ctx=CTX, unit_id=5111808, action="attack")
+    check("an order that went through: no read, no note", out.startswith("RANGE_ATTACK|") and GAME.reads == 0, out)
+    GAME = SessGame([])
+    out = await ns["_says_session_open"](refuses)(ctx=CTX, unit_id=5111808, action="attack")
+    check("refused with no session open: as before", out == refused and GAME.reads == 1, out)
+    GAME = SessGame(RuntimeError("lua"))
+    out = await ns["_says_session_open"](refuses)(ctx=CTX, unit_id=5111808, action="attack")
+    check("sessions unreadable: as before", out == refused, out)
+    check("note: only on an error", bc.session_open_note("PURCHASED|x", "1 pending diplomacy session(s):") == "PURCHASED|x"
+          and bc.session_open_note("Error: CANNOT_PURCHASE|unknown", "No pending diplomacy sessions.")
+          == "Error: CANNOT_PURCHASE|unknown")
+    # The stale-id refusal comes first and reads no sessions.
+    class Both(SessGame):
+        def __init__(self): super().__init__([india]); self.conn = SlotConn("SLOT|917509|UNIT_SETTLER|35|13|Settler")
+    GAME = Both()
+    out = await tools.get_tool("unit_action").fn(ctx=CTX, unit_id=589829, action="move", target_x=36, target_y=16)
+    check("stale id with a session open: the id refusal alone", out.startswith("Error: UNIT_NOT_FOUND|")
+          and "diplomacy session" not in out and GAME.reads == 0, out)
 
 asyncio.run(main())
 

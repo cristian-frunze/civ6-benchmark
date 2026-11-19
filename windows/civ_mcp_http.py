@@ -1121,11 +1121,26 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
 
     _original_activate = _gsm.GameState.activate_great_person
 
+    async def _gp_works(game, unit_index):
+        try:
+            return bc.parse_gp_works(await game.conn.execute_write(bc.gp_works_lua(unit_index), timeout=10.0))
+        except Exception:
+            return None
+
     async def _activate_says_no_moves(self, unit_index):
+        before = await _gp_works(self, unit_index)  # the works a Writer, Artist or Musician holds (bench_compat)
         result = await _original_activate(self, unit_index)
         if result.startswith("Error: CANNOT_ACTIVATE|") and await _no_moves_left(self, unit_index):
             result += (" It has no moves left this turn, and a great person needs moves to activate: activate it "
                        "on the same tile next turn.")
+        if result.startswith("GP_ACTIVATED|") and before and before.get("cls") in bc._GP_WORK_CLASSES:
+            after = None
+            for _ in range(5):  # the activation lands a moment later (civ6-mcp: "async C++ activation")
+                await asyncio.sleep(0.6)
+                after = await _gp_works(self, unit_index)
+                if after and (after.get("gone") or after["held"] < before["held"]):
+                    break
+            result += bc.gp_works_note(before, after)
         return result
 
     _gsm.GameState.activate_great_person = _activate_says_no_moves
@@ -1632,6 +1647,18 @@ if os.environ.get("CIV_MCP_BASE_GAME", "1") == "1":
         if isinstance(msg, str) and kept and "diplomatic proposal from" in msg:
             msg += (f"\nYou were already at war with {', '.join(sorted(kept))} when you ended the turn: this session "
                     "is not a war declaration.")
+        if isinstance(msg, str) and msg.startswith("WAR DECLARED by") and not advanced:  # bench_compat, game 42
+            text = ""
+            for wait in (0.0, 2.0):
+                await asyncio.sleep(wait)
+                try:
+                    sessions = await gs.get_diplomacy_sessions()
+                except Exception:
+                    sessions = []
+                if sessions:
+                    text = nr.narrate_diplomacy_sessions(sessions)
+                    break
+            msg = bc.war_then_sessions_note(msg, text)
         return msg, advanced
 
     _etm._check_mid_turn_diplomacy = _mid_turn_leader_screen_first
@@ -2657,6 +2684,82 @@ def _bound_first(fn):
     return wrapper
 
 
+# A unit order goes to the unit in the id's slot (id % 65536), whatever its id. After an upgrade the old id's slot
+# goes to the next new unit, so an order to the old id moved another unit (game 43: a Settler, which barbarians then
+# took; bench_compat.unit_slot_lua has the story). Every tool that takes a unit_id now checks the whole id first and
+# refuses one whose unit is gone, naming what holds the slot now; upgrade_unit names the new unit's id.
+_UPGRADED: dict[int, tuple[int, str]] = {}
+
+
+def _checks_unit_id(fn, upgrade=False):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            uid = int(kwargs.get("unit_id"))
+        except (TypeError, ValueError):
+            return await fn(*args, **kwargs)
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        slot = None
+        if uid >= 65536:
+            try:
+                slot = bc.parse_unit_slot(await srv._get_game(ctx).conn.execute_write(bc.unit_slot_lua(uid),
+                                                                                       timeout=10.0))
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("unit id check failed", exc_info=True)
+        refusal = bc.stale_unit_refusal(uid, slot, _UPGRADED.get(uid))
+        if refusal:
+            return refusal
+        out = await fn(*args, **kwargs)
+        if upgrade and slot and not slot["none"] and isinstance(out, str) and out.startswith("UPGRADED|"):
+            new = None
+            try:
+                for _ in range(6):  # the upgrade plays out a frame or more after the order
+                    await asyncio.sleep(0.5)
+                    new = bc.upgraded_unit(await srv._get_game(ctx).conn.execute_write(
+                        bc.units_at_lua(slot["x"], slot["y"]), timeout=10.0), uid, bc.upgrade_target(out))
+                    if new:
+                        break
+            except Exception:
+                logging.getLogger("civ_mcp_http").warning("finding the upgraded unit failed", exc_info=True)
+            if new:
+                _UPGRADED[uid] = (new["id"], new["type"])
+            out += bc.upgrade_note(uid, new, slot["x"], slot["y"])
+        return out
+
+    return wrapper
+
+
+# A diplomacy session left open (in game 42, an AI's deal behind a war declaration) makes the game refuse orders, and
+# each tool then gave its own reason, often a wrong one ("ranged units cannot melee", "CANNOT_PURCHASE|unknown"). A
+# refused order now reads the open sessions and names them. Replayed on game 42's turn-145 save: the Field Cannon's
+# attack was refused with India's deal open and went through as soon as the deal was answered.
+_ORDER_TOOLS = ("unit_action", "upgrade_unit", "promote_unit", "city_action", "purchase_item", "purchase_tile")
+import civ_mcp.narrate as _narrate  # noqa: E402
+
+
+def _says_session_open(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        out = await fn(*args, **kwargs)
+        if not (isinstance(out, str) and "Error:" in out):
+            return out
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        try:
+            sessions = await srv._get_game(ctx).get_diplomacy_sessions()
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("reading diplomacy sessions after a refusal failed", exc_info=True)
+            return out
+        return bc.session_open_note(out, _narrate.narrate_diplomacy_sessions(sessions) if sessions else "")
+
+    return wrapper
+
+
+for _tool in mcp._tool_manager.list_tools():
+    if _tool.name in _ORDER_TOOLS:
+        _tool.fn = _says_session_open(_tool.fn)
+for _tool in mcp._tool_manager.list_tools():
+    if "unit_id" in ((_tool.parameters or {}).get("properties") or {}):
+        _tool.fn = _checks_unit_id(_tool.fn, upgrade=_tool.name == "upgrade_unit")
 for _tool in mcp._tool_manager.list_tools():
     _tool.fn = _bound_first(_tool.fn)
 # uvicorn closes a keep-alive connection after 5 idle seconds by default. Claude Code's client sometimes sent the next

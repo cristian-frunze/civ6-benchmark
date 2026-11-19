@@ -2076,6 +2076,93 @@ def parse_unit_at(lines) -> tuple[int, int] | str | None:
     return None
 
 
+# Unit ids. A unit's id is a serial number times 65536 plus its slot (get_units shows both, "[id:917509, idx:5]"),
+# and civ6-mcp finds a unit by its slot alone (id % 65536). An upgraded unit is a new unit with a new id, and the game
+# gives the old unit's slot to the next unit made. Game 43: on turn 26 Opus upgraded Slinger 589829 (slot 5), which
+# became Archer 851977, and a Settler finished that turn took slot 5 (id 917509). On turn 27 it ordered 589829 to
+# move, and the Settler walked out of the capital next to a barbarian horseman, who took it ("Mistake: unit IDs
+# shifted after upgrade; my settler got moved out of capital"). Unit orders now check the whole id first
+# (civ_mcp_http._checks_unit_id), and upgrade_unit names the new id.
+def unit_slot_lua(unit_id: int) -> str:
+    """SLOT|id|type|x|y|name for the unit in the id's slot, or SLOT|none."""
+    return (f"local u = UnitManager.GetUnit(Game.GetLocalPlayer(), {int(unit_id) % 65536}) "
+            "if u == nil then print('SLOT|none') else "
+            "local info = GameInfo.Units[u:GetType()] "
+            "local nm = (Locale.Lookup(u:GetName()):gsub('|', '/')) "
+            "print('SLOT|' .. u:GetID() .. '|' .. (info and info.UnitType or '?') .. '|' .. u:GetX() .. '|' .. u:GetY() "
+            ".. '|' .. nm) end print('---END---')")
+
+
+def parse_unit_slot(lines) -> dict | None:
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] != "SLOT" or len(p) < 2:
+            continue
+        if p[1] == "none":
+            return {"none": True}
+        try:
+            return {"none": False, "id": int(p[1]), "type": p[2], "x": int(p[3]), "y": int(p[4]),
+                    "name": "|".join(p[5:]) or p[2]}
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def stale_unit_refusal(unit_id: int, slot: dict | None, upgraded: tuple | None) -> str | None:
+    """The refusal for an id whose unit is gone, when its slot is empty or holds another unit; None to go ahead.
+    upgraded is (new id, new type) when this session upgraded that unit."""
+    if slot is None or int(unit_id) < 65536:  # probe failed, or a bare slot number: as before
+        return None
+    if not slot["none"] and slot["id"] == int(unit_id):
+        return None
+    if slot["none"] and upgraded is None:
+        return None  # the tool's own UNIT_NOT_FOUND says it
+    msg = f"Error: UNIT_NOT_FOUND|No unit has id {unit_id} now, so nothing was done."
+    if upgraded is not None:
+        msg += f" That unit was upgraded and is now {upgraded[1]} id {upgraded[0]}: give the order to that id."
+    if not slot["none"]:
+        msg += (f" The id's slot ({int(unit_id) % 65536}) now holds another unit, your {slot['name']} ({slot['type']}) "
+                f"at ({slot['x']},{slot['y']}), id {slot['id']}. A unit gets a new id when it is upgraded, and the next "
+                "new unit takes the old one's slot.")
+    return msg + " get_units lists the current ids."
+
+
+def units_at_lua(x: int, y: int) -> str:
+    """UAT|id|type for each of your units on the tile."""
+    return ("for _, u in Players[Game.GetLocalPlayer()]:GetUnits():Members() do "
+            f"if u:GetX() == {int(x)} and u:GetY() == {int(y)} then local info = GameInfo.Units[u:GetType()] "
+            "print('UAT|' .. u:GetID() .. '|' .. (info and info.UnitType or '?')) end end print('---END---')")
+
+
+def upgraded_unit(lines, old_id: int, new_type: str | None) -> dict | None:
+    """The unit of the upgraded type on the tile, other than the old id."""
+    for ln in lines or []:
+        p = ln.split("|")
+        if p[0] != "UAT" or len(p) < 3:
+            continue
+        try:
+            uid = int(p[1])
+        except ValueError:
+            continue
+        if uid != int(old_id) and (not new_type or p[2] == new_type):
+            return {"id": uid, "type": p[2]}
+    return None
+
+
+def upgrade_target(result: str) -> str | None:
+    """'UPGRADED|UNIT_SLINGER -> UNIT_ARCHER' -> 'UNIT_ARCHER'."""
+    m = re.match(r"UPGRADED\|\S+ -> (\S+)", result or "")
+    return m.group(1) if m and m.group(1) != "UNKNOWN" else None
+
+
+def upgrade_note(old_id: int, new: dict | None, x: int, y: int) -> str:
+    if new is not None:
+        return (f" The upgraded unit has a new id, {new['id']} ({new['type']} at ({x},{y})); id {old_id} no longer "
+                "exists, and the next new unit may take its slot.")
+    return (f" The upgraded unit has a new id, which the game had not shown yet: get_units lists it. Id {old_id} no "
+            "longer exists.")
+
+
 def rebase_refused(d: dict, x: int, y: int) -> str:
     """Why the game refused a rebase, with the bases in range nearest the tile asked for."""
     if d["status"] == "NOT_AIR":
@@ -2330,6 +2417,103 @@ def gov_after_note(st: dict | None) -> str:
         return (f". ANARCHY until turn {st['anarchy_end']}: no government, and no gold, science, culture or faith "
                 "until then.")
     return ""
+
+
+# A war declared as the turn ends. When an AI civ declares war in a session that opens as the player ends the turn,
+# civ6-mcp closes that session and answers "WAR DECLARED by X! Session dismissed. Turn did not advance". A second
+# session can be waiting behind it, and civ6-mcp did not look. In game 42 that happened twice: on turn 112 (Russia's
+# war, then China asking for an embassy) and on turn 145 (Russia's war, then India offering a deal). Until Opus found
+# and answered the second session, the game refused two shots at adjacent units, two city shots (as "already
+# fired"), two upgrades with gold enough, a wall purchase and four moves; once it was answered, the same orders
+# went through. The war result now lists any session still open and says to answer it first.
+def war_then_sessions_note(msg, sessions_text: str) -> str:
+    """end_turn's war-declared result, with the sessions still open after it (sessions_text: narrated, or '')."""
+    if not (isinstance(msg, str) and msg.startswith("WAR DECLARED by") and "Turn did not advance" in msg):
+        return msg
+    if not sessions_text or sessions_text.startswith("No pending"):
+        return msg
+    return (msg + "\nAnother diplomacy session is open behind the war declaration. Answer it first, before any "
+            "orders: the game refuses orders while one is open (replayed on game 42's turn 145, a Field Cannon's attack "
+            "was refused with India's deal open and went through once the deal was answered). Then end_turn again.\n"
+            + sessions_text)
+
+
+
+def session_open_note(out, sessions_text: str) -> str:
+    """A refused order's result, with the diplomacy sessions open while it was refused (sessions_text: narrated)."""
+    if not (isinstance(out, str) and "Error:" in out) or not sessions_text or sessions_text.startswith("No pending"):
+        return out
+    return (out + "\nA diplomacy session is open, and the game refuses orders while one is (replayed on game 42's turn "
+            "145, a Field Cannon's attack was refused with India's deal open and went through once the deal was "
+            "answered). Answer it, then send the order again.\n" + sessions_text)
+
+# Great Writers, Artists and Musicians hold several Great Works and place one per activation; the unit stays until the
+# last is placed. civ6-mcp reports the charges left only from GetActionCharges, which is 0 for them, so each
+# activation answered a bare "GP_ACTIVATED" and never said what the unit still held. In game 42 Opus read one such
+# result as a failure ("GP activate earlier reported success but didn't consume when no slots", turn 140). The works a
+# Great Person creates are the GreatWorks rows of its individual; the ones already made sit in city slots, read as the
+# game's Great Works screen reads them (GreatWorksOverview.lua: GetGreatWorkInSlot, GetGreatWorkTypeFromIndex).
+_GP_WORK_CLASSES = ("GREAT_PERSON_CLASS_WRITER", "GREAT_PERSON_CLASS_ARTIST", "GREAT_PERSON_CLASS_MUSICIAN")
+
+
+def gp_works_lua(unit_index: int) -> str:
+    """GPW|class|total|held|names held (;) for the unit's Great Person, or GPW|gone when the unit no longer exists."""
+    return (
+        f"local me = Game.GetLocalPlayer() local unit = UnitManager.GetUnit(me, {int(unit_index)}) "
+        "if unit == nil then print('GPW|gone') print('---END---') return end "
+        "local gp = unit:GetGreatPerson() local info = gp and GameInfo.GreatPersonIndividuals[gp:GetIndividual()] "
+        "if info == nil then print('GPW|none') print('---END---') return end "
+        "local cls = GameInfo.GreatPersonClasses[info.GreatPersonClassType] "
+        "local mine, total = {}, 0 "
+        "for w in GameInfo.GreatWorks() do if w.GreatPersonIndividualType == info.GreatPersonIndividualType then "
+        "  mine[w.Index] = Locale.Lookup(w.Name) total = total + 1 end end "
+        "local placed = {} "
+        "if total > 0 then for i = 0, 62 do local p = Players[i] if p ~= nil and p:IsAlive() then "
+        "  for _, c in p:GetCities():Members() do local b = c:GetBuildings() "
+        "    for bi in GameInfo.Buildings() do if b:HasBuilding(bi.Index) then "
+        "      for s = 0, b:GetNumGreatWorkSlots(bi.Index) - 1 do local gw = b:GetGreatWorkInSlot(bi.Index, s) "
+        "        if gw ~= nil and gw >= 0 then local t = b:GetGreatWorkTypeFromIndex(gw) "
+        "          if mine[t] then placed[t] = true end end end end end end end end end "
+        "local held = {} for t, n in pairs(mine) do if not placed[t] then held[#held + 1] = n:gsub('[|;]', ' ') end end "
+        "print('GPW|' .. (cls and cls.GreatPersonClassType or info.GreatPersonClassType) .. '|' .. total .. '|' "
+        "  .. #held .. '|' .. table.concat(held, ';')) print('---END---')"
+    )
+
+
+def parse_gp_works(lines) -> dict | None:
+    """{'gone': True} or {'cls', 'total', 'held', 'names'}; None when unread or not a Great Person."""
+    for ln in lines or []:
+        if ln == "GPW|gone":
+            return {"gone": True}
+        if ln.startswith("GPW|"):
+            p = ln.split("|", 4)
+            if len(p) < 5:
+                return None
+            try:
+                return {"gone": False, "cls": p[1], "total": int(p[2]), "held": int(p[3]),
+                        "names": [n for n in p[4].split(";") if n]}
+            except ValueError:
+                return None
+    return None
+
+
+def gp_works_note(before: dict | None, after: dict | None) -> str:
+    """After GP_ACTIVATED: what a Great Writer, Artist or Musician placed and still holds."""
+    if not before or before.get("gone") or before.get("cls") not in _GP_WORK_CLASSES or before["total"] <= 0:
+        return ""
+    if after and after.get("gone"):
+        return " It placed its last Great Work and is used up."
+    if not after:
+        return ""
+    placed = before["held"] - after["held"]
+    if after["held"] <= 0:
+        return " All its Great Works are in slots."
+    names = ", ".join(after["names"])
+    did = (f"It placed {placed} Great Work{'s' if placed != 1 else ''} and still holds {after['held']} of its "
+           f"{after['total']}" if placed > 0 else
+           f"The game has not placed a Great Work yet: it still holds {after['held']} of its {after['total']}")
+    return (f" {did} ({names}). It stays until all are placed: activate it again in a Theater Square building or "
+            "wonder with a free slot of that kind, this turn if it has moves left, or the next.")
 
 
 # Policy changes. The game's Government screen lets you change policies for free on a turn you complete a civic
