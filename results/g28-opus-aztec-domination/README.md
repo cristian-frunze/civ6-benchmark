@@ -18,7 +18,7 @@ Cache reads are 70% of the bill ($40.25), cache writes 17% ($9.85) and output 13
 
 | Turn | Original capital taken |
 |---|---|
-| 43 | Moscow (Russia, out on turn 50 when St Petersburg fell) |
+| 50 | St. Petersburg (Russia, out that turn; Moscow fell on turn 43) |
 | 63 | Washington (America, out on turn 80 when Boston fell) |
 | 74 | Uruk (Sumeria, out) |
 | 91 | Delhi (India) |
