@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Civ VI benchmarks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&display=swap" rel="stylesheet">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #F1F4F6; --ink: #15202B; --ink2: #364553; --muted: #5A6875; --rule: #CFD8DF; --grid: #DFE6EB; --wash: #E6ECF0;
+  --opus: #3446C4; --f52: #16876A; --son: #C2780F; --f51: #8A4FB0; --haiku: #8C2F1F;
+  --on-opus: #FFFFFF; --on-f52: #FFFFFF; --on-son: #15202B; --on-f51: #FFFFFF;
+  --tip-bg: #15202B; --tip-fg: #EEF2F5; --tip-muted: #A9B6C2;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #101C29; --ink: #E4EAF0; --ink2: #C2CDD7; --muted: #8F9DAB; --rule: #2B3C4E; --grid: #1C2B3B; --wash: #16253A;
+    --opus: #6F7FEA; --f52: #2FA783; --son: #C27E1C; --f51: #A579D0; --haiku: #C24A33;
+    --on-opus: #101C29; --on-f52: #101C29; --on-son: #101C29; --on-f51: #101C29;
+    --tip-bg: #E4EAF0; --tip-fg: #101C29; --tip-muted: #4A5A69;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101C29; --ink: #E4EAF0; --ink2: #C2CDD7; --muted: #8F9DAB; --rule: #2B3C4E; --grid: #1C2B3B; --wash: #16253A;
+  --opus: #6F7FEA; --f52: #2FA783; --son: #C27E1C; --f51: #A579D0; --haiku: #C24A33;
+  --on-opus: #101C29; --on-f52: #101C29; --on-son: #101C29; --on-f51: #101C29;
+  --tip-bg: #E4EAF0; --tip-fg: #101C29; --tip-muted: #4A5A69;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: Archivo, ui-sans-serif, system-ui, sans-serif;
+  font-size: 16px; line-height: 1.55; font-stretch: 100%; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+main { max-width: 1120px; margin: 0 auto; padding: 56px 24px 96px; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 2px; }
+.muted { color: var(--muted); }
+
+/* type */
+h1 { margin: 0; font-size: clamp(38px, 7vw, 76px); line-height: .98; font-stretch: 122%; font-weight: 820; letter-spacing: -.015em; max-width: 13ch; }
+.lede { margin: 22px 0 0; max-width: 60ch; font-size: 18px; color: var(--ink2); }
+h2 { margin: 0; font-size: 27px; line-height: 1.15; font-stretch: 114%; font-weight: 760; letter-spacing: -.005em; }
+.sub { margin: 8px 0 0; max-width: 64ch; color: var(--muted); }
+section { margin-top: 84px; }
+.num-font, table, .ax, .tiles, .lvl small, .lname small { font-stretch: 86%; font-variant-numeric: tabular-nums; }
+
+/* ladder */
+.ladder { margin-top: 44px; display: grid; grid-template-columns: minmax(170px, 220px) repeat(4, minmax(0, 1fr)); }
+.lrow { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; border-top: 1px solid var(--rule); }
+.lhead { border-top: 0; }
+.lvl { padding: 0 12px 14px 0; display: flex; flex-direction: column; }
+.lvl b { font-size: 21px; font-stretch: 118%; font-weight: 760; line-height: 1.1; }
+.lvl small, .lname small { color: var(--muted); font-size: 13px; }
+.lname { padding: 20px 16px 20px 0; display: flex; flex-direction: column; justify-content: flex-start; }
+.lname b { font-size: 17px; font-weight: 680; display: flex; align-items: center; gap: 9px; font-stretch: 100%; }
+.lname .sw { display: none; }
+.lname b::before { content: ""; width: 12px; height: 13.9px; flex: none; background: var(--c);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.lname small { padding-left: 21px; }
+.lcell { padding: 18px 12px 30px 0; display: flex; align-items: flex-start; }
+.lvlm { display: none; }
+.tiles { display: flex; flex-wrap: wrap; gap: 26px 8px; }
+.empty { color: var(--muted); font-size: 13px; padding-top: 20px; opacity: .8; }
+.tile { --w: 56px; position: relative; width: var(--w); height: calc(var(--w) * 1.1547); display: grid; place-items: center;
+  text-decoration: none; color: var(--ink); animation: pop .55s cubic-bezier(.2, .9, .25, 1.15) both; animation-delay: calc(var(--i) * 110ms + 120ms); }
+.tile svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.tile polygon { fill: var(--c); stroke: var(--c); stroke-width: 2; stroke-linejoin: round; transition: stroke-width .15s; }
+.tile.lost polygon { fill: color-mix(in srgb, var(--c) 9%, var(--bg)); }
+.tile.playing polygon { fill: none; stroke-dasharray: 4 3.5; }
+.tile .num { position: relative; font-weight: 720; font-size: 17px; letter-spacing: -.01em; }
+.tile.won .num { color: var(--on); }
+.tile.playing .num { font-size: 13px; font-weight: 600; color: var(--muted); }
+.tile .gid { position: absolute; top: 100%; left: -8px; right: -8px; margin-top: 4px; text-align: center; font-size: 12px; color: var(--muted); line-height: 1; }
+.tile:hover polygon, .tile:focus-visible polygon { stroke-width: 4; }
+.tile:focus-visible { outline: none; }
+.tile:focus-visible .gid { color: var(--ink); text-decoration: underline; }
+@keyframes pop { from { opacity: 0; transform: scale(.55) translateY(6px); } to { opacity: 1; transform: none; } }
+.key { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px 26px; color: var(--muted); font-size: 14px; }
+.key span { display: inline-flex; align-items: center; gap: 8px; }
+.key svg { width: 15px; height: 17.3px; overflow: visible; }
+.key polygon { stroke: var(--ink2); stroke-width: 1.6; stroke-linejoin: round; }
+
+/* findings */
+.findings { margin-top: 28px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; }
+.findings h3 { margin: 0 0 8px; font-size: 19px; line-height: 1.25; font-stretch: 108%; font-weight: 720; }
+.findings p { margin: 0; color: var(--ink2); }
+
+/* charts */
+.legend { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 14px; color: var(--ink2); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend svg { width: 22px; height: 8px; overflow: visible; }
+.panels { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 30px 40px; }
+.panel { margin: 0; min-width: 0; }
+.panel figcaption { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.panel figcaption b { font-size: 18px; font-stretch: 114%; font-weight: 740; }
+.panel figcaption span { color: var(--muted); font-size: 14px; }
+svg.chart { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .zero { stroke: var(--muted); stroke-width: 1.2; }
+.chart .ax { fill: var(--muted); font-size: 12px; font-family: Archivo, sans-serif; }
+.chart .axl { fill: var(--muted); font-size: 12px; font-family: Archivo, sans-serif; font-stretch: 86%; }
+.chart .ln { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; transition: opacity .12s; }
+.chart .ln.med { stroke-dasharray: 5 3.5; }
+.chart.hovering .ln { opacity: .22; }
+.chart.hovering .ln.hot { opacity: 1; stroke-width: 3; }
+.chart .end { stroke: var(--bg); stroke-width: 2; }
+.chart .end.lost { fill: var(--bg); stroke: var(--c); }
+.chart .end.won { fill: var(--c); }
+.chart .xh { stroke: var(--ink2); stroke-width: 1; opacity: 0; }
+.chart.hovering .xh { opacity: .55; }
+.chart .dot { stroke: var(--bg); stroke-width: 2; }
+.chart .dot.won { fill: var(--c); }
+.chart .dot.lost { fill: var(--bg); stroke: var(--c); stroke-width: 2.2; }
+.chart g[data-tip] { cursor: pointer; }
+.chart g[data-tip]:hover .dot, .chart g[data-tip]:focus .dot { stroke-width: 3.5; }
+.chart g[data-tip]:focus { outline: none; }
+.chart .rowl { fill: var(--ink2); font-size: 14px; font-family: Archivo, sans-serif; }
+.chart .lane { stroke: var(--grid); stroke-width: 1; }
+
+/* tables */
+.tablewrap { margin-top: 22px; overflow-x: auto; }
+.short { display: none; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th { text-align: left; font-weight: 520; color: var(--muted); font-size: 13.5px; padding: 0 14px 9px 0; border-bottom: 1px solid var(--rule); vertical-align: bottom; }
+td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--grid); vertical-align: baseline; }
+.r { text-align: right; }
+td .sw { display: inline-block; width: 10px; height: 11.55px; margin-right: 8px; background: var(--c); vertical-align: -1px;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.res { display: inline-block; position: relative; width: 10px; height: 11.55px; margin-right: 8px; background: var(--ink2); vertical-align: -1px;
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.res.lost::after, .res.playing::after { content: ""; position: absolute; inset: 1.8px; background: var(--bg);
+  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+.res.playing { background: var(--muted); }
+.nowrap { white-space: nowrap; }
+.cost { white-space: nowrap; }
+.cost .track { display: inline-block; width: 84px; height: 6px; margin-right: 10px; vertical-align: 2px; }
+.cost .bar { display: block; height: 100%; background: var(--c); border-radius: 0 3px 3px 0; }
+.ledger td a { font-weight: 640; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.ledger td:last-child { font-stretch: 92%; }
+.mt td:first-child { white-space: nowrap; }
+
+/* prose */
+.prose { max-width: 66ch; color: var(--ink2); }
+.prose p { margin: 14px 0 0; }
+
+/* plan */
+.plan { margin: 22px 0 0; padding-left: 1.4em; max-width: 66ch; color: var(--ink2); }
+.plan li { margin-top: 10px; padding-left: 4px; }
+.plan b { color: var(--ink); font-weight: 650; }
+
+/* question */
+.q { margin-top: 84px; max-width: 700px; }
+.q > p { margin: 8px 0 18px; color: var(--muted); }
+.opt { display: flex; align-items: flex-start; gap: 12px; margin-top: 8px; padding: 13px 15px; border: 1px solid var(--rule); border-radius: 8px; cursor: pointer; transition: background-color .15s, border-color .15s; }
+.opt:hover { background: var(--wash); }
+.opt:has(> input:checked) { border-color: var(--opus); background: color-mix(in srgb, var(--opus) 9%, var(--bg)); }
+.opt > input { flex: none; width: 17px; height: 17px; margin: 3px 0 0; accent-color: var(--opus); }
+.opt > span { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.opt b { font-weight: 640; }
+.opt small { color: var(--muted); font-size: 14.5px; }
+.opt em { flex: none; font-style: normal; font-size: 13px; color: var(--ink2); border: 1px solid var(--rule); border-radius: 999px; padding: 1px 9px; margin-top: 1px; }
+.opt textarea { display: block; width: 100%; min-height: 36px; margin-top: 6px; padding: 7px 10px; resize: none; border-radius: 6px; border: 1px solid var(--rule); background: var(--bg); color: var(--ink); font: inherit; font-size: 15px; }
+
+footer { margin-top: 84px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+footer p { margin: 4px 0; }
+
+/* tooltip */
+#tip { position: fixed; z-index: 40; left: 0; top: 0; max-width: 300px; padding: 9px 11px; border-radius: 6px; background: var(--tip-bg); color: var(--tip-fg);
+  font-size: 13.5px; line-height: 1.42; pointer-events: none; opacity: 0; transition: opacity .1s; font-stretch: 94%; font-variant-numeric: tabular-nums; }
+#tip.on { opacity: 1; }
+#tip .tipnote, #tip .tm { color: var(--tip-muted); }
+#tip table { font-size: 13px; width: auto; margin-top: 3px; }
+#tip td { padding: 1px 12px 1px 0; border: 0; }
+#tip td:last-child { padding-right: 0; text-align: right; }
+#tip tr.hot td { font-weight: 700; }
+#tip .sw { display: inline-block; width: 8px; height: 9.2px; margin-right: 6px; background: var(--c); clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+
+@media (max-width: 860px) {
+  .findings { grid-template-columns: 1fr; gap: 26px; }
+  .panels { grid-template-columns: 1fr; }
+  .hide-m { display: none; }
+}
+@media (max-width: 720px) {
+  main { padding: 36px 16px 72px; }
+  .lede { font-size: 17px; }
+  section, .q { margin-top: 64px; }
+  h2 { font-size: 24px; }
+  .ladder { display: block; margin-top: 30px; }
+  .lrow { display: block; padding: 14px 0 6px; }
+  .lrow.lhead { display: none; }
+  .lname { padding: 0 0 6px; flex-direction: row; align-items: baseline; flex-wrap: wrap; gap: 0 10px; }
+  .lname small { padding-left: 0; }
+  .lcell { display: grid; grid-template-columns: 74px minmax(0, 1fr); align-items: center; padding: 6px 0 22px; }
+  .lvlm { display: block; font-size: 15px; font-weight: 640; font-stretch: 110%; }
+  .tile { --w: 46px; }
+  .tile .num { font-size: 15px; }
+  .tiles { gap: 24px 7px; }
+  .empty { padding-top: 0; }
+  .hide-s { display: none; }
+  .cost .track { display: none; }
+  .long { display: none; }
+  .short { display: inline; }
+  .ledger .nowrap { white-space: normal; }
+  table { font-size: 14.5px; }
+  td, th { padding-right: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tile { animation: none; }
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Claude plays Civilization VI</h1>
+    <p class="lede">__COUNT__ games, each one Claude model against seven built-in AI civs, on the same map and start, with a Science victory as the goal. Each hex is a game: filled is a win, outlined is a loss, and the number is the turn it ended.</p>
+  </header>
+
+  __LADDER__
+  <div class="key" aria-hidden="true">
+    <span><svg viewBox="0 0 15 17.3"><polygon points="7.5,0.5 14.5,4.3 14.5,13 7.5,16.8 0.5,13 0.5,4.3" style="fill:var(--ink2)"/></svg>Science victory</span>
+    <span><svg viewBox="0 0 15 17.3"><polygon points="7.5,0.5 14.5,4.3 14.5,13 7.5,16.8 0.5,13 0.5,4.3" style="fill:none"/></svg>An AI civ won first</span>
+    <span><svg viewBox="0 0 15 17.3"><polygon points="7.5,0.5 14.5,4.3 14.5,13 7.5,16.8 0.5,13 0.5,4.3" style="fill:none;stroke-dasharray:3 2.5"/></svg>Playing now</span>
+    <span>Open a hex for that game's write-up</span>
+  </div>
+
+  <section aria-labelledby="h-found">
+    <h2 id="h-found">What the games show</h2>
+    <div class="findings">
+      <div>
+        <h3>Both top models stop winning at Emperor.</h3>
+        <p>Opus 5.5 and Fable 5.2 won all 7 of their games on Prince and King and lost all 6 on Emperor and Deity, last in score each time. Sonnet 5.5 has won all 3 of its games, King included (game 22), and has not played Emperor yet. On Emperor the best AI civ had nearly twice their techs by turn 50, and game 21, Opus on Emperor again, lost 17 turns sooner than game 20.</p>
+      </div>
+      <div>
+        <h3>Fable 5.2 wins 30 to 50 turns sooner.</h3>
+        <p>Its three wins ended on turns 168 to 170, 14 to 21 techs ahead of the best AI. Opus 5.5 won on turns 200 to 218 and Sonnet 5.5 on 219 to 223, at most 8 techs ahead at the end.</p>
+      </div>
+      <div>
+        <h3>Its speed costs more, not less.</h3>
+        <p>Fable 5.2 runs $0.42 to $0.53 a turn, Opus 5.5 $0.27 to $0.30 and Sonnet 5.5 $0.15 to $0.16, so its shorter wins still cost $71 to $92, against $56 to $64 for Opus and $34 to $36 for Sonnet. Costs are API list prices; the games ran on Claude subscriptions.</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-lead">
+    <h2 id="h-lead">How far ahead in techs</h2>
+    <p class="sub">Techs researched minus the best AI civ's, every turn of every game. Above the zero line the agent leads. Hover a chart for each game's value on that turn.</p>
+    <div class="legend" id="legend"></div>
+    <div class="panels" id="leads"></div>
+  </section>
+
+  <section aria-labelledby="h-cost">
+    <h2 id="h-cost">What each game cost</h2>
+    <p class="sub">API-equivalent dollars per game at list prices, from the session's own token counts. Filled dots are wins.</p>
+    <div id="costs" style="margin-top:22px"></div>
+    <div class="tablewrap">__MODELS__</div>
+  </section>
+
+  <section aria-labelledby="h-all">
+    <h2 id="h-all">Every game on the ladder</h2>
+    <p class="sub">The harness got fixes between games, listed in each write-up, so the early games carry friction the later ones do not. Tech gap is the agent's techs minus the best AI's on the last turn.</p>
+    <div class="tablewrap">__LEDGER__</div>
+  </section>
+
+  <section aria-labelledby="h-off">
+    <h2 id="h-off">Off the ladder</h2>
+    <p class="sub">Other setups on the same map: Quick speed, a Domination goal, and hotseat games with Claude in more than one seat.</p>
+    <div class="tablewrap">__OTHER__</div>
+  </section>
+
+  <section aria-labelledby="h-how">
+    <h2 id="h-how">How a game runs</h2>
+    <div class="prose">
+      <p>The agent plays Sumeria (Gilgamesh) against Rome, Greece, Brazil, Germany, America, Egypt and Spain on a standard Pangaea map, always the same seed and start, in the base game at Online speed with a 250-turn limit.</p>
+      <p>One Claude Code session plays the whole game on a Windows PC, through civ6-mcp, an MCP server that reads the game state and gives orders. Nobody steps in; the session compacts its context as it goes. Each write-up lists the game's tokens, costs, harness problems and any outside action.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-var">
+    <h2 id="h-var">Other civs, other victories</h2>
+    <p class="sub">Opus 5.5 only, on Prince, on the same Pangaea map and seed, playing a civ built for the goal. With another leader the start and the AI civs change too (Scythia meets Rome, Greece, Brazil, Germany, America, Egypt and Sumeria; Arabia meets Russia, India, China, Greece, America, England and Sumeria; France meets Russia, India, Brazil, Greece, America, Egypt and Sumeria; the Aztecs meet Russia, America, Sumeria, China, India, Greece and England; Russia meets Egypt, Greece, Germany, Rome, Brazil, America and Sumeria; Germany meets America, Greece, India, Egypt, Sumeria, Brazil and Russia; Greece meets Brazil, America, India, Egypt, Germany, Sumeria and Russia; India and Japan, from the same start, meet Russia, Greece, Brazil, Germany, America, Egypt and Sumeria; China meets India, England, Russia, America, Sumeria, Brazil and Greece; Kongo meets Egypt, Greece, Germany, Brazil, Russia, Sumeria and America; Rome meets Russia, Germany, Brazil, Sumeria, Greece, Egypt and America), so these games compare less directly than the ladder.</p>
+    <p class="sub">Game 4 won Domination as Sumeria on turn 169; game 24 won it as Scythia on turn 149, 20 turns sooner and for $18.62 less. Game 25 won the benchmark's first Religious victory as Arabia on turn 159, for $50.03, the cheapest Opus win until game 32. Game 28 won Domination as the Aztecs on turn 122, the fastest of the three, for $57.57. It took seven capitals between turns 43 and 122. That game also showed a harness fault: five AI peace offers were closed unread and reported as war declarations. Replayed live, India had offered peace and 48 gold a turn. Fixed from game 29.</p>
+    <p class="sub">Game 26 lost as France: Greece, an ally of Opus's, won a Science victory on turn 242 while France was 2nd in score with the most culture. civ6-mcp's victory report had counted France's tourists the wrong way and showed it out of reach of a culture win the game itself called imminent; the report now uses the game's own count. Game 27 replayed France on the fixed harness, which also added theological combat and an excavate order for Archaeologists, and won the benchmark's first Culture victory on turn 195, for $51.28: 137 visiting tourists against Egypt's 135 domestic. Opus also played differently from the start, so one pair of games can't split the win between harness and play.</p>
+    <p class="sub">Game 29 lost as Russia: Egypt won a Culture victory on turn 224, with Russia 2nd in score. Orthodoxy was the majority in 6 of 8 civs, and Germany and Sumeria held out. The 10-turn snapshots had shown Egypt's culture count from turn 170 (31 of 113 tourists), and Opus acted only on turn 216, with a war that took nothing. Its 56 bought Apostles never fought: the tool description did not say they could. That, a religion count that counted the wrong cities, a formal war answered with "send it again" and the missing Evangelize Belief order are fixed for the next games. $90.88, 9.0 hours.</p>
+    <p class="sub">Game 30 won Science as Germany on turn 213, in the range of Opus's four Sumeria wins (turns 200 to 224), for $57.03 in 4.9 hours. It was last of 8 at turn 50, then 1st at turn 100 with 9 cities. Greece and America declared war and took nothing, and America's peace offer reached Opus with its terms, as the game 28 fix intended. The Mars Reactor came from Aachen, sped up by an Encampment for the Integrated Space Cell policy and every trade route. </p>
+    <p class="sub">Game 31 replayed game 29's Russia start on the fixed harness and lost again, this time to Greece's Science victory on turn 223, with Orthodoxy the majority in 4 of 8 civs (game 29: 6). Barbarians slowed the start, and three wars on Greece did not stop its space projects: the game refused to pillage its Spaceport with no reason given. Opus used the new religion count and theological combat (17 attacks, 6 kills), but never found the Evangelize Belief order, which the tool's list of actions did not name, and 58 of its moves came back "BLOCKED - need Open Borders": open borders it bought in a deal lasted 0 turns, because civ6-mcp gave the agreement no duration. Both are fixed from game 33. $84.74, 6.9 hours.</p>
+    <p class="sub">Game 32 won Culture as Greece on turn 153, the earliest Culture win here and the cheapest Opus win ($43.09, 3.9 hours, one session, no tool errors). Greece had 10 cities by turn 80 and far more culture than any AI, but visiting tourists lagged until museums, 48 Great Works, Mary Leakey's artifact boost and trade routes closed the gap: 86 visitors against the 82 it needed. Two more harness faults surfaced: friendship declarations civ6-mcp reported as accepted that the AI had turned down, and Greece's own open-borders swaps, empty for the same 0-turn reason. Both are fixed from game 33. </p>
+    <p class="sub">Game 33 won Religious as India on turn 241, 1st of 8, for $95.39 in 9.0 hours: the goal Opus had lost twice as Russia. Hinduism stalled at 2 of 6 civs met by turn 110, so Opus went to war for it, taking four Brazilian cities including Rio, Catholicism's holy city, then pillaging Sumeria's Campuses while its space race stood at 2 of 5. Egypt's Inquisitors held out until the last turns. On the fixed harness, Opus found and used the Evangelize Belief order. A new note on moves that stopped short sometimes showed a stale count of moves; that is fixed now.</p>
+    <p class="sub">Game 34 won Domination as Japan on turn 236, 1st of 8, for $87.65 in 8.4 hours: Opus's fourth Domination win in four tries, and the latest. From India's start it met only Russia for 100 turns, then took the rivals one or two at a time, making peace for tribute once each capital fell: St. Petersburg on turn 112, Washington, the seventh, on turn 236. It took and kept 24 cities and ended with 33.</p>
+    <p class="sub">Game 35 won Science as China on turn 166, 1st of 8, for $52.41 in 4.9 hours: the earliest Opus Science win here (Sumeria 200 to 224, Germany 213). It took Greece's Pharsalos early, led in score from turn 51, and built all five space projects in Xi'an, finishing the last with a Great Engineer bought for 3,335 gold; no AI built a Spaceport. The harness had no order for China's builder charges on wonders, and India built the Great Library Opus had placed. Both are fixed from game 37.</p>
+    <p class="sub">Game 36 won Culture as Kongo on turn 203, 2nd of 8 in score, for $63.02 in 6.6 hours: the closest Culture finish. Kongo had the most culture from turn 100 and twice Egypt's tourism from turn 150, but Egypt held the most domestic tourists; a Great Merchant that adds tourism to every Campus, and a Campus in every city, closed the last gap of 30, and Kongo won by one. Its Naturalist never found a National Park tile, with no reason given: civ6-mcp sent it the wrong order, and replayed on the fixed harness it made a park at Mbumbi.</p>
+    <p class="sub">Game 37 won Domination as Rome on turn 176, 1st of 8, for $69.47 in 7.8 hours: Opus's fifth Domination win in five tries. From turn 61 it fought one rival at a time, refused peace until each capital fell, then took peace with tribute (Egypt paid 282 gold and 128 a turn): St. Petersburg on turn 72, Washington, the seventh, on turn 176. It kept all 18 cities it took and lost none.</p>
+    <p class="sub">Game 38 won Religious as Spain on turn 161, 2nd of 8 in score, for $53.54 in 5.7 hours: 80 turns before India's win and the first Religious game with no war. Egypt's Judaism led until about turn 115; then 48 bought Apostles turned four civs, theological combat cleared Egypt's Inquisitors, and two spreads in Germany's capital made it 8 of 8. Spain accepted alliances from Sumeria, Rome and Brazil, which civ6-mcp reported as refused while the game had formed them; that is fixed from game 39.</p>
+    <p class="sub">Game 39 won Culture as Egypt on turn 144, 1st of 8, for $41.05 in 3.6 hours: the earliest Culture win here and the cheapest and quickest Opus win. A surprise war on India stalled at Delhi and ended in peace with tribute; then 24 Great People, seven wonders, 53 Great Works and open borders bought from five civs. Tourism doubled when Computers finished on turn 136, and Egypt passed Brazil's domestic tourists eight turns later. Game 40 plays Norway (Harald Hardrada) for Domination on Emperor, the first game with another civ above Prince.</p>
+    <p class="sub">Game 40 lost on Emperor as Norway: Germany won a Science victory on turn 187, with Norway tied 4th of 8, for $66.21 in 5.4 hours. Three offensives stalled against Renaissance walls, Artillery and a Tank (Brazil with Germany joining in, then Russia twice) before Bombers and seven Artillery took Manaus, Fortaleza, Rio de Janeiro and Sumeria's Adab on turns 173 to 183. Opus noticed Germany's first space project on turn 128, called it a possible anomaly, and declared war on Germany only at 4 of 5. Three harness bugs from it are fixed: war on a city-state never took, an air strike out of sight was refused with no reason, and siege units were estimated as melee.</p>
+    <p class="sub">Game 41 lost on King as England: Sumeria won a Science victory on turn 234, with England 2nd of 8 and 19 cities, for $91.41 in 8.7 hours. England held three of the seven rival capitals (St. Petersburg, Delhi and Rio de Janeiro), but the first fell only on turn 143, after two wars on Russia ended in peace. A mid-turn policy swap cost about 430 gold that the tool never mentioned, and the debt brought rebels. Sumeria sat at 4 of 5 space projects for 14 turns while Opus answered with spies alone. Game 42 plays America (Teddy Roosevelt) for Culture on Emperor.</p>
+    <p class="sub">Game 42 lost on Emperor as America: Arabia won a Science victory on turn 194, with America 6th of 8, for $55.49 in 4.9 hours. A slow start (last in score on turn 50) put the first Great Work on turn 98; Russia declared war twice and paid for peace both times. Film Studios in all eight cities and five wonders raised tourism from 77 to 452, and on turn 189 America had 259 of the 379 visiting tourists it needed. Six of its eight space-race sabotage missions went to Greece, which stayed at 4 of 5, while Arabia finished. All four Opus games on Emperor ended in an AI Science victory. Game 43 replays game 28 (Aztecs, Domination, Prince) without the leaked city list, and game 44 plays Brazil (Pedro II) for Religious on King.</p>
+    <p class="sub"><strong>A leak found after game 41.</strong> When the game would send a Trader nowhere, the trade route list showed every city of every civ at peace with the player, including civs it had not met. That happened in 25 of games 1 to 41, and again in game 42. In the Domination wins of games 28, 34 and 37, Opus wrote the unmet rivals' capitals into its notes on turns 30, 38 and 58, long before it met those civs, so those wins had a map the game would not have given them. Fixed from game 43.</p>
+    <p class="sub">Game 43 replayed game 28 (Aztecs, Prince, same seed) without the leak and won Domination too, on turn 164 instead of 122, 1st of 8 with 37 cities, for $78.37 in 7.9 hours. It met England, the last rival, only on turn 126, and took the seven capitals between turns 52 and 164. It also started slower (4 cities on turn 50 to game 28's 8), partly because an order to a unit upgraded the turn before moved a settler into barbarian hands: the old id pointed at the settler. Fixed from game 44, along with game 42's war-turn refusals: an AI deal left open behind a war declaration made the game refuse orders, and the harness now names any open session. 
+    <p class="sub">Game 44 lost as Brazil on King: India won a Culture victory on turn 124, with Brazil 2nd of 8, for $48.86 in 4.5 hours. Catholicism was the majority religion in 7 of 8 civs; Opus counted only the six Russian cities it had seen and planned for one more conversion where two were needed. The end-of-turn summary showed India at 36 of the 49 visiting tourists it needed on turn 119, but Opus never checked the victory progress, and it had allied with India with three times its army. Game 45 replayed game 43 on King (same seed, start and rivals) and was stopped on turn 56 to end the series: the Aztecs matched game 43's score but were last of 8, and the siege of St. Petersburg, which fell on turn 52 on Prince, had stalled. The series ends here.
+    <div class="tablewrap">__VARIANTS__</div>
+  </section>
+
+  <footer>
+    <p>Built __BUILT__ from <a href="https://github.com/cristian-frunze/civ6-benchmark">github.com/cristian-frunze/civ6-benchmark</a>.</p>
+    <p>Per-game cost and pace charts: <a href="../civ6-results/">civ6-results</a>.</p>
+  </footer>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const D = __DATA__;
+const NS = 'http://www.w3.org/2000/svg';
+const MODEL = Object.fromEntries(D.models.map(m => [m.key, m]));
+const tip = document.getElementById('tip');
+
+function placeTip(x, y) {
+  const r = tip.getBoundingClientRect(), pad = 12;
+  let left = x + 16, top = y + 16;
+  if (left + r.width > innerWidth - pad) left = x - r.width - 16;
+  if (left < pad) left = pad;
+  if (top + r.height > innerHeight - pad) top = y - r.height - 16;
+  if (top < pad) top = pad;
+  tip.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+}
+function showTip(html, x, y) { tip.innerHTML = html; tip.classList.add('on'); placeTip(x, y); }
+function hideTip() { tip.classList.remove('on'); }
+
+// hexes, dots: anything with data-tip
+document.addEventListener('pointermove', e => {
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (t) showTip(t.dataset.tip, e.clientX, e.clientY);
+  else if (!e.target.closest('.hit')) hideTip();
+});
+document.addEventListener('focusin', e => {
+  const t = e.target.closest('[data-tip]');
+  if (!t) return;
+  const r = t.getBoundingClientRect();
+  showTip(t.dataset.tip, r.right, r.top);
+});
+document.addEventListener('focusout', hideTip);
+addEventListener('scroll', hideTip, { passive: true });
+
+function el(name, attrs, parent) {
+  const n = document.createElementNS(NS, name);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+const color = g => `var(--${MODEL[g.model].color})`;
+
+// legend
+(function legend() {
+  const host = document.getElementById('legend');
+  for (const m of D.models) {
+    const s = document.createElement('span');
+    const dash = m.key === 'opusmed' ? ' stroke-dasharray="5 3.5"' : '';
+    s.innerHTML = `<svg viewBox="0 0 22 8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" style="stroke:var(--${m.color});stroke-width:2.5"${dash}/></svg>${m.name}`;
+    host.appendChild(s);
+  }
+  const w = document.createElement('span');
+  w.innerHTML = `<svg viewBox="0 0 22 8" aria-hidden="true"><circle cx="11" cy="4" r="4" style="fill:var(--ink2)"/></svg>won`;
+  host.appendChild(w);
+  const l = document.createElement('span');
+  l.innerHTML = `<svg viewBox="0 0 22 8" aria-hidden="true"><circle cx="11" cy="4" r="3.6" style="fill:none;stroke:var(--ink2);stroke-width:1.8"/></svg>lost`;
+  host.appendChild(l);
+})();
+
+const ALL = D.games.flatMap(g => g.lead.map(p => p[1]));
+const LO = Math.floor(Math.min(...ALL) / 10) * 10, HI = Math.ceil(Math.max(...ALL) / 10) * 10;
+const TMAX = 230;
+for (const g of D.games) { g.at = new Map(g.lead.map(p => [p[0], p[1]])); g.last = g.lead[g.lead.length - 1][0]; }
+
+function valueAt(g, t) {
+  if (t > g.last || t < g.lead[0][0]) return null;
+  for (let k = t; k >= g.lead[0][0]; k--) if (g.at.has(k)) return g.at.get(k);
+  return null;
+}
+
+function leadCharts() {
+  const host = document.getElementById('leads');
+  host.innerHTML = '';
+  for (const lv of D.levels) {
+    const games = D.games.filter(g => g.level === lv);
+    const wins = games.filter(g => g.won).length;
+    const fig = document.createElement('figure');
+    fig.className = 'panel';
+    fig.innerHTML = `<figcaption><b>${lv}</b><span>${games.length} game${games.length > 1 ? 's' : ''}, ${wins} won</span></figcaption>`;
+    host.appendChild(fig);
+    const W = Math.max(fig.clientWidth, 280), H = W < 420 ? 210 : 236, m = { l: 34, r: 14, t: 10, b: 26 };
+    const X = t => m.l + t / TMAX * (W - m.l - m.r);
+    const Y = v => m.t + (HI - v) / (HI - LO) * (H - m.t - m.b);
+    const svg = el('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, role: 'img',
+      'aria-label': `${lv}: tech lead over the best AI by turn for games ${games.map(g => g.n).join(', ')}` }, fig);
+    for (let v = LO; v <= HI; v += 10) {
+      el('line', { class: v === 0 ? 'zero' : 'grid', x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v) }, svg);
+      el('text', { class: 'axl', x: m.l - 7, y: Y(v) + 4, 'text-anchor': 'end' }, svg).textContent = v > 0 ? `+${v}` : v;
+    }
+    for (const t of [0, 50, 100, 150, 200]) el('text', { class: 'axl', x: X(t), y: H - 6, 'text-anchor': 'middle' }, svg).textContent = t === 0 ? 'turn 0' : t;
+    const paths = games.map(g => {
+      const d = g.lead.map(([t, v], j) => `${j ? 'L' : 'M'}${X(t).toFixed(1)} ${Y(v).toFixed(1)}`).join('');
+      return el('path', { class: 'ln' + (g.model === 'opusmed' ? ' med' : ''), d, style: `stroke:${color(g)}` }, svg);
+    });
+    for (const g of games) {
+      const [t, v] = g.lead[g.lead.length - 1];
+      el('circle', { class: 'end ' + (g.won ? 'won' : 'lost'), cx: X(t), cy: Y(v), r: 4.5, style: `--c:${color(g)}` }, svg);
+    }
+    const xh = el('line', { class: 'xh', y1: m.t, y2: H - m.b, x1: 0, x2: 0 }, svg);
+    const hit = el('rect', { class: 'hit', x: m.l, y: 0, width: W - m.l - m.r, height: H - m.b, fill: 'transparent' }, svg);
+    const move = e => {
+      const r = svg.getBoundingClientRect(), sx = W / r.width;
+      const px = (e.clientX - r.left) * sx, py = (e.clientY - r.top) * sx;
+      const t = Math.max(1, Math.min(TMAX, Math.round((px - m.l) / (W - m.l - m.r) * TMAX)));
+      const rows = games.map((g, i) => ({ g, i, v: valueAt(g, t) })).filter(o => o.v !== null);
+      if (!rows.length) { svg.classList.remove('hovering'); hideTip(); return; }
+      let hot = rows[0];
+      for (const o of rows) if (Math.abs(Y(o.v) - py) < Math.abs(Y(hot.v) - py)) hot = o;
+      svg.classList.add('hovering');
+      paths.forEach((p, i) => p.classList.toggle('hot', i === hot.i));
+      xh.setAttribute('x1', X(t)); xh.setAttribute('x2', X(t));
+      rows.sort((a, b) => b.v - a.v);
+      const body = rows.map(o => `<tr class="${o === hot ? 'hot' : ''}" style="--c:${color(o.g)}"><td><i class="sw"></i>${o.g.n}</td><td>${MODEL[o.g.model].name}</td><td>${o.v > 0 ? '+' + o.v : o.v}</td></tr>`).join('');
+      showTip(`<b>Turn ${t}</b> <span class="tm">techs vs best AI</span><table>${body}</table>`, e.clientX, e.clientY);
+    };
+    hit.addEventListener('pointermove', move);
+    hit.addEventListener('pointerdown', move);
+    hit.addEventListener('pointerleave', () => { svg.classList.remove('hovering'); paths.forEach(p => p.classList.remove('hot')); hideTip(); });
+  }
+}
+
+function costPlot() {
+  const host = document.getElementById('costs');
+  host.innerHTML = '';
+  const W = Math.max(host.clientWidth, 300), narrow = W < 560;
+  const m = { l: narrow ? 92 : 170, r: 18, t: 6, b: 28 }, rowH = narrow ? 42 : 46;
+  const rows = D.models.filter(mm => D.games.some(g => g.model === mm.key));
+  const H = m.t + rows.length * rowH + m.b, XMAX = 110;
+  const X = u => m.l + u / XMAX * (W - m.l - m.r);
+  const svg = el('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Cost per game in dollars, by model' }, host);
+  for (let u = 0; u <= 100; u += 20) {
+    el('line', { class: 'grid', x1: X(u), x2: X(u), y1: m.t, y2: H - m.b }, svg);
+    el('text', { class: 'axl', x: X(u), y: H - 8, 'text-anchor': 'middle' }, svg).textContent = `$${u}`;
+  }
+  rows.forEach((mm, ri) => {
+    const cy = m.t + ri * rowH + rowH / 2;
+    el('text', { class: 'rowl', x: 0, y: cy + 5 }, svg).textContent = narrow ? mm.name.replace(' medium', ' med.') : mm.name;
+    const gs = D.games.filter(g => g.model === mm.key).sort((a, b) => a.usd - b.usd);
+    let prevX = -99, flip = 1;
+    for (const g of gs) {
+      const x = X(g.usd);
+      let y = cy;
+      if (x - prevX < 15) { y = cy + flip * 7; flip = -flip; } else flip = 1;
+      prevX = x;
+      const tipHtml = `<b>${g.n}, ${MODEL[g.model].name} on ${g.level}</b><br>${g.result}<br>$${g.usd.toFixed(2)} for ${g.turn} turns, $${g.per_turn.toFixed(2)} a turn`;
+      const grp = el('g', { 'data-tip': tipHtml, tabindex: 0, 'aria-label': `${g.n}: $${g.usd.toFixed(2)}, ${g.won ? 'won' : 'lost'}` }, svg);
+      el('circle', { cx: x, cy: y, r: 12, fill: 'transparent' }, grp);
+      el('circle', { class: 'dot ' + (g.won ? 'won' : 'lost'), cx: x, cy: y, r: 7, style: `--c:${color(g)}` }, grp);
+    }
+  });
+}
+
+function draw() { leadCharts(); costPlot(); }
+draw();
+let rt;
+addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(draw, 150); });
+document.fonts && document.fonts.ready.then(draw);
+</script>
+</body>
+</html>
