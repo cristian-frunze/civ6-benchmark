@@ -1267,6 +1267,51 @@ def religion_fix(text: str, vp, rel) -> str:
     return _VENDOR_RELIGION_RE.sub(lambda m: section + "\n", text, count=1)
 
 
+
+# get_religion_spread lists each civ's cities the player has seen, by tile, and never says how many cities a civ has.
+# In game 44 it showed six of Russia's eight cities, three of them Catholic, and Opus planned for one more conversion
+# ("assuming Russia has only 6 cities") where two were needed; Russia had nine by the end. The tool now ends with each
+# met civ's count of all its cities, as the end-of-turn summary's Religion section gives it.
+def religion_spread_lua() -> str:
+    """RELMINE|me|religion founded (-1) and RELCIV|pid|cities|following yours|name for you and each met major civ."""
+    return (
+        "local me = Game.GetLocalPlayer() local mine = -1 local d = Players[me]:GetDiplomacy() "
+        "pcall(function() mine = Players[me]:GetReligion():GetReligionTypeCreated() end) "
+        "print('RELMINE|' .. me .. '|' .. tostring(mine)) "
+        "for i = 0, 62 do local q = Players[i] "
+        "  if q and q:IsMajor() and q:IsAlive() and (i == me or d:HasMet(i)) then "
+        "    local n, f = 0, 0 "
+        "    for _, c in q:GetCities():Members() do n = n + 1 "
+        "      local r = -1 pcall(function() r = c:GetReligion():GetMajorityReligion() end) "
+        "      if mine >= 0 and r == mine then f = f + 1 end end "
+        "    local nm = (Locale.Lookup(PlayerConfigurations[i]:GetCivilizationShortDescription()):gsub('|', '/')) "
+        "    print('RELCIV|' .. i .. '|' .. n .. '|' .. f .. '|' .. nm) "
+        "end end print('---END---')"
+    )
+
+
+def religion_spread_note(lines) -> str:
+    """The count of all each met civ's cities following the player's religion; "" without a religion or rows."""
+    me, mine, civs = None, -1, []
+    for ln in lines:
+        p = ln.split("|")
+        try:
+            if p[0] == "RELMINE" and len(p) >= 3:
+                me, mine = int(p[1]), int(p[2])
+            elif p[0] == "RELCIV" and len(p) >= 5:
+                civs.append((int(p[1]), int(p[2]), int(p[3]), p[4]))
+        except ValueError:
+            continue
+    if me is None or mine < 0 or not civs:
+        return ""
+    out = ["Your religion in each civ you have met, counting all of its cities (the list above shows only the cities "
+           "you have seen; a civ follows a religion when more than half of its cities do):"]
+    for pid, n, f, name in civs:
+        need = n // 2 + 1
+        state = "majority" if n and f >= need else f"{need - f} more needed"
+        out.append(f"  {name}: {f} of {n} cities, {state}" + (" <--" if pid == me else ""))
+    return "\n".join(out)
+
 def district_state_lua(x: int, y: int) -> str:
     """The district at (x, y) after an attack: DEF|owner|is it the player's|garrison hp/max|walls hp/max (one line)."""
     x, y = int(x), int(y)
@@ -2433,9 +2478,9 @@ def war_then_sessions_note(msg, sessions_text: str) -> str:
     if not sessions_text or sessions_text.startswith("No pending"):
         return msg
     return (msg + "\nAnother diplomacy session is open behind the war declaration. Answer it first, before any "
-            "orders: the game refuses orders while one is open (replayed on game 42's turn 145, a Field Cannon's attack "
-            "was refused with India's deal open and went through once the deal was answered). Then end_turn again.\n"
-            + sessions_text)
+            "orders: the game can refuse orders while one is open (replayed on game 42's turn 145, a Field Cannon's "
+            "attack was refused with India's deal open and went through once the deal was answered). Then end_turn "
+            "again.\n" + sessions_text)
 
 
 
@@ -2443,9 +2488,10 @@ def session_open_note(out, sessions_text: str) -> str:
     """A refused order's result, with the diplomacy sessions open while it was refused (sessions_text: narrated)."""
     if not (isinstance(out, str) and "Error:" in out) or not sessions_text or sessions_text.startswith("No pending"):
         return out
-    return (out + "\nA diplomacy session is open, and the game refuses orders while one is (replayed on game 42's turn "
-            "145, a Field Cannon's attack was refused with India's deal open and went through once the deal was "
-            "answered). Answer it, then send the order again.\n" + sessions_text)
+    return (out + "\nA diplomacy session is open, and the game can refuse orders while one is, whatever reason the "
+            "refusal gives (replayed on game 42's turn 145, a Field Cannon's attack was refused with India's deal "
+            "open and went through once the deal was answered). If the order should have worked, answer the session "
+            "and send it again.\n" + sessions_text)
 
 # Great Writers, Artists and Musicians hold several Great Works and place one per activation; the unit stays until the
 # last is placed. civ6-mcp reports the charges left only from GetActionCharges, which is 0 for them, so each

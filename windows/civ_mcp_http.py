@@ -2754,6 +2754,27 @@ def _says_session_open(fn):
     return wrapper
 
 
+def _counts_all_cities(fn):  # bench_compat.religion_spread_note has why (game 44)
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        out = await fn(*args, **kwargs)
+        if not isinstance(out, str) or out.startswith("Error"):
+            return out
+        ctx = kwargs.get("ctx") or next((a for a in args if isinstance(a, Context)), None)
+        try:
+            note = bc.religion_spread_note(await srv._get_game(ctx).conn.execute_write(bc.religion_spread_lua(),
+                                                                                       timeout=10.0))
+        except Exception:
+            logging.getLogger("civ_mcp_http").warning("counting each civ's cities for get_religion_spread failed",
+                                                      exc_info=True)
+            return out
+        return out.rstrip("\n") + "\n\n" + note if note else out
+
+    return wrapper
+
+
+_t = mcp._tool_manager.get_tool("get_religion_spread")
+_t.fn = _counts_all_cities(_t.fn)
 for _tool in mcp._tool_manager.list_tools():
     if _tool.name in _ORDER_TOOLS:
         _tool.fn = _says_session_open(_tool.fn)

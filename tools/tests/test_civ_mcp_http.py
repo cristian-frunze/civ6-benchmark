@@ -2955,7 +2955,8 @@ async def main():
     GAME = SessGame([india])
     out = await ns["_says_session_open"](refuses)(ctx=CTX, unit_id=5111808, action="attack")
     check("refused with a deal open: the session named", out.startswith(refused + "\nA diplomacy session is open, and "
-          "the game refuses orders while one is (replayed on game 42's turn 145") and "Answer it, then send the order again.\n1 pending diplomacy "
+          "the game can refuse orders while one is, whatever reason the refusal gives") and "If the order should have worked, "
+          "answer the session and send it again.\n1 pending diplomacy "
           "session(s):\n  India (Gandhi)" in out and "use respond_to_trade(other_player_id=2" in out, out)
     GAME = SessGame([india])
     out = await ns["_says_session_open"](obeys)(ctx=CTX, unit_id=5111808, action="attack")
@@ -2976,6 +2977,39 @@ async def main():
     out = await tools.get_tool("unit_action").fn(ctx=CTX, unit_id=589829, action="move", target_x=36, target_y=16)
     check("stale id with a session open: the id refusal alone", out.startswith("Error: UNIT_NOT_FOUND|")
           and "diplomacy session" not in out and GAME.reads == 0, out)
+
+    # Game 44: get_religion_spread listed six of Russia's eight cities, and Opus planned for one conversion, not two.
+    # The tool now ends with every met civ's count of all its cities.
+    spread_lines = ["RELMINE|0|3", "RELCIV|0|7|7|Brazil", "RELCIV|1|8|3|Russia", "RELCIV|6|4|3|England",
+                    "RELCIV|2|0|0|India", lq.SENTINEL]
+    note = bc.religion_spread_note(spread_lines)
+    check("religion spread: every met civ's count of all its cities", note == "Your religion in each civ you have met, "
+          "counting all of its cities (the list above shows only the cities you have seen; a civ follows a religion "
+          "when more than half of its cities do):\n  Brazil: 7 of 7 cities, majority <--\n  Russia: 3 of 8 cities, 2 more "
+          "needed\n  England: 3 of 4 cities, majority\n  India: 0 of 0 cities, 1 more needed", note)
+    check("religion spread: no religion founded, nothing added", bc.religion_spread_note(["RELMINE|0|-1",
+          "RELCIV|0|3|0|Brazil"]) == "" and bc.religion_spread_note([]) == "")
+    lua = bc.religion_spread_lua()
+    check("religion spread Lua: met civs only, every city counted", "d:HasMet(i)" in lua and "GetCities():Members()" in lua
+          and "GetMajorityReligion()" in lua and "IsRevealed" not in lua and lua.endswith("print('---END---')"))
+    class SpreadConn:
+        def __init__(self, lines): self.lines, self.sent = lines, []
+        async def execute_write(self, lua, timeout=None):
+            self.sent.append(lua)
+            if isinstance(self.lines, Exception): raise self.lines
+            return self.lines
+    async def spread(ctx=None): return "Religious Victory Tracker:\n  Catholicism: majority in 7/8 civilizations !! IMMINENT\n"
+    GAME = types.SimpleNamespace(conn=SpreadConn(spread_lines))
+    out = await ns["_counts_all_cities"](spread)(ctx=CTX)
+    check("religion spread: the counts follow the tool's list", out == "Religious Victory Tracker:\n  Catholicism: "
+          "majority in 7/8 civilizations !! IMMINENT\n\n" + note, out)
+    GAME = types.SimpleNamespace(conn=SpreadConn(RuntimeError("lua")))
+    out = await ns["_counts_all_cities"](spread)(ctx=CTX)
+    check("religion spread: counts unreadable, the list as before", out.startswith("Religious") and out.endswith("IMMINENT\n"))
+    chain, f = [], tools.get_tool("get_religion_spread").fn
+    while f is not None:
+        chain.append(f.__code__); f = getattr(f, "__wrapped__", None)
+    check("get_religion_spread counts all cities", ns["_counts_all_cities"](stock).__code__ in chain and chain[0] is bound)
 
 asyncio.run(main())
 
